@@ -192,7 +192,6 @@ def test_cannot_override_index_model_or_owned_listener(tmp_path, extra):
         ("systemd", False, "systemd is required"),
         ("cgroup_v2", False, "cgroup v2"),
         ("gpu_available", False, "nvidia-smi"),
-        ("gpu_processes", "99 foreign", "compute process"),
     ],
 )
 def test_resource_preparation_refuses_before_materialized_settings(tmp_path, fact, value, message):

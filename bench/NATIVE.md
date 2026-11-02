@@ -188,7 +188,7 @@ unchanged.
 
 A new production profile can add `typed_settings` as an absolute `{path,sha256}`
 file specification. Its contents use the current `inferssd-settings 1` parser
-and complete fourteen-key registry. `expert.source` must equal the exact ordered
+and complete registry. `expert.source` must equal the exact ordered
 `alias`/`aliases` paths;
 retired control environments are refused. The wrapper owns `--ssd-settings` and
 `--ssd-telemetry`, creates a fresh native-events path per arm, and checks the

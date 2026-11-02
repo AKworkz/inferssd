@@ -308,7 +308,7 @@ The protected runner config may carry `comparison_bindings` with exactly `tiny`,
 `deepseek` and `muse`. Each model's binding is a JSON object with:
 
 - `schema_version: 1`, `kind: "legacy-to-typed"`.
-- `semantic_settings`: all keys of the reviewed 14-key registry generation, including inapplicable platform
+- `semantic_settings`: all keys of the reviewed registry generation, including inapplicable platform
   defaults. Values must have the registry's actual JSON types.
 - `sides.base` and `sides.candidate`: full `revision`, `profile_sha256`, complete
   `launch_policy`, `images` and `build` objects. The base must be exactly

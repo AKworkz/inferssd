@@ -16,7 +16,6 @@ Python resource. There are no environment mirrors or legacy-name aliases.
 | `vram.budget` | budget / bytes | `auto` | plan | linux |
 | `vram.max_slots` | integer / slots | `0` | plan | linux |
 | `vram.reserve_mib` | integer / MiB | `0` | launch | linux |
-| `vram.margin_mib` | integer / MiB | `64` | launch | linux |
 | `host.headroom_mib` | integer / MiB | `512` | plan | all |
 | `host.budget_mib` | integer / MiB | `0` | plan | darwin, windows |
 | `model.engram_prefetch` | integer / boolean | `0` | model | all |
@@ -31,9 +30,9 @@ ggml's threads (`-t`, `-tb`, `-C`, `-Cb`, `--cpu-strict`; see
 own I/O, prefetch and watch threads, and macOS, which cannot pin threads, only
 validates it. Zero decode participants leaves the measured/default policy; a
 positive value counts the leading ggml threads of each decode phase, and a
-decode call with fewer threads fails. The VRAM margin is at least reserve
-plus 64 MiB. Non-applicable platform keys cannot be explicitly set. The `vram.*`
-keys size the CUDA expert tier. `vram.budget = auto` gives the tier all the room
+decode call with fewer threads fails. Non-applicable platform keys cannot be
+explicitly set. The `vram.*` keys size the CUDA expert tier. `vram.budget = auto`
+gives the tier all the room
 the GPU admits; on a GPU that shares the host's memory, such as GB10, that is
 the host memory envelope below less the slots the next-layer prefetch lands in,
 which are all the RAM cache keeps beside a tier there (with `vram.budget = 0`
@@ -44,6 +43,17 @@ routed expert. An
 explicit nonzero budget without a CUDA backend is an error. On macOS the
 interface supports static settings only; it does not include an online adaptive
 controller.
+
+`vram.reserve_mib` is VRAM that prefill and decode leave free for other processes.
+On a discrete GPU it is kept against what this process holds, not against what the
+card has free: another process using the reserve takes nothing from the tier, and
+one going beyond it fails its own allocation. When other processes release memory
+beyond the reserve, the tier grows into it. The tier also leaves 64 MiB above the
+reserve for the driver's own memory. A reserve too large for the model fails at
+launch. The framework chooses 1024 MiB when other compute processes are on the GPU
+at launch, and 0 otherwise; a setting of yours replaces that choice. On a GPU that
+shares the host's memory, the reserve adds to the host memory floor below, and the
+tier gives memory back under pressure from any process.
 
 The host memory ledger has two terms on every platform. The envelope is a finite
 limit on this process's memory less a 512 MiB reserve: on Linux the tightest

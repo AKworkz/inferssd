@@ -106,7 +106,6 @@ def test_cpp_python_snapshot_exact(native_contract, tmp_path, platform, text):
         "cpu.io_cpus=1,1",
         "cpu.io_cpus=2-0",
         "unknown=0",
-        "vram.reserve_mib=64",
         "place.costs=cpu_fixed_us=nan",
         "place.costs=link_gbps=0",
         "place.costs=unknown=1",

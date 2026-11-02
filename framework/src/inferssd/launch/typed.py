@@ -383,8 +383,6 @@ def _resolve(
         if value.at("vram.budget").value != 0:
             if not s.value("gpu_available"):
                 raise ValueError("typed GPU execution requires nvidia-smi")
-            if s.text("gpu_processes").strip():
-                raise ValueError("the GPU already has a compute process")
     # The sink's I/O thread keeps its own CPUs; decode runs on the first decode threads.
     if set(cast(tuple[int, ...], value.at("cpu.io_cpus").value)) & set(
         threads.cpus + threads.decode_cpus

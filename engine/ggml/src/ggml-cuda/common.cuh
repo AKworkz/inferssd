@@ -1188,6 +1188,7 @@ struct ggml_cuda_pool_alloc {
 
 struct ggml_tensor_extra_gpu {
     void * data_device[GGML_CUDA_MAX_DEVICES]; // 1 pointer for each device for split tensors
+    size_t data_device_bytes[GGML_CUDA_MAX_DEVICES];
     cudaEvent_t events[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS]; // events for synchronizing multiple GPUs
 };
 

@@ -17,7 +17,7 @@ LEGACY_REVISION = "f5e6e26ff26d2014cccef0118048039b88163f54"
 SETTING_KEYS = frozenset((
     "expert.source", "cpu.io_cpus", "cpu.decode_participants", "prefetch.depth",
     "place.costs", "prefill.cpu_max_tokens", "vram.budget", "vram.max_slots",
-    "vram.reserve_mib", "vram.margin_mib", "host.headroom_mib", "host.budget_mib",
+    "vram.reserve_mib", "host.headroom_mib", "host.budget_mib",
     "model.engram_prefetch", "model.hc_fused",
 ))
 SETTING_GENERATIONS = (SETTING_KEYS,)
@@ -47,7 +47,7 @@ def validate_semantics(values):
 
     properties = schema()["properties"]
     if frozenset(properties) not in SETTING_GENERATIONS or frozenset(values) not in SETTING_GENERATIONS:
-        raise ValueError("reference adapter requires the explicit reviewed 14-key schema")
+        raise ValueError("reference adapter requires the explicit reviewed settings schema")
     if not set(values) <= set(properties):
         raise ValueError("installed settings registry cannot validate this binding generation")
     for key, value in values.items():

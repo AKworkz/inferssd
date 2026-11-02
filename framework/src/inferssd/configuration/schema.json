@@ -179,7 +179,7 @@
             "default": 0
         },
         "vram.reserve_mib": {
-            "description": "CUDA allocation reserve in MiB",
+            "description": "VRAM in MiB that prefill and decode leave free for other processes",
             "kind": "integer",
             "unit": "MiB",
             "producer": "launch",
@@ -190,19 +190,6 @@
             "minimum": 0,
             "maximum": 8192,
             "default": 0
-        },
-        "vram.margin_mib": {
-            "description": "Elastic safety margin in MiB, at least reserve plus 64",
-            "kind": "integer",
-            "unit": "MiB",
-            "producer": "launch",
-            "scope": "linux",
-            "cli": "--ssd-vram-margin-mib",
-            "default_literal": "64",
-            "type": "integer",
-            "minimum": 64,
-            "maximum": 8192,
-            "default": 64
         },
         "host.headroom_mib": {
             "description": "Host safety headroom in MiB",

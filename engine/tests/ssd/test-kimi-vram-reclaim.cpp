@@ -52,6 +52,24 @@ void model_get(int, size_t * free_bytes, size_t * total) {
 bool model_unified(int) { return true; }
 void model_reserve(int, size_t bytes) { published = bytes; }
 size_t model_free() { size_t free_bytes = 0, total = 0; model_get(0, &free_bytes, &total); return free_bytes; }
+// A discrete card under a reserve: `card_room` bytes are free when the tier first takes memory, less what this process
+// has taken since and what other processes have.
+ssd::gpu::reserve_budget card_budget;
+size_t card_room = 0, card_others = 0, card_reserve = 0, card_held_at_anchor = 0;
+size_t card_free() {
+    const size_t used = card_budget.held() - card_held_at_anchor + card_others;
+    return card_room > used ? card_room - used : 0;
+}
+void card_get(int, size_t * free_bytes, size_t * total) {
+    const size_t now = card_free();
+    card_budget.observe(now);
+    *free_bytes = card_budget.free_bytes(now, card_reserve); *total = size_t(64) << 30;
+}
+bool card_unified(int) { return false; }
+void card_hold(int, size_t bytes) { card_budget.hold(bytes); }
+void card_release(int, size_t bytes) { card_budget.release(bytes); }
+void card_anchor(int) { card_held_at_anchor = card_budget.held(); card_budget.anchor(card_free()); }
+void card_state(int, size_t * held_bytes, size_t * reachable) { *held_bytes = card_budget.held(); *reachable = card_budget.reachable(); }
 // The envelope the host-memory ledger reads: a cgroup memory.max, its usage, and a MemAvailable that never binds.
 struct envelope_files {
     uint64_t limit = 0, current = uint64_t(1) << 30;
@@ -315,6 +333,62 @@ int main() {
                 client->state().value.device_held == 16 * stride && !t.poisoned,
                 "an unarmed tier did not give a block back on unified memory");
         modeled = nullptr;
+    }
+    // A reserve on a discrete card is kept against what this process holds: other processes cannot take the tier's
+    // memory, and what they release beyond the reserve is grown into.
+    {
+        query.get = card_get; query.unified = card_unified; query.hold = card_hold; query.release = card_release;
+        query.anchor = card_anchor; query.state = card_state;
+        inputs.set("tier.watermark", "1");
+        inputs.set("tier.max_slots", "200");
+        inputs.set("tier.safety_mib", "2");
+        inputs.set("tier.margin_mib", "2");
+        inputs.set("tier.low_mib", "1");
+        inputs.set("tier.high_mib", "2");
+        const size_t line = size_t(2) << 20;
+        // A full block of 16 slots takes whole device pages, so three of them are 48 slots.
+        const size_t block = ssd::gpu::device_pages(16 * stride);
+        card_reserve = size_t(1) << 20; card_others = 0; card_room = line + 3 * block + stride / 2;
+        tier t(tier::automatic_budget, inputs.tier_policy(), nullptr, test_cpu_kernels());
+        const auto k = key(6, 0);
+        int slot = -1;
+        const auto token = [&](uint64_t n) { t.finish(out.data(), 256); t.drain(); t.drain_deferred(); t.begin(64, n, true); };
+        t.begin(64, 1, true); lifecycle_prepare(t, &k, 1, &slot);
+        require(!t.unified && t.slot_locations.size() == 48 && card_free() == line + stride / 2,
+                "the tier did not grow to the reserve and its margin");
+
+        // Another process takes the reserve, then the margin too: no block goes.
+        card_others = card_reserve;
+        token(2);
+        require(t.watermark_shrinks == 0 && t.slot_locations.size() == 48, "the tier gave way to another process's reserve");
+        card_others = line + stride / 2;
+        token(3);
+        require(t.watermark_shrinks == 0 && t.slot_locations.size() == 48, "the tier gave way to another process past the reserve");
+
+        // It releases all of that: the reserve is back, and the tier does not grow into it.
+        card_others = 0;
+        token(4);
+        require(t.watermark_grows == 0 && t.slot_locations.size() == 48, "the tier grew into the reserve");
+
+        // A process that held memory at the start exits: the tier grows into what is above the reserve and the margin.
+        card_room += block;
+        token(5);
+        require(t.watermark_grows == 1 && t.slot_locations.size() == 64 && card_free() == line + stride / 2,
+                "the tier did not grow into memory another process released");
+
+        // This process itself goes past the margin: the next boundary gives a block back, as it does not for others.
+        card_budget.hold(line);
+        token(6);
+        require(t.watermark_shrinks == 1 && t.slot_locations.size() < 64, "the tier did not give back what this process overran");
+        card_budget.release(line);
+        token(7);
+        require(t.slot_locations.size() == 64, "the tier did not grow back");
+
+        // Mid-decode the tier cannot give back at once: it says it will, so the allocation goes through.
+        size_t freed = 0;
+        require(t.reclaim_one(4096, &freed) == GGML_CUDA_RECLAIM_LATER && freed == 0 && t.slot_locations.size() == 64,
+                "a discrete tier did not defer a decode allocation to its next boundary");
+        t.finish(out.data(), 256);
     }
     std::printf("REAL_CUDA_VRAM_RECLAIM_PASS assertions=%d unified=%d\n", assertions, int(unified));
     return 0;

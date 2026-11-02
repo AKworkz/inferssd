@@ -304,20 +304,6 @@ std::string scope_name(uint32_t scope) {
     return out;
 }
 
-result<void> validate_dependencies(const snapshot & out, uint32_t platform) {
-    auto dependency = [&](const std::string & key, const std::string & message) {
-        const auto * v = out.find(key);
-        return failure<void>(status::invalid, key + " (" + v->location + "): " + message);
-    };
-    // Compute runs on ggml's threads (-t, -tb, --cpu-mask): cpu.decode_participants is checked against
-    // each decode call's thread count.
-    if ((platform & scope_linux) && *out.integer("vram.margin_mib") < *out.integer("vram.reserve_mib") + 64) {
-        return dependency("vram.margin_mib",
-                          "must be at least vram.reserve_mib (" + out.find("vram.reserve_mib")->location + ") plus 64");
-    }
-    return {};
-}
-
 }  // namespace
 
 const std::vector<descriptor> & registry() {
@@ -408,10 +394,6 @@ result<snapshot> parse(const std::string &                 text,
             if (!done) {
                 return failure<snapshot>(done.code, done.error);
             }
-        }
-        const auto checked = validate_dependencies(out, target);
-        if (!checked) {
-            return failure<snapshot>(checked.code, checked.error);
         }
         return { std::move(out), status::ok, {} };
     } catch (const std::bad_alloc &) {

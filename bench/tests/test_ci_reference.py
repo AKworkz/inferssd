@@ -132,7 +132,7 @@ def test_the_reviewed_generation_is_exactly_the_installed_registry(binding, monk
     unreviewed = copy.deepcopy(settings_registry.schema())
     del unreviewed["properties"]["host.budget_mib"]
     monkeypatch.setattr(settings_registry, "schema", lambda: unreviewed)
-    with pytest.raises(ValueError, match="reviewed 14-key schema"):
+    with pytest.raises(ValueError, match="reviewed settings schema"):
         reference.validate_semantics(binding["semantic_settings"])
 
 

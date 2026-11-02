@@ -213,17 +213,6 @@ def parse(
             apply(key, literal, "file", f"{source}:{n}", receipt)
     for key, literal in overrides:
         apply(key, literal, "cli", "--ssd-" + key.replace(".", "-").replace("_", "-"), "")
-    if (
-        platform == "linux"
-        and cast(int, values["vram.margin_mib"].value)
-        < cast(int, values["vram.reserve_mib"].value) + 64
-    ):
-        raise ValueError(
-            "VRAM margin must exceed reserve by 64 MiB: "
-            + ", ".join(
-                f"{k} ({values[k].location})" for k in ("vram.margin_mib", "vram.reserve_mib")
-            )
-        )
     return Snapshot(tuple(values.values()), platform)
 
 

@@ -10,7 +10,7 @@ struct cpu_kernels_v1;
 namespace testing {
 // Explicit construction inputs for real CUDA lifecycle fixtures. Product
 // callers receive no policy parser: their factory derives the fixed profile
-// only from the fourteen-key snapshot and copied observation channels.
+// only from the typed settings snapshot and copied observation channels.
 struct tier_options {
     bool fixture = true, mxfp4_gpu_hidden = false;
     uint64_t safety_mib = 512;

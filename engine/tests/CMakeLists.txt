@@ -613,8 +613,7 @@ if (GGML_CUDA)
     target_link_libraries(test-cuda-memory-reserve PRIVATE ggml ggml-cuda CUDA::cudart)
     target_include_directories(test-cuda-memory-reserve PRIVATE ../ggml/src)
     add_test(NAME cuda_memory_reserve COMMAND test-cuda-memory-reserve)
-    set_tests_properties(cuda_memory_reserve PROPERTIES LABELS "gpu" RUN_SERIAL TRUE SKIP_RETURN_CODE 77
-        ENVIRONMENT "GGML_CUDA_MEMORY_RESERVE_MIB=576")
+    set_tests_properties(cuda_memory_reserve PROPERTIES LABELS "gpu" RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
 endif()
 
 # build test-tokenizer-0 target once and add many tests

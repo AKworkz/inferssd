@@ -3278,8 +3278,7 @@ sink_configuration configured(const settings::snapshot * input, const runtime_se
     const uint64_t prefetch = integer("prefetch.depth");
     if (participants > uint64_t(sink_max_participants) || prefetch > 64 || !out.settings.cpus("cpu.io_cpus") ||
             !out.settings.vram_budget() || !out.settings.costs() || !out.settings.sources() ||
-            integer("host.headroom_mib") > UINT32_MAX || integer("vram.reserve_mib") > 8192 ||
-            integer("vram.margin_mib") < integer("vram.reserve_mib") + 64 || integer("vram.margin_mib") > 8192) {
+            integer("host.headroom_mib") > UINT32_MAX || integer("vram.reserve_mib") > 8192) {
         throw std::runtime_error("invalid typed SSD executor dependencies");
     }
     if (!out.has_gpu && out.settings.vram_budget()->tier_bytes(false)) {

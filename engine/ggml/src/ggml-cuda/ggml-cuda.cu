@@ -9,6 +9,7 @@ extern "C" const ssd::gpu::provider_v1 * ggml_backend_cuda_ssd_api_v1();
 
 #include "ggml-cuda/common.cuh"
 #include "ggml-cuda/activation-quant-reuse.cuh"
+#include "ggml-cuda/ssd/reserve-budget.h"
 #include "ggml-cuda/ssd/reserve-registry.h"
 #include "ggml-cuda/acc.cuh"
 #include "ggml-cuda/add-id.cuh"
@@ -149,10 +150,20 @@ static std::array<std::atomic<size_t>, GGML_CUDA_MAX_DEVICES> g_cuda_dynamic_res
 // Exactly one registry in the CUDA DSO. Each backend registration lives until
 // its borrowed transport has quiesced; one context cannot replace another's floor.
 static ssd::gpu::reserve_registry<GGML_CUDA_MAX_DEVICES> g_cuda_context_reserves;
+// What the contexts' reserve is kept against on a discrete GPU.
+static std::array<ssd::gpu::reserve_budget, GGML_CUDA_MAX_DEVICES> g_cuda_reserve_budgets;
+
+// Free memory against the contexts' reserve. On unified memory it stays what the machine has free: the tier gives way
+// there, because the rest of the machine lives in the same memory.
+static size_t ggml_cuda_free_under_reserve(int device, size_t free) {
+    return ggml_cuda_memory_is_unified(device) ? free :
+        g_cuda_reserve_budgets[device].free_bytes(free, g_cuda_context_reserves.maximum(device));
+}
 
 // Reclaim the elastic expert cache before an allocation would eat into the reserve, rather than waiting
 // until cudaMalloc/cuMemCreate has already exhausted the device (on unified memory it never fails). With
-// no reclaimer (or while it is unarmed), fail normally so the graph planner can try a smaller batch.
+// no reclaimer (or nothing left to give back), fail normally so the graph planner can try a smaller batch. One that
+// will give memory back at its next quiescent point lets the allocation through: the reserve comes back then.
 static cudaError_t ggml_cuda_reserve_memory(int device, size_t size) {
     const size_t reserve = std::max(g_cuda_dynamic_reserve[device].load(std::memory_order_relaxed),
                                     g_cuda_context_reserves.maximum(device));
@@ -163,13 +174,19 @@ static cudaError_t ggml_cuda_reserve_memory(int device, size_t size) {
     for (;;) {
         size_t available = 0, total = 0;
         ggml_cuda_memory_info(device, &available, &total);
+        available = ggml_cuda_free_under_reserve(device, available);
         if (available >= reserve && size <= available - reserve) {
             return cudaSuccess;
         }
         size_t freed = 0;
-        if (ggml_cuda_oom_reclaimer_invoke(device, size, &freed) <= 0 || freed == 0) {
-            GGML_LOG_WARN("%s: device %d cannot allocate %.2f MiB while preserving %.2f MiB\n",
-                __func__, device, size/1048576.0, reserve/1048576.0);
+        const int reclaimed = ggml_cuda_oom_reclaimer_invoke(device, size, &freed);
+        if (reclaimed == GGML_CUDA_RECLAIM_LATER) {
+            return cudaSuccess;
+        }
+        if (reclaimed <= 0 || freed == 0) {
+            GGML_LOG_WARN("%s: device %d cannot allocate %.2f MiB while preserving %.2f MiB%s\n",
+                __func__, device, size/1048576.0, reserve/1048576.0,
+                ggml_cuda_memory_is_unified(device) ? "" : " (vram.reserve_mib)");
             return cudaErrorMemoryAllocation;
         }
         GGML_LOG_INFO("%s: device %d reclaimed %.2f MiB before allocation to preserve %.2f MiB\n",
@@ -219,7 +236,15 @@ static cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device)
     } else {
         err = cudaMalloc(ptr, size);
     }
+    if (err == cudaSuccess) {
+        g_cuda_reserve_budgets[device].hold(ssd::gpu::device_pages(size));
+    }
     return err;
+}
+
+static cudaError_t ggml_cuda_device_free(void * ptr, size_t size, int device) {
+    g_cuda_reserve_budgets[device].release(ssd::gpu::device_pages(size));
+    return cudaFree(ptr);
 }
 
 #if defined(GGML_USE_HIP)
@@ -453,7 +478,7 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
         for (int i = 0; i < MAX_BUFFERS; ++i) {
             ggml_cuda_buffer & b = buffer_pool[i];
             if (b.ptr != nullptr) {
-                CUDA_CHECK(cudaFree(b.ptr));
+                CUDA_CHECK(ggml_cuda_device_free(b.ptr, b.size, device));
                 pool_size -= b.size;
                 b.ptr  = nullptr;
                 b.size = 0;
@@ -537,7 +562,7 @@ struct ggml_cuda_pool_leg : public ggml_cuda_pool {
         }
         GGML_LOG_DEBUG(GGML_CUDA_NAME " buffer pool full, increase MAX_CUDA_BUFFERS\n");
         ggml_cuda_set_device(device);
-        CUDA_CHECK(cudaFree(ptr));
+        CUDA_CHECK(ggml_cuda_device_free(ptr, size, device));
         pool_size -= size;
     }
 };
@@ -569,6 +594,7 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
             // one mapping at a time, also a workaround for https://github.com/ROCm/ROCR-Runtime/issues/285
             for (std::pair<CUdeviceptr, size_t> & mapping : mappings) {
                 CU_CHECK(cuMemUnmap(mapping.first, mapping.second));
+                g_cuda_reserve_budgets[device].release(mapping.second);
             }
             CU_CHECK(cuMemAddressFree(pool_addr, CUDA_POOL_VMM_MAX_SIZE));
         }
@@ -612,6 +638,7 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
         if (rc != CUDA_SUCCESS) {
             return rc;
         }
+        g_cuda_reserve_budgets[device].hold(bytes);
 
         // reserve virtual address space (if not already reserved)
         if (pool_addr == 0) {
@@ -646,6 +673,7 @@ struct ggml_cuda_pool_vmm : public ggml_cuda_pool {
         size = granularity * ((size + granularity - 1) / granularity);
         while (!mappings.empty() && pool_size > size && mappings.back().first >= used_end) {
             CU_CHECK(cuMemUnmap(mappings.back().first, mappings.back().second));
+            g_cuda_reserve_budgets[device].release(mappings.back().second);
             pool_size -= mappings.back().second;
             mappings.pop_back();
         }
@@ -896,15 +924,16 @@ static void ggml_backend_cuda_graph_cache_end_phase(ggml_backend_t backend, int 
 struct ggml_backend_cuda_buffer_context {
     int device;
     void * dev_ptr = nullptr;
+    size_t size = 0;
     std::string name;
 
-    ggml_backend_cuda_buffer_context(int device, void * dev_ptr) :
-        device(device), dev_ptr(dev_ptr),
+    ggml_backend_cuda_buffer_context(int device, void * dev_ptr, size_t size) :
+        device(device), dev_ptr(dev_ptr), size(size),
         name(GGML_CUDA_NAME + std::to_string(device)) {
     }
 
     ~ggml_backend_cuda_buffer_context() {
-        CUDA_CHECK(cudaFree(dev_ptr));
+        CUDA_CHECK(ggml_cuda_device_free(dev_ptr, size, device));
     }
 };
 
@@ -1192,7 +1221,7 @@ static ggml_backend_buffer_t ggml_backend_cuda_buffer_type_alloc_buffer(ggml_bac
         return nullptr;
     }
 
-    ggml_backend_cuda_buffer_context * ctx = new ggml_backend_cuda_buffer_context(buft_ctx->device, dev_ptr);
+    ggml_backend_cuda_buffer_context * ctx = new ggml_backend_cuda_buffer_context(buft_ctx->device, dev_ptr, size);
 
     return ggml_backend_buffer_init(buft, ggml_backend_cuda_buffer_interface, ctx, size);
 }
@@ -1306,7 +1335,7 @@ struct ggml_backend_cuda_split_buffer_context {
                     }
                 }
                 if (extra->data_device[id] != nullptr) {
-                    CUDA_CHECK(cudaFree(extra->data_device[id]));
+                    CUDA_CHECK(ggml_cuda_device_free(extra->data_device[id], extra->data_device_bytes[id], id));
                 }
             }
             delete extra;
@@ -1370,6 +1399,7 @@ static enum ggml_status ggml_backend_cuda_split_buffer_init_tensor(ggml_backend_
         }
 
         extra->data_device[id] = buf;
+        extra->data_device_bytes[id] = size;
 
         for (int64_t is = 0; is < GGML_CUDA_MAX_STREAMS; ++is) {
             CUDA_CHECK(cudaEventCreateWithFlags(&extra->events[id][is], cudaEventDisableTiming));
@@ -5774,6 +5804,7 @@ extern "C" bool ggml_backend_cuda_ssd_attach_services(
     if (g_cuda_context_reserves.add(context, context->device, services->gpu_reserve_bytes) != ssd::status::ok) {
         return refuse("cannot register CUDA context allocation reserve");
     }
+    ggml_cuda_reserve_anchor(context->device);
     context->ssd_services = services;
     if (error && error_size) { error[0] = '\0'; }
     return true;
@@ -5801,6 +5832,36 @@ bool ggml_backend_cuda_device_is_unified(int device) {
 void ggml_cuda_set_memory_reserve(int device, size_t bytes) {
     GGML_ASSERT(device >= 0 && device < GGML_CUDA_MAX_DEVICES);
     g_cuda_dynamic_reserve[device].store(bytes, std::memory_order_relaxed);
+}
+
+void ggml_cuda_reserve_hold(int device, size_t bytes) {
+    GGML_ASSERT(device >= 0 && device < GGML_CUDA_MAX_DEVICES);
+    g_cuda_reserve_budgets[device].hold(bytes);
+}
+
+void ggml_cuda_reserve_release(int device, size_t bytes) {
+    GGML_ASSERT(device >= 0 && device < GGML_CUDA_MAX_DEVICES);
+    g_cuda_reserve_budgets[device].release(bytes);
+}
+
+void ggml_cuda_reserve_anchor(int device) {
+    GGML_ASSERT(device >= 0 && device < GGML_CUDA_MAX_DEVICES);
+    size_t free = 0, total = 0;
+    ggml_cuda_memory_info(device, &free, &total);
+    g_cuda_reserve_budgets[device].anchor(free);
+}
+
+void ggml_cuda_reserve_free_memory(int device, size_t * free, size_t * total) {
+    GGML_ASSERT(device >= 0 && device < GGML_CUDA_MAX_DEVICES);
+    ggml_cuda_memory_info(device, free, total);
+    g_cuda_reserve_budgets[device].observe(*free);
+    *free = ggml_cuda_free_under_reserve(device, *free);
+}
+
+void ggml_cuda_reserve_state(int device, size_t * held, size_t * reachable) {
+    GGML_ASSERT(device >= 0 && device < GGML_CUDA_MAX_DEVICES);
+    *held = g_cuda_reserve_budgets[device].held();
+    *reachable = g_cuda_reserve_budgets[device].reachable();
 }
 
 bool ggml_backend_cuda_register_host_buffer(void * buffer, size_t size) {

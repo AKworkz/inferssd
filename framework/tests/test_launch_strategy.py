@@ -202,9 +202,17 @@ def test_without_a_usable_gpu_the_budget_is_zero_and_no_gpu_is_checked(tmp_path)
 
 def test_user_launch_checks_still_apply_to_the_merged_result(tmp_path):
     inputs, spec, host, adapter, out = strategic(tmp_path)
-    host["gpu_processes"] = "4242, other"
-    with pytest.raises(ValueError, match="already has a compute process"):
+    host["gpu_available"] = False
+    with pytest.raises(ValueError, match="requires nvidia-smi"):
         resolved(inputs, spec, adapter, out)
+
+
+def test_a_gpu_with_other_compute_processes_still_launches(tmp_path):
+    inputs, spec, host, adapter, out = strategic(tmp_path)
+    host["gpu_processes"] = "4242, other"
+    result, _, _ = resolved(inputs, spec, adapter, out)
+    assert result.code == 0
+    assert "gpu_processes" not in {fact.name for fact in result.observations}
 
 
 def test_without_characteristics_the_strategy_is_skipped(tmp_path):

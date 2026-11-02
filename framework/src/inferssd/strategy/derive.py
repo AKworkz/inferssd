@@ -38,6 +38,10 @@ SERVER_ARGS = ("--ctx-checkpoints", "1")
 # The host margin on memory a GPU shares with the host: the smallest margin that
 # held under stress with the automatic VRAM tier growing into host memory.
 UNIFIED_HEADROOM_MIB = 4096
+# VRAM left free when other processes already use the GPU at launch, for them to
+# grow into. A GPU this launch has to itself keeps nothing back: that memory would
+# only cost expert slots.
+SHARED_GPU_RESERVE_MIB = 1024
 # On macOS the share of memory kept out of the RAM expert cache: macOS compresses
 # a cache's cold pages long before free memory runs out, and every hit on a
 # compressed slot then decompresses it.
@@ -565,12 +569,15 @@ def derive(
                     "vram.budget: default auto; the usable GPU is not in the characteristics, "
                     "run inferssd profile again"
                 )
-            for gpu in runtime.gpus:
-                if gpu.processes:
-                    notes.append(
-                        f"vram.budget: {gpu.uuid} runs {gpu.processes} compute process(es); "
-                        "the launch refuses a GPU in use"
-                    )
+            busy = [
+                f"{gpu.uuid} runs {gpu.processes} compute process(es)"
+                for gpu in runtime.gpus
+                if gpu.processes
+            ]
+            if busy:
+                why = ", ".join(busy) + f"; {SHARED_GPU_RESERVE_MIB} MiB stays free for them"
+                choices["vram.reserve_mib"] = (str(SHARED_GPU_RESERVE_MIB), why)
+                notes.append("vram.reserve_mib: " + why)
         device = next(
             (
                 row

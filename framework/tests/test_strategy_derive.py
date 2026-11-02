@@ -394,6 +394,27 @@ def test_gpu_states_that_leave_the_vram_budget_alone(models):
         assert link == (name == "busy"), name
 
 
+def test_other_processes_on_the_gpu_get_a_reserve_and_a_gpu_alone_keeps_none(models):
+    c = machine(X86)
+    busy = derive(
+        c,
+        models["dsv"],
+        runtime(range(61), [GPUState(X86_GPU, 1 << 30, 2)]),
+        "linux",
+        model_drive_key=drive(c),
+    )
+    assert busy.settings["vram.reserve_mib"].value_text == "1024"
+    assert "runs 2 compute process(es)" in busy.settings["vram.reserve_mib"].reason
+    alone = derive(
+        c,
+        models["dsv"],
+        runtime(range(61), [GPUState(X86_GPU, 1 << 30, 0)]),
+        "linux",
+        model_drive_key=drive(c),
+    )
+    assert "vram.reserve_mib" not in alone.settings
+
+
 def test_characteristics_of_another_platform_are_refused(models):
     with pytest.raises(ValueError, match="another platform"):
         derive(machine(MAC), models["dsv"], runtime(range(10)), "linux", model_drive_key=None)

@@ -124,9 +124,11 @@ the model's headers when absent). Without `machine_characteristics` the dry-run
 resolves exactly as before. Every platform requires `platform_system` (`Linux`, `Darwin` or
 `Windows`); Darwin also requires `platform_machine=arm64`. Linux uses
 `cgroup_v2`, `euid`, and for non-root scope creation `user_manager` and
-`memory_controller`. GPU-enabled Linux settings also require `gpu_available`
-and empty `gpu_processes`. These observations do not certify native source
-formats, GPU kernels or real resource enforcement.
+`memory_controller`. GPU-enabled Linux settings also require `gpu_available`.
+These observations do not certify native source formats, GPU kernels or real
+resource enforcement. Other compute processes on the GPU do not stop a launch:
+it leaves them VRAM (`vram.reserve_mib` in the
+[settings](../docs/configuration.md)).
 
 The old Linux/Darwin resolvers and their recorded reference observations are
 retained behind `launch-recorded --dry-run`. They still describe the historical settings/env

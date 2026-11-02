@@ -96,9 +96,6 @@ int main() {
         std::puts("No CUDA device; skipping reserve test");
         return 77;
     }
-    // Run in a dedicated process with GGML_CUDA_MEMORY_RESERVE_MIB=576.
-    const char * value = std::getenv("GGML_CUDA_MEMORY_RESERVE_MIB");
-    check(value && std::atoi(value) == 576, "set GGML_CUDA_MEMORY_RESERVE_MIB=576");
     auto * buft = ggml_backend_cuda_buffer_type(0);
     check(buft != nullptr, "CUDA device required");
     if (ggml_backend_cuda_device_is_unified(0)) {
@@ -109,6 +106,8 @@ int main() {
         std::puts("Insufficient free memory; skipping reserve test");
         return 77;
     }
+
+    ggml_cuda_set_memory_reserve(0, RESERVE);
 
     // This fits physically, but must fail without consuming the configured reserve.
     auto * rejected = ggml_backend_buft_alloc_buffer(buft, available - RESERVE + 64 * MIB);
@@ -126,5 +125,6 @@ int main() {
     check(free_memory() >= RESERVE, "allocation consumed reserve after reclaim");
     ggml_backend_buffer_free(buffer);
     check(ggml_cuda_oom_reclaimer_unregister(0, reclaim, &cache), "unregister failed");
+    ggml_cuda_set_memory_reserve(0, 0);
     std::puts("CUDA reserve rejection and proactive cache reclaim: PASS");
 }
