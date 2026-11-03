@@ -8804,16 +8804,18 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         bool buffer_from_host_ptr_supported = props.caps.buffer_from_host_ptr;
         bool is_default_buft = buft == ggml_backend_dev_buffer_type(dev);
 
-        // Muse's dense tensors are interleaved with hundreds of GiB of CPU
-        // experts. A single enclosing Metal mmap would pin those gaps too.
-        // Opt in to compact GPU allocations; load_all_data copies only their
-        // tensors, while CPU expert tensors retain their original mmap.
+        // A mapped buffer spans the whole file range of its tensors. Where a GGUF interleaves
+        // the dense tensors with routed experts that live outside this context, on the CPU or
+        // deferred to the SSD executor, as Muse's and the Qwen MoE GGUFs do, one enclosing Metal
+        // mmap would pin those experts too. Allocate the GPU tensors compactly instead;
+        // load_all_data copies only them, while the CPU expert tensors retain their original mmap.
 #if defined(__APPLE__)
-        if (arch == LLM_ARCH_MUSE_SPARK &&
+        if (ml.use_mmap && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft &&
                 ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU &&
-                std::strncmp(ggml_backend_dev_name(dev), "MTL", 3) == 0) {
+                std::strncmp(ggml_backend_dev_name(dev), "MTL", 3) == 0 &&
+                ml.mapping_range_encloses_experts(ctx)) {
             buffer_from_host_ptr_supported = false;
-            LLAMA_LOG_INFO("%s: Muse compact Metal allocation enabled for %s\n",
+            LLAMA_LOG_INFO("%s: compact Metal allocation for %s: its mapped range would enclose experts held elsewhere\n",
                     __func__, ggml_backend_buft_name(buft));
         }
 #endif

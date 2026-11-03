@@ -41,8 +41,8 @@ struct fixture {
 };
 
 // Frozen acceptance expressions from main b3904ade6's shared graph callsite,
-// and qwen4exp's: SiLU-gated experts, up and gate of one type, no post norm
-// required. Keep this independent of the extracted requirement flags and validator.
+// and those of qwen4exp and qwen35moe: SiLU-gated experts, up and gate of one
+// type, no post norm required. Keep this independent of the extracted requirement flags and validator.
 bool baseline_accepts(llm_arch arch, float clamp, const llama_ssd::expert_inputs & in) {
     const bool layout = in.backend_available && in.runtime_available && in.up && in.gate && in.down &&
         ggml_is_contiguous(in.up) && ggml_is_contiguous(in.gate) && ggml_is_contiguous(in.down) &&
@@ -61,7 +61,8 @@ bool baseline_accepts(llm_arch arch, float clamp, const llama_ssd::expert_inputs
         std::isfinite(clamp) && clamp > 1e-6f;
     const bool muse = layout && arch == LLM_ARCH_MUSE_SPARK && in.silu && !in.cache_compute &&
         in.post_norm && in.gate->type == in.up->type;
-    const bool qwen = layout && arch == LLM_ARCH_QWEN4EXP && in.silu && !in.cache_compute &&
+    const bool qwen = layout && (arch == LLM_ARCH_QWEN4EXP || arch == LLM_ARCH_QWEN35MOE) && in.silu &&
+        !in.cache_compute &&
         in.gate->type == in.up->type;
     return deepseek || muse || qwen;
 }
@@ -99,6 +100,7 @@ void model_and_numeric_boundaries() {
     CHECK(compare(LLM_ARCH_DEEPSEEK41, 7.0f, in));
     CHECK(compare(LLM_ARCH_MUSE_SPARK, 0.0f, in));
     CHECK(compare(LLM_ARCH_QWEN4EXP, 0.0f, in));
+    CHECK(compare(LLM_ARCH_QWEN35MOE, 0.0f, in));
     CHECK(!compare(LLM_ARCH_LLAMA, 7.0f, in));
     const float limits[] = {-INFINITY, -1.0f, -0.0f, 0.0f, 1e-6f,
         std::nextafter(1e-6f, INFINITY), 1.0f, INFINITY, std::numeric_limits<float>::quiet_NaN()};
@@ -106,10 +108,12 @@ void model_and_numeric_boundaries() {
         compare(LLM_ARCH_DEEPSEEK41, limit, in);
         CHECK(compare(LLM_ARCH_MUSE_SPARK, limit, in));
         CHECK(compare(LLM_ARCH_QWEN4EXP, limit, in)); // no clamp: the layer limit is not read
+        CHECK(compare(LLM_ARCH_QWEN35MOE, limit, in)); // no clamp: the layer limit is not read
     }
     CHECK(!compare(LLM_ARCH_DEEPSEEK41, 7.0f, in, -1));
     CHECK(compare(LLM_ARCH_MUSE_SPARK, 7.0f, in, -1));
     CHECK(compare(LLM_ARCH_QWEN4EXP, 7.0f, in, -1));
+    CHECK(compare(LLM_ARCH_QWEN35MOE, 7.0f, in, -1));
     llama_hparams layers{};
     layers.swiglu_clamp_exp[0] = 3.0f;
     layers.swiglu_clamp_exp[1] = 9.0f;
@@ -121,62 +125,69 @@ void model_and_numeric_boundaries() {
         CHECK(compare(LLM_ARCH_DEEPSEEK41, 7.0f, in));
         CHECK(compare(LLM_ARCH_MUSE_SPARK, 7.0f, in));
         CHECK(compare(LLM_ARCH_QWEN4EXP, 7.0f, in));
+        CHECK(compare(LLM_ARCH_QWEN35MOE, 7.0f, in));
     }
     in = f.inputs(); in.post_norm = nullptr;
     CHECK(compare(LLM_ARCH_DEEPSEEK41, 7.0f, in)); // optional for DeepSeek
     CHECK(!compare(LLM_ARCH_MUSE_SPARK, 7.0f, in));
     CHECK(compare(LLM_ARCH_QWEN4EXP, 7.0f, in));
+    CHECK(compare(LLM_ARCH_QWEN35MOE, 7.0f, in));
     in = f.inputs(); in.cache_compute = true;
     CHECK(!compare(LLM_ARCH_DEEPSEEK41, 7.0f, in));
     CHECK(!compare(LLM_ARCH_MUSE_SPARK, 7.0f, in));
     CHECK(!compare(LLM_ARCH_QWEN4EXP, 7.0f, in));
+    CHECK(!compare(LLM_ARCH_QWEN35MOE, 7.0f, in));
     for (int tokens : {1, 2, 32}) {
         for (bool prefill : {false, true}) {
             in = f.inputs(); in.n_tokens = tokens; in.prefill = prefill;
             compare(LLM_ARCH_DEEPSEEK41, 7.0f, in);
             CHECK(compare(LLM_ARCH_MUSE_SPARK, 7.0f, in));
             CHECK(compare(LLM_ARCH_QWEN4EXP, 7.0f, in));
+            CHECK(compare(LLM_ARCH_QWEN35MOE, 7.0f, in));
         }
     }
 }
 
-// qwen4exp's routed experts as the model loads them: separate Q8_0 up/gate
-// [2560, 640, 512] and down [640, 2560, 512], no post norm. Its fused gate_up
-// form, per-expert scales and LoRA stay on the graph.
-void qwen4exp_experts() {
+// Routed experts as each Qwen model loads them: separate up/gate and down,
+// no post norm. qwen4exp (Qwen3.8-Flash-Next) has Q8_0 [2560, 640, 512];
+// qwen35moe (Qwen3.6-35B-A3B, Unsloth UD-Q4_K_XL) has Q4_K up/gate
+// [2048, 512, 256] and Q5_K down. The fused gate_up form, per-expert scales
+// and LoRA stay on the graph.
+void qwen_experts(llm_arch arch, ggml_type up_gate, ggml_type down, int64_t n_embd, int64_t n_ff,
+        int64_t n_expert) {
     fixture f;
-    f.up = f.gate = tensor(GGML_TYPE_Q8_0, 2560, 640, 512);
-    f.down = tensor(GGML_TYPE_Q8_0, 640, 2560, 512);
+    f.up = f.gate = tensor(up_gate, n_embd, n_ff, n_expert);
+    f.down = tensor(down, n_ff, n_embd, n_expert);
     auto in = f.inputs();
-    in.n_embd = 2560; in.post_norm = nullptr; in.post_norm_eps = 0.0f; in.routed_scale = 1.0f;
-    CHECK(compare(LLM_ARCH_QWEN4EXP, 0.0f, in));
-    const auto accepted = llama_ssd::validate_experts(
-        llama_ssd::describe_experts(LLM_ARCH_QWEN4EXP, llama_hparams{}, 0), in);
+    in.n_embd = n_embd; in.post_norm = nullptr; in.post_norm_eps = 0.0f; in.routed_scale = 1.0f;
+    CHECK(compare(arch, 0.0f, in));
+    const auto accepted = llama_ssd::validate_experts(llama_ssd::describe_experts(arch, llama_hparams{}, 0), in);
     CHECK(accepted.accepted() && accepted.execution.activation == llama_ssd::expert_activation::swiglu &&
         !accepted.execution.post_norm && accepted.execution.routed_scale == 1.0f);
     for (int prefill = 0; prefill < 2; ++prefill) {
         auto batch = in; batch.n_tokens = 512; batch.prefill = prefill;
-        CHECK(compare(LLM_ARCH_QWEN4EXP, 0.0f, batch));
+        CHECK(compare(arch, 0.0f, batch));
     }
-    const ggml_tensor gate_up = tensor(GGML_TYPE_Q8_0, 2560, 1280, 512);
-    const ggml_tensor scale = tensor(GGML_TYPE_F32, 512, 1, 1);
+    const ggml_tensor gate_up = tensor(up_gate, n_embd, 2 * n_ff, n_expert);
+    const ggml_tensor scale = tensor(GGML_TYPE_F32, n_expert, 1, 1);
     auto fused = in; fused.up = nullptr; fused.gate = nullptr; fused.gate_up = &gate_up;
-    CHECK(!compare(LLM_ARCH_QWEN4EXP, 0.0f, fused));
+    CHECK(!compare(arch, 0.0f, fused));
     fused = in; fused.gate_up = &gate_up;
-    CHECK(!compare(LLM_ARCH_QWEN4EXP, 0.0f, fused));
+    CHECK(!compare(arch, 0.0f, fused));
     using member = const ggml_tensor * llama_ssd::expert_inputs::*;
     for (member field : {&llama_ssd::expert_inputs::up_scale, &llama_ssd::expert_inputs::gate_scale,
             &llama_ssd::expert_inputs::down_scale}) {
         auto scaled = in; scaled.*field = &scale;
-        CHECK(!compare(LLM_ARCH_QWEN4EXP, 0.0f, scaled));
+        CHECK(!compare(arch, 0.0f, scaled));
     }
     auto lora = in; lora.has_lora = true;
-    CHECK(!compare(LLM_ARCH_QWEN4EXP, 0.0f, lora));
+    CHECK(!compare(arch, 0.0f, lora));
     auto gelu = in; gelu.silu = false;
-    CHECK(!compare(LLM_ARCH_QWEN4EXP, 0.0f, gelu));
-    const ggml_tensor q4_k = tensor(GGML_TYPE_Q4_K, 2560, 640, 512);
-    auto mixed = in; mixed.gate = &q4_k;
-    CHECK(!compare(LLM_ARCH_QWEN4EXP, 0.0f, mixed));
+    CHECK(!compare(arch, 0.0f, gelu));
+    const ggml_type other_type = up_gate == GGML_TYPE_Q4_K ? GGML_TYPE_Q5_K : GGML_TYPE_Q4_K;
+    const ggml_tensor other = tensor(other_type, n_embd, n_ff, n_expert);
+    auto mixed = in; mixed.gate = &other;
+    CHECK(!compare(arch, 0.0f, mixed));
 }
 
 void layout_refusals() {
@@ -188,6 +199,7 @@ void layout_refusals() {
         CHECK(!compare(LLM_ARCH_DEEPSEEK41, 7.0f, in));
         CHECK(!compare(LLM_ARCH_MUSE_SPARK, 7.0f, in));
         CHECK(!compare(LLM_ARCH_QWEN4EXP, 7.0f, in));
+        CHECK(!compare(LLM_ARCH_QWEN35MOE, 7.0f, in));
     }
     for (member field : {&llama_ssd::expert_inputs::gate_up, &llama_ssd::expert_inputs::gate_up_bias,
             &llama_ssd::expert_inputs::gate_input_bias, &llama_ssd::expert_inputs::up_bias,
@@ -198,6 +210,7 @@ void layout_refusals() {
         CHECK(!compare(LLM_ARCH_DEEPSEEK41, 7.0f, in));
         CHECK(!compare(LLM_ARCH_MUSE_SPARK, 7.0f, in));
         CHECK(!compare(LLM_ARCH_QWEN4EXP, 7.0f, in));
+        CHECK(!compare(LLM_ARCH_QWEN35MOE, 7.0f, in));
     }
     using flag = bool llama_ssd::expert_inputs::*;
     for (flag field : {&llama_ssd::expert_inputs::backend_available,
@@ -207,6 +220,7 @@ void layout_refusals() {
         CHECK(!compare(LLM_ARCH_DEEPSEEK41, 7.0f, in));
         CHECK(!compare(LLM_ARCH_MUSE_SPARK, 7.0f, in));
         CHECK(!compare(LLM_ARCH_QWEN4EXP, 7.0f, in));
+        CHECK(!compare(LLM_ARCH_QWEN35MOE, 7.0f, in));
     }
     for (int defect = 0; defect < 8; ++defect) {
         fixture bad;
@@ -223,6 +237,7 @@ void layout_refusals() {
         CHECK(!compare(LLM_ARCH_DEEPSEEK41, 7.0f, bad.inputs()));
         CHECK(!compare(LLM_ARCH_MUSE_SPARK, 7.0f, bad.inputs()));
         CHECK(!compare(LLM_ARCH_QWEN4EXP, 7.0f, bad.inputs()));
+        CHECK(!compare(LLM_ARCH_QWEN35MOE, 7.0f, bad.inputs()));
     }
 }
 
@@ -239,6 +254,7 @@ void quantization_contract() {
                 compare(LLM_ARCH_DEEPSEEK41, 7.0f, f.inputs());
                 compare(LLM_ARCH_MUSE_SPARK, 7.0f, f.inputs());
                 compare(LLM_ARCH_QWEN4EXP, 7.0f, f.inputs());
+                compare(LLM_ARCH_QWEN35MOE, 7.0f, f.inputs());
             }
         }
     }
@@ -322,7 +338,8 @@ void quantization_refusals_name_the_types() {
 
 int main() {
     model_and_numeric_boundaries();
-    qwen4exp_experts();
+    qwen_experts(LLM_ARCH_QWEN4EXP, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 2560, 640, 512);
+    qwen_experts(LLM_ARCH_QWEN35MOE, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, 2048, 512, 256);
     layout_refusals();
     quantization_contract();
     refusal_reasons();

@@ -501,9 +501,10 @@ def test_deepseek_profile_materializes_model_policy_and_preserves_explicit_value
     assert argv.index("--chat-template-kwargs") == argv.index("--chat-template-file") + 2
 
 
-def test_qwen4exp_launches_with_the_template_in_its_gguf(tmp_path):
+@pytest.mark.parametrize("profile", ["qwen4exp", "qwen35moe"])
+def test_qwen_profiles_launch_with_the_template_in_their_gguf(tmp_path, profile):
     inputs, spec, _, adapter, out, _ = setup(tmp_path)
-    inputs = replace(inputs, profile="qwen4exp")
+    inputs = replace(inputs, profile=profile)
     result = resolve(inputs, spec, adapter, out)
     assert result.code == 0 and "--chat-template-file" not in result.argv
     explicit = tmp_path / "chosen.jinja"
@@ -516,14 +517,14 @@ def test_qwen4exp_launches_with_the_template_in_its_gguf(tmp_path):
 
 def test_unknown_profile_refused_before_native_file(tmp_path):
     inputs, spec, _, adapter, out, _ = setup(tmp_path)
-    with pytest.raises(ValueError, match="dsv, muse, qwen4exp"):
+    with pytest.raises(ValueError, match="dsv, muse, qwen4exp, qwen35moe"):
         resolve(replace(inputs, profile="qwen"), spec, adapter, out)
     assert not (out / "settings.ssd").exists()
 
 
-def qwen_like():
+def qwen_like(arch="qwen4exp"):
     return moe(
-        "qwen4exp",
+        arch,
         layers=2,
         experts=8,
         used=2,
@@ -537,7 +538,12 @@ def qwen_like():
 
 @pytest.mark.parametrize(
     "layout, profile",
-    [(deepseek_like, "dsv"), (muse_like, "muse"), (qwen_like, "qwen4exp")],
+    [
+        (deepseek_like, "dsv"),
+        (muse_like, "muse"),
+        (qwen_like, "qwen4exp"),
+        (partial(qwen_like, "qwen35moe"), "qwen35moe"),
+    ],
 )
 def test_the_profile_follows_the_gguf_architecture(tmp_path, layout, profile):
     inputs, spec, _, adapter, out, _ = setup(tmp_path)

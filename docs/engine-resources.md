@@ -25,8 +25,8 @@ A descriptor is ordinary JSON. Relative paths resolve against its own directory:
 ```
 
 Use `darwin` for an Apple Silicon deployment and `windows` for a Windows one. The
-`qwen4exp` profile needs no template: it launches with the chat template in its
-GGUF. Missing selected resources or incompatible
+`qwen4exp` and `qwen35moe` profiles need no template: they launch with the chat
+template in their GGUF. Missing selected resources or incompatible
 contract versions fail before engine startup. The descriptor is an operator's
 explicit deployment contract, not a claim that untrusted binaries were verified.
 Normal process ownership, memory policy and runtime evidence checks still apply.

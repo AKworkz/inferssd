@@ -23,9 +23,15 @@ PROFILES: dict[str, Optional[str]] = {
     "dsv": "deepseek-ai-DeepSeek-V4.1.jinja",
     "muse": "muse-spark.jinja",
     "qwen4exp": None,  # Qwen3.8-Flash-Next
+    "qwen35moe": None,  # Qwen3.6-35B-A3B; its GGUF carries the model's sampling
 }
 # The profile of each GGUF general.architecture; --profile overrides it.
-ARCHITECTURES = {"deepseek41": "dsv", "muse-spark": "muse", "qwen4exp": "qwen4exp"}
+ARCHITECTURES = {
+    "deepseek41": "dsv",
+    "muse-spark": "muse",
+    "qwen4exp": "qwen4exp",
+    "qwen35moe": "qwen35moe",
+}
 # The server's default sampling for each profile, from the model's own
 # generation config where the GGUF carries none; a request's values win.
 SAMPLING: dict[str, tuple[str, ...]] = {

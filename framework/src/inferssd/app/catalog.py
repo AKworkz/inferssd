@@ -81,4 +81,32 @@ MODELS: tuple[Model, ...] = (
         ),
         1758625792,
     ),
+    Model(
+        "unsloth/Qwen3.6-35B-A3B-GGUF",
+        "UD-Q4_K_XL",
+        "a483e9e6cbd595906af30beda3187c2663a1118c",
+        model_facts_from(
+            {
+                "paths": ["Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"],
+                "architecture": "qwen35moe",
+                "layers": 40,
+                "experts": 256,
+                "experts_used": 8,
+                "roles": {
+                    "gate": {"formats": [["Q4_K", 39], ["Q5_K", 1]], "rows": 512, "cols": 2048},
+                    "up": {"formats": [["Q4_K", 39], ["Q5_K", 1]], "rows": 512, "cols": 2048},
+                    "down": {"formats": [["Q5_K", 36], ["Q6_K", 4]], "rows": 2048, "cols": 512},
+                },
+                "expert_bytes": 2301952,
+                "expert_read_bytes": 2314240,
+                "dense_bytes": 2678180352,
+                "format_bytes": [
+                    ["Q4_K", 11777605632],
+                    ["Q5_K", 7012876288],
+                    ["Q6_K", 880803840],
+                ],
+            }
+        ),
+        540344320,
+    ),
 )

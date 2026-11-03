@@ -76,12 +76,12 @@ def decode_estimate(
     room = max(0, available - headroom_bytes(characteristics, runtime, platform))
     resident = min(dense_read_bytes, room)
     cache = room - resident
-    experts = model.layers * model.experts * model.expert_bytes
+    experts = model.routed_bytes
     hit = min(1.0, cache / experts)
     routes = model.layers * model.experts_used
     dense_s = resident / memory_Bps + (dense_read_bytes - resident) / (drive_gbps * GB)
     cpu_s = routes * (line[0] + line[1]) / 1e6
-    drive_s = routes * (1.0 - hit) * model.expert_read_bytes / (drive_gbps * GB)
+    drive_s = routes * (1.0 - hit) * model.mean_expert_read_bytes / (drive_gbps * GB)
     seconds = dense_s + cpu_s + drive_s
     spill = dense_read_bytes - resident
     return Estimate(

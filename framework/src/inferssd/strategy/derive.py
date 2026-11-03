@@ -370,8 +370,8 @@ def drive_rate(
     """The model drive's read rate in GB/s for the requests the engine issues.
 
     The engine reads each role of an expert as its own request, so the size
-    looked up is the largest expert's mean role read; the nearest measured size
-    is taken on a log scale. The engine keeps up to IN_FLIGHT of those reads
+    looked up is a third of the mean expert read; the nearest measured size is
+    taken on a log scale. The engine keeps up to IN_FLIGHT of those reads
     queued, so the rate is the best median between the size's knee and that
     depth (or the reader's own cap).
     """
@@ -381,7 +381,7 @@ def drive_rate(
     if entry is None:
         return None, f"no measurement of the drive {key}; run inferssd profile --model <model>"
     name = key if entry["model"] == "unknown" else entry["model"]
-    request = model.expert_read_bytes / 3
+    request = model.mean_expert_read_bytes / 3
     knee = min(entry["knee"], key=lambda row: (abs(math.log(row["bytes"] / request)), row["bytes"]))
     deepest = min(IN_FLIGHT, entry["qd_cap"] or IN_FLIGHT)
     points = [
@@ -450,7 +450,7 @@ def prefill_split(
     wins within MAX_PASS tokens.
     """
     k = model.experts_used
-    E, L, B = model.experts, model.layers, model.expert_read_bytes
+    E, L, B = model.experts, model.layers, model.mean_expert_read_bytes
     fixed, route = line
     if not k:
         return None, "the GGUF header gives no experts per token"

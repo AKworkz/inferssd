@@ -12,14 +12,14 @@ inferssd serve --help
 ```
 
 Use `--resources engine-resources.json` and `-m` pointing to the first GGUF
-shard. All shards must be present. The launch picks the `dsv`, `muse` or
-`qwen4exp` profile from the GGUF's architecture, and each launch writes to a new
+shard. All shards must be present. The launch picks the `dsv`, `muse`,
+`qwen4exp` or `qwen35moe` profile from the GGUF's architecture, and each launch writes to a new
 run directory. Settings are optional. See the
 [quick start](quickstart.md#prepare-a-launch).
 
 The framework checks GGUF metadata and creates an alias index without duplicating
 model weights. It selects the matching chat template from the deployment
-resources; `qwen4exp` keeps the template embedded in its GGUF. The server runs
+resources; `qwen4exp` and `qwen35moe` keep the template embedded in their GGUF. The server runs
 the same SSD executor as on Linux: Metal computes the dense layers and the CPU
 sink reads and computes every routed expert, with its RAM cache sized within
 the process envelope (`host.budget_mib`, or the memory available at startup;

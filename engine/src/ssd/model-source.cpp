@@ -83,6 +83,26 @@ void llama_model_loader::build_expert_tensor_index(const llama_hparams & hparams
     expert_tensor_index.dense_bytes = n_bytes > deferred_bytes ? n_bytes - deferred_bytes : 0;
 }
 
+bool llama_model_loader::mapping_range_encloses_experts(ggml_context * ctx) const {
+    for (uint32_t idx = 0; idx < files.size(); ++idx) {
+        size_t first = 0;
+        size_t last = 0;
+        void * addr = nullptr;
+        get_mapping_range(&first, &last, &addr, int(idx), ctx);
+        if (first >= last) {
+            continue;
+        }
+        for (const auto & [name, weight] : weights_map) {
+            uint32_t layer = 0;
+            if (weight.idx == idx && weight.offs < last && first < weight.offs + ggml_nbytes(weight.tensor) &&
+                    llama_is_expert_tensor_name(name, layer) && ggml_get_tensor(ctx, name.c_str()) == nullptr) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool llama_model_loader::should_defer_expert_mmaps() const {
     return defer_experts && use_mmap && !no_alloc && !expert_tensor_index.empty();
 }

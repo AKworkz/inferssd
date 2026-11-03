@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+from collections import Counter
 from pathlib import Path
 
 from inferssd.app import catalog, hub
@@ -31,9 +32,15 @@ def test_the_catalog_is_the_download_list_and_its_facts_add_up():
     for model in catalog.MODELS:
         facts = model.facts
         assert 0 < model.dense_read_bytes < facts.dense_bytes
-        routed = facts.layers * facts.experts * facts.expert_bytes
-        assert sum(size for _, size in facts.format_bytes) == routed
-        assert facts.expert_read_bytes >= facts.expert_bytes
+        # Each type's total is exactly its roles' layers of that type, over every expert.
+        per_type: Counter[str] = Counter()
+        for role in facts.roles:
+            assert sum(layers for _, layers in role.formats) == facts.layers
+            for name, layers in role.formats:
+                per_type[name] += layers * facts.experts * role.slice_bytes(name)
+        assert dict(facts.format_bytes) == dict(per_type)
+        assert facts.expert_bytes <= facts.expert_read_bytes
+        assert facts.mean_expert_read_bytes <= facts.expert_read_bytes
 
 
 def test_every_supported_model_is_priced_on_a_mac():

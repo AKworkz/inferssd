@@ -15,6 +15,7 @@ expert_requirements describe_experts(
                 layer >= 0 ? hparams.swiglu_clamp_exp[layer] : 0.0f, true, false, true};
         case LLM_ARCH_MUSE_SPARK:
             return {expert_quantization::matching_up_gate, expert_activation::swiglu, 0.0f, false, true, false};
+        case LLM_ARCH_QWEN35MOE:
         case LLM_ARCH_QWEN4EXP:
             return {expert_quantization::matching_up_gate, expert_activation::swiglu, 0.0f, false, false, false};
         default:

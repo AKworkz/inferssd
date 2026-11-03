@@ -13,6 +13,7 @@ from test_machine_identity import FakeHost, linux_tree, nvme_key
 from test_machine_probes import FakeRunner, replies
 from test_machine_profile import GIB, Clock, shards
 
+from inferssd.app import catalog
 from inferssd.cli import main
 from inferssd.launch.resources import installed_resources
 from inferssd.machine import command
@@ -213,13 +214,15 @@ def test_profile_saves_to_the_state_directory_and_summarizes(tmp_path):
         "GPUs: NVIDIA GeForce RTX 5090 (CUDA)"
     )
     names = [line.split(":", 1)[0] for line in out[2:]]
-    assert names == ["cpu", "memory", "compute", "gpus", "storage", "estimate", "estimate"]
-    # This machine measured Q4_K alone, so neither supported model can be priced.
+    assert names == ["cpu", "memory", "compute", "gpus", "storage"] + ["estimate"] * len(
+        catalog.MODELS
+    )
+    # This machine measured Q4_K alone, so no supported model can be priced: each names the
+    # role formats it lacks, as cpu_line does.
     assert out[7:] == [
-        "estimate: mrfakename/DeepSeek-V4.1-Flash-1017-GGUF:Q8_0 none: "
-        "no CPU compute measurement of MXFP4",
-        "estimate: unsloth/Muse-Spark-Open-816B-A42B-GGUF:UD-Q4_K_XL none: "
-        "no CPU compute measurement of Q5_K",
+        f"estimate: {model.repo}:{model.quantization} none: no CPU compute measurement of "
+        + ", ".join(sorted({role.format.upper() for role in model.facts.roles} - {"Q4_K"}))
+        for model in catalog.MODELS
     ]
     assert out[2].endswith("4 logical CPUs (4 uniform); ISA AVX2 FMA F16C")
     assert "DRAM read 11.18 GiB/s with 1 thread" in out[3]
@@ -241,7 +244,7 @@ def test_profile_saves_to_the_state_directory_and_summarizes(tmp_path):
     code, shown, _ = execute(["--show", "--model", files[0]], host, FakeRunner({}), tmp_path)
     assert code == 0 and shown == out
     code, shown, _ = execute(["--show"], host, FakeRunner({}), tmp_path)
-    assert code == 0 and shown == out[:-2]
+    assert code == 0 and shown == out[: -len(catalog.MODELS)]
 
 
 def test_failed_sections_set_the_exit_status(tmp_path):
@@ -298,8 +301,7 @@ def test_json_prints_one_object_with_the_machine_and_the_estimates(tmp_path):
         "models_drive": {"model": "Example NVMe 2TB", "read_Bps": 5.1e9},
     }
     assert [(row["model"], row["quantization"]) for row in value["estimates"]] == [
-        ("mrfakename/DeepSeek-V4.1-Flash-1017-GGUF", "Q8_0"),
-        ("unsloth/Muse-Spark-Open-816B-A42B-GGUF", "UD-Q4_K_XL"),
+        (model.repo, model.quantization) for model in catalog.MODELS
     ]
     assert all(row["decode_tokens_per_second"] is None for row in value["estimates"])
     # Without --model the estimates have no drive, and the machine no models drive.
