@@ -20,7 +20,7 @@ from typing import Optional, cast
 
 from inferssd.configuration.settings import PLATFORMS, Setting, Snapshot, parse, render, uncomment
 from inferssd.launch.types import Threads
-from inferssd.machine.characteristics import Characteristics, ComputeRow, dumps
+from inferssd.machine.characteristics import GPU, Characteristics, ComputeRow, dumps
 from inferssd.strategy.inputs import ModelFacts, RuntimeFacts
 
 # The engine's GB/s cost terms are 1e9 bytes per second: it prices a copy or a
@@ -489,6 +489,35 @@ def _costs(terms: Mapping[str, float], reasons: Sequence[str]) -> Optional[tuple
     return value, "; ".join(reasons)
 
 
+def single_gpu(characteristics: Characteristics, runtime: RuntimeFacts) -> Optional[GPU]:
+    """The profiled GPU when it is the one CUDA GPU the launch can use."""
+    return next(
+        (
+            row
+            for row in characteristics["gpus"]
+            if runtime.gpus and len(runtime.gpus) == 1 and row["uuid"] == runtime.gpus[0].uuid
+        ),
+        None,
+    )
+
+
+def host_headroom_mib(
+    characteristics: Characteristics, runtime: RuntimeFacts, platform: str
+) -> Optional[int]:
+    """The host margin a launch sets as host.headroom_mib, or None to keep the engine's own.
+
+    On macOS it is a quarter of memory; on Linux with one usable GPU that shares host memory,
+    UNIFIED_HEADROOM_MIB.
+    """
+    if platform == "darwin":
+        return characteristics["memory"]["total_bytes"] // DARWIN_HEADROOM_SHARE >> 20
+    if platform == "linux":
+        device = single_gpu(characteristics, runtime)
+        if device is not None and device["integrated"]:
+            return UNIFIED_HEADROOM_MIB
+    return None
+
+
 def derive(
     characteristics: Characteristics,
     model: ModelFacts,
@@ -578,15 +607,9 @@ def derive(
                 why = ", ".join(busy) + f"; {SHARED_GPU_RESERVE_MIB} MiB stays free for them"
                 choices["vram.reserve_mib"] = (str(SHARED_GPU_RESERVE_MIB), why)
                 notes.append("vram.reserve_mib: " + why)
-        device = next(
-            (
-                row
-                for row in characteristics["gpus"]
-                if runtime.gpus and len(runtime.gpus) == 1 and row["uuid"] == runtime.gpus[0].uuid
-            ),
-            None,
-        )
-        if device is not None and device["integrated"]:
+        device = single_gpu(characteristics, runtime)
+        if host_headroom_mib(characteristics, runtime, platform) == UNIFIED_HEADROOM_MIB:
+            assert device is not None
             choices["host.headroom_mib"] = (
                 str(UNIFIED_HEADROOM_MIB),
                 f"{device['name']} shares host memory: the smallest host margin that held under "
@@ -622,7 +645,7 @@ def derive(
                 "every expert it routes to once"
             )
     if platform == "darwin":
-        mib = characteristics["memory"]["total_bytes"] // DARWIN_HEADROOM_SHARE >> 20
+        mib = cast(int, host_headroom_mib(characteristics, runtime, platform))
         choices["host.headroom_mib"] = (
             str(mib),
             f"a quarter of the {size(characteristics['memory']['total_bytes'])} of memory: macOS "

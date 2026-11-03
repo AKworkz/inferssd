@@ -74,7 +74,7 @@ conversation history; `/clear` starts a new conversation, `/exit` or EOF stops
 the service. Ctrl+C also stops it, including during startup or generation.
 Each launch keeps its receipts under `~/.local/share/inferssd/state/runs`.
 
-Rerun the installer to upgrade. Builds use a new release directory and publish
+`inferssd --version` prints the installed version. Rerun the installer to upgrade. Builds use a new release directory and publish
 the command only after build and schema checks; a failed build keeps the previous
 command. Older releases and model downloads are retained. For a branch or tag,
 download the installer and set `INFERSSD_REF` when running it. Optional

@@ -17,6 +17,7 @@ from inferssd.cli import main
 from inferssd.launch.resources import installed_resources
 from inferssd.machine import command
 from inferssd.machine.store import exclusive
+from inferssd.strategy.inputs import RuntimeFacts
 
 
 def parse(argv):
@@ -38,6 +39,9 @@ def machine(tmp_path):
     return host, files, build
 
 
+RUNTIME = RuntimeFacts((0, 1, 2, 3), (), 24 * GIB)
+
+
 def execute(argv, host, runner, tmp_path, environ=None):
     out, progress = [], []
     code = command.run(
@@ -49,6 +53,7 @@ def execute(argv, host, runner, tmp_path, environ=None):
         clock=Clock(),
         progress=progress.append,
         emit=out.append,
+        runtime=lambda: RUNTIME,
     )
     return code, out, progress
 
@@ -208,7 +213,14 @@ def test_profile_saves_to_the_state_directory_and_summarizes(tmp_path):
         "GPUs: NVIDIA GeForce RTX 5090 (CUDA)"
     )
     names = [line.split(":", 1)[0] for line in out[2:]]
-    assert names == ["cpu", "memory", "compute", "gpus", "storage"]
+    assert names == ["cpu", "memory", "compute", "gpus", "storage", "estimate", "estimate"]
+    # This machine measured Q4_K alone, so neither supported model can be priced.
+    assert out[7:] == [
+        "estimate: mrfakename/DeepSeek-V4.1-Flash-1017-GGUF:Q8_0 none: "
+        "no CPU compute measurement of MXFP4",
+        "estimate: unsloth/Muse-Spark-Open-816B-A42B-GGUF:UD-Q4_K_XL none: "
+        "no CPU compute measurement of Q5_K",
+    ]
     assert out[2].endswith("4 logical CPUs (4 uniform); ISA AVX2 FMA F16C")
     assert "DRAM read 11.18 GiB/s with 1 thread" in out[3]
     assert out[4].endswith("1 formats at 4 threads; skipped MXFP4 (no CPU kernel)")
@@ -226,8 +238,10 @@ def test_profile_saves_to_the_state_directory_and_summarizes(tmp_path):
     code, again, _ = execute(["--model", files[0], "--build", str(build)], host, runner, tmp_path)
     assert code == 0 and runner.calls == [] and saved.read_bytes() == before and again == out
 
-    code, shown, _ = execute(["--show"], host, FakeRunner({}), tmp_path)
+    code, shown, _ = execute(["--show", "--model", files[0]], host, FakeRunner({}), tmp_path)
     assert code == 0 and shown == out
+    code, shown, _ = execute(["--show"], host, FakeRunner({}), tmp_path)
+    assert code == 0 and shown == out[:-2]
 
 
 def test_failed_sections_set_the_exit_status(tmp_path):
@@ -259,7 +273,41 @@ def test_show_measures_nothing(tmp_path):
     with pytest.raises(ValueError, match="no machine profile at .*; run inferssd profile first"):
         execute(["--show"], host, FakeRunner({}), tmp_path)
     with pytest.raises(ValueError, match="--show measures nothing"):
-        execute(["--show", "--model", files[0]], host, FakeRunner({}), tmp_path)
+        execute(["--show", "--reprofile"], host, FakeRunner({}), tmp_path)
+
+
+def test_json_prints_one_object_with_the_machine_and_the_estimates(tmp_path):
+    host, files, build = machine(tmp_path)
+    code, out, progress = execute(
+        ["--model", files[0], "--build", str(build), "--json"],
+        host,
+        FakeRunner(replies()),
+        tmp_path,
+    )
+    (line,) = out
+    value = json.loads(line)
+    assert code == 0 and progress[0] == "reading machine identity"
+    assert value["profile"] == str(tmp_path / "state/inferssd/machine.json")
+    assert value["machine"] == {
+        "platform": "linux",
+        "cpu": "Example CPU 9000",
+        "logical_cpus": 4,
+        "memory_bytes": 32768000 * 1024,
+        "memory_read_Bps": 3.6e10,
+        "gpus": ["NVIDIA GeForce RTX 5090"],
+        "models_drive": {"model": "Example NVMe 2TB", "read_Bps": 5.1e9},
+    }
+    assert [(row["model"], row["quantization"]) for row in value["estimates"]] == [
+        ("mrfakename/DeepSeek-V4.1-Flash-1017-GGUF", "Q8_0"),
+        ("unsloth/Muse-Spark-Open-816B-A42B-GGUF", "UD-Q4_K_XL"),
+    ]
+    assert all(row["decode_tokens_per_second"] is None for row in value["estimates"])
+    # Without --model the estimates have no drive, and the machine no models drive.
+    code, out, _ = execute(["--show", "--json"], host, FakeRunner({}), tmp_path)
+    value = json.loads(out[0])
+    assert value["machine"]["models_drive"] is None and {
+        row["detail"] for row in value["estimates"]
+    } == {"pass --model with the directory that holds the models"}
 
 
 def test_cli_entry_point(tmp_path, monkeypatch, capsys):

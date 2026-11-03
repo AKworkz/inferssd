@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Optional
 
+from inferssd.app import catalog
 from inferssd.contracts import ContractError
 from inferssd.launch.resources import installed_resources
 from inferssd.machine.characteristics import (
@@ -18,10 +20,20 @@ from inferssd.machine.characteristics import (
     Characteristics,
     Section,
 )
-from inferssd.machine.identity import Host, NativeHost
+from inferssd.machine.identity import Host, NativeHost, UnsupportedPlatform
 from inferssd.machine.probes import Probes, Runner, locate, run_process
-from inferssd.machine.profile import Clock, Progress, profile, stderr_progress
+from inferssd.machine.profile import (
+    Clock,
+    Progress,
+    model_drives,
+    models_drive,
+    profile,
+    stderr_progress,
+    survey,
+)
 from inferssd.machine.store import default_path, exclusive, load_current, save
+from inferssd.strategy.estimate import Estimate, decode_estimate
+from inferssd.strategy.inputs import RuntimeFacts, read_runtime
 
 GIB = float(1 << 30)
 
@@ -29,9 +41,10 @@ GIB = float(1 << 30)
 def add_command(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     command = commands.add_parser(
         "profile",
-        help="measure this machine's CPU, memory, GPUs and model drives (read-only)",
+        help="measure this machine's CPU, memory, GPUs and model drives; estimate model speeds",
         description="Measure this machine once and save its characteristics. Sections that "
-        "are still valid are reused; drive measurements only read existing files.",
+        "are still valid are reused; drive measurements read existing files, or a test file "
+        "they write and remove in a directory without one.",
     )
     command.add_argument(
         "--model",
@@ -40,7 +53,9 @@ def add_command(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -
         type=Path,
         metavar="PATH",
         help="model file or directory whose drive to measure (repeatable); "
-        "a split GGUF counts as all its shards",
+        "a split GGUF counts as all its shards; a directory without a file of 1 GiB "
+        "is measured with a 4 GiB test file, removed after; the speed estimates "
+        "take the models to be on the drive that holds most of the files given",
     )
     probes = command.add_mutually_exclusive_group()
     probes.add_argument(
@@ -55,6 +70,12 @@ def add_command(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -
     )
     command.add_argument(
         "--show", action="store_true", help="print the saved profile; measure nothing"
+    )
+    command.add_argument(
+        "--json",
+        action="store_true",
+        help="print the profile and the supported models' decode speed estimates "
+        "as one JSON object",
     )
 
 
@@ -131,6 +152,83 @@ def summary(value: Characteristics, path: Path) -> list[str]:
     return lines
 
 
+def estimates(
+    value: Characteristics,
+    drive_key: Optional[str],
+    platform: str,
+    runtime: Callable[[], RuntimeFacts],
+) -> list[tuple[catalog.Model, Estimate]]:
+    """Each supported model's decode speed estimate with its shards on DRIVE_KEY."""
+    reason = "pass --model with the directory that holds the models"
+    if drive_key is not None:
+        try:
+            facts = runtime()
+        except UnsupportedPlatform as error:
+            reason = str(error)
+        else:
+            return [
+                (
+                    model,
+                    decode_estimate(
+                        value, model.facts, model.dense_read_bytes, facts, platform, drive_key
+                    ),
+                )
+                for model in catalog.MODELS
+            ]
+    return [(model, Estimate(None, reason)) for model in catalog.MODELS]
+
+
+def estimate_lines(rows: list[tuple[catalog.Model, Estimate]]) -> list[str]:
+    return [
+        f"estimate: {model.repo}:{model.quantization} "
+        + (
+            f"about {estimate.tokens_per_second:.1f} tok/s decode ({estimate.detail})"
+            if estimate.tokens_per_second is not None
+            else f"none: {estimate.detail}"
+        )
+        for model, estimate in rows
+    ]
+
+
+def report(
+    value: Characteristics,
+    path: Path,
+    drive_key: Optional[str],
+    rows: list[tuple[catalog.Model, Estimate]],
+) -> dict[str, object]:
+    """The profile's summary and the estimates as one JSON object."""
+    hard = value["identity"]["hard"]
+    rates = [row["Bps"] for row in value["memory"]["dram_read_Bps"]]
+    drive = next((row for row in value["storage"] if row["drive_key"] == drive_key), None)
+    return {
+        "profile": str(path),
+        "written_utc": value["created_utc"],
+        "machine": {
+            "platform": hard["platform"],
+            "cpu": hard["cpu_brand"],
+            "logical_cpus": hard["logical_cpus"],
+            "memory_bytes": hard["ram_bytes"],
+            "memory_read_Bps": max(rates) if rates else None,
+            "gpus": [gpu["name"] for gpu in hard["gpus"]],
+            "models_drive": {
+                "model": drive["model"],
+                "read_Bps": max(row["Bps"] for row in drive["random_read"]),
+            }
+            if drive is not None
+            else None,
+        },
+        "estimates": [
+            {
+                "model": model.repo,
+                "quantization": model.quantization,
+                "decode_tokens_per_second": estimate.tokens_per_second,
+                "detail": estimate.detail,
+            }
+            for model, estimate in rows
+        ],
+    }
+
+
 def _changed(value: Characteristics, previous: Optional[Characteristics]) -> dict[str, Section]:
     old = previous["sections"] if previous is not None else {}
     # Reused sections are the saved records themselves; measured ones are new.
@@ -147,17 +245,32 @@ def run(
     clock: Clock = time.time,
     progress: Progress = stderr_progress,
     emit: Callable[[str], None] = print,
+    runtime: Callable[[], RuntimeFacts] = read_runtime,
 ) -> int:
     host = host or NativeHost()
     path = args.output or default_path(host.platform(), environ, home)
+    paths = [str(model) for model in args.model]
+
+    def output(value: Characteristics, drive_key: Optional[str]) -> None:
+        lines = summary(value, path)
+        if args.json or args.model:
+            rows = estimates(value, drive_key, host.platform(), runtime)
+            if args.json:
+                emit(json.dumps(report(value, path, drive_key, rows), separators=(",", ":")))
+                return
+            lines += estimate_lines(rows)
+        for line in lines:
+            emit(line)
+
     if args.show:
-        if args.model or args.reprofile or args.resources or args.build:
-            raise ValueError("--show measures nothing; it accepts only --output")
+        if args.reprofile or args.resources or args.build:
+            raise ValueError(
+                "--show measures nothing; it accepts only --output, --model and --json"
+            )
         saved = load_current(path)
         if saved is None:
             raise ValueError(f"no machine profile at {path}; run inferssd profile first")
-        for line in summary(saved, path):
-            emit(line)
+        output(saved, models_drive(model_drives(host, paths)) if paths else None)
         return 0
     suffix = ".exe" if host.platform() == "windows" else ""
     resources = args.resources
@@ -177,24 +290,28 @@ def run(
         except (ContractError, UnicodeDecodeError) as error:
             progress(f"ignoring the unreadable saved profile {path}: {error}")
             previous = None
+        progress("reading machine identity")
+        surveyed = survey(host, paths, previous, args.reprofile, progress)
         value = profile(
             host,
             probes,
-            [str(model) for model in args.model],
+            paths,
             previous,
             args.reprofile,
             clock=clock,
             progress=progress,
+            surveyed=surveyed,
         )
         if value is not previous:
             save(value, path)
-    for line in summary(value, path):
-        emit(line)
+    output(value, models_drive(surveyed.drives))
     changed = _changed(value, previous)
     partial = [name for name, rec in changed.items() if rec["status"] == "partial"]
     failed = [name for name, rec in changed.items() if rec["status"] == "failed"]
+    # With --json, stdout holds the one JSON object; the run's problems go to stderr.
+    note = progress if args.json else emit
     if partial:
-        emit(f"{len(partial)} section(s) partial: {', '.join(partial)}")
+        note(f"{len(partial)} section(s) partial: {', '.join(partial)}")
     if failed:
-        emit(f"{len(failed)} section(s) failed: {', '.join(failed)}")
+        note(f"{len(failed)} section(s) failed: {', '.join(failed)}")
     return 1 if failed else 0

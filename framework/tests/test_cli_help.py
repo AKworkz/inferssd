@@ -1,5 +1,7 @@
 """The inferssd command offers serve, cli and profile, and lists all three."""
 
+from importlib import metadata
+
 import pytest
 
 from inferssd.cli import main
@@ -23,3 +25,10 @@ def test_removed_commands_are_refused(capsys, command):
     with pytest.raises(SystemExit) as error:
         main([command, "--help"])
     assert error.value.code == 2 and "invalid choice" in capsys.readouterr().err
+
+
+def test_version_is_the_installed_packages(capsys):
+    with pytest.raises(SystemExit) as error:
+        main(["--version"])
+    assert error.value.code == 0
+    assert capsys.readouterr().out == f"inferssd {metadata.version('inferssd')}\n"

@@ -3,9 +3,10 @@
 
 CPU topology and memory size are read directly. The CPU probe measures ggml
 compute and DRAM reads; the SSD probe reads random aligned extents inside
-existing large files on each drive (never writing); on Linux with an NVIDIA GPU
-the memory probe measures transfers. Sections the saved file still describes
-correctly are reused (see ``plan_refresh``).
+existing large files on each drive, and on a drive where a given directory holds
+none, inside a test file of random data written there and removed after; on
+Linux with an NVIDIA GPU the memory probe measures transfers. Sections the
+saved file still describes correctly are reused (see ``plan_refresh``).
 
 CPU clusters follow the engine's split (``ssd::platform::topology``): Linux
 takes each CPU's ``cpu_capacity``, else ``cpuinfo_max_freq``, sorts them in
@@ -45,6 +46,7 @@ from inferssd.machine.identity import (
     GPUQueryFailed,
     Host,
     drive_info,
+    is_test_file,
     live_identity,
     online_cpus,
     read,
@@ -68,6 +70,7 @@ from inferssd.source.header import SHARD
 
 MIN_FILE_BYTES = 1 << 30
 MAX_FILES = 8
+TEST_FILE_BYTES = 4 << 30  # spread over 4 GiB, reads do not stay in a drive's own cache
 # ggml's CPU feature list also names build options; they are not instruction sets.
 BUILD_OPTIONS = frozenset(("ACCELERATE", "CPU_HBM", "KLEIDIAI", "LLAMAFILE", "OPENMP", "REPACK"))
 Clock = Callable[[], float]
@@ -213,26 +216,55 @@ def model_files(host: Host, paths: Sequence[str]) -> list[tuple[str, int]]:
             if directory:
                 pattern = posixpath.join(glob.escape(directory), pattern)
             names = host.glob(pattern) or names
+        # An empty directory lists nothing: its drive is measured with a test file.
         listed = [row for name in names for row in host.regular_files(name)]
-        if not listed:
-            raise ValueError(f"no files under {path}")
         for real, size in listed:
+            if is_test_file(real):  # a drive test file, never a model
+                continue
             found.setdefault(real, size)
     return list(found.items())
 
 
-def model_drives(
-    host: Host, paths: Sequence[str]
-) -> dict[str, tuple[Drive, list[tuple[str, int]]]]:
+@dataclass(frozen=True)
+class ModelDrive:
+    """A drive the given paths are on: their files there and the given directories on it."""
+
+    drive: Drive
+    files: list[tuple[str, int]]
+    directories: list[str]
+
+
+def model_drives(host: Host, paths: Sequence[str]) -> dict[str, ModelDrive]:
     devices: dict[tuple[int, int], Drive] = {}
-    drives: dict[str, tuple[Drive, list[tuple[str, int]]]] = {}
-    for path, size in model_files(host, paths):
+    drives: dict[str, ModelDrive] = {}
+
+    def holding(path: str) -> ModelDrive:
         device = host.device(path)
         if device not in devices:
             devices[device] = drive_info(host, path)
         drive = devices[device]
-        drives.setdefault(drive.key, (drive, []))[1].append((path, size))
+        return drives.setdefault(drive.key, ModelDrive(drive, [], []))
+
+    seen: set[str] = set()
+    for path in paths:
+        listed = model_files(host, [path])
+        for real, size in listed:
+            if real not in seen:
+                seen.add(real)
+                holding(real).files.append((real, size))
+        # Only a directory with no file to read gets a test file: one whose files sit on
+        # another drive (a mount, links) has that drive measured from them instead.
+        if host.is_directory(path) and all(size < MIN_FILE_BYTES for _, size in listed):
+            holding(path).directories.append(path)
     return drives
+
+
+def models_drive(drives: dict[str, ModelDrive]) -> Optional[str]:
+    """The drive holding most of the given files' bytes, else the first given directory's."""
+    held = {key: sum(size for _, size in place.files) for key, place in drives.items()}
+    if any(held.values()):
+        return max(held, key=lambda key: held[key])
+    return next((key for key, place in drives.items() if place.directories), None)
 
 
 def measure_cpu(
@@ -378,34 +410,67 @@ def measure_gpus(
 
 
 def measure_drive(
-    drive: Drive,
-    files: Sequence[tuple[str, int]],
-    probes: Probes,
-    clock: Clock,
-    progress: Progress,
+    host: Host, place: ModelDrive, probes: Probes, clock: Clock, progress: Progress
 ) -> tuple[Optional[Storage], Section]:
+    """Read rates of PLACE's drive: in its largest files, else in a test file in its directory."""
     start = clock()
+    drive = place.drive
+    for directory in place.directories:
+        host.clear_test_files(directory)
     chosen = [
-        path for path, size in sorted(files, key=lambda item: -item[1]) if size >= MIN_FILE_BYTES
-    ]
-    chosen = chosen[:MAX_FILES]
-    if not chosen:
-        largest = max(size for _, size in files)
+        path
+        for path, size in sorted(place.files, key=lambda item: -item[1])
+        if size >= MIN_FILE_BYTES
+    ][:MAX_FILES]
+    if chosen:
+        progress(
+            f"SSD probe: random reads in {len(chosen)} existing files on {drive.model} "
+            f"({drive.bus})"
+        )
+        method = f"{PROBE_SCHEMAS['ssd']} read-only random extents in {len(chosen)} existing files"
+        return _read_rates(drive, chosen, method, probes, clock, start)
+    largest = max((size for _, size in place.files), default=0)
+    reason = f"no file of at least {MIN_FILE_BYTES} bytes on this drive among the given paths"
+    if not place.directories:
+        detail = f"{reason} (largest {largest} bytes)"
+        return None, section(start, clock(), "none", "failed", detail)
+    directory = place.directories[0]
+    free = host.free_bytes(directory)
+    if free < TEST_FILE_BYTES + MIN_FILE_BYTES:
         return None, section(
             start,
             clock(),
             "none",
             "failed",
-            f"no file of at least {MIN_FILE_BYTES} bytes on this drive among the given paths "
-            f"(largest {largest} bytes)",
+            f"{reason}, and the {free} bytes free in {directory} leave no room for a "
+            f"{TEST_FILE_BYTES}-byte test file",
         )
     progress(
-        f"SSD probe: random reads in {len(chosen)} existing files on {drive.model} ({drive.bus})"
+        f"SSD probe: random reads in a {TEST_FILE_BYTES >> 30} GiB test file written to "
+        f"{directory} on {drive.model} ({drive.bus})"
     )
-    method = f"{PROBE_SCHEMAS['ssd']} read-only random extents in {len(chosen)} existing files"
+    method = (
+        f"{PROBE_SCHEMAS['ssd']} random extents in a {TEST_FILE_BYTES}-byte test file of "
+        "random data, removed after"
+    )
+    try:
+        with host.test_file(directory, TEST_FILE_BYTES) as path:
+            return _read_rates(drive, [path], method, probes, clock, start)
+    except OSError as error:
+        return None, section(start, clock(), method, "failed", f"the test file failed: {error}")
+
+
+def _read_rates(
+    drive: Drive,
+    paths: Sequence[str],
+    method: str,
+    probes: Probes,
+    clock: Clock,
+    start: float,
+) -> tuple[Optional[Storage], Section]:
     try:
         entry = storage_entry(
-            probes.run("ssd", [argument for path in chosen for argument in ("--file", path)]), drive
+            probes.run("ssd", [argument for path in paths for argument in ("--file", path)]), drive
         )
     except ProbeError as error:
         return None, section(start, clock(), method, "failed", str(error))
@@ -421,7 +486,7 @@ class Survey:
     identity: Identity
     gpu_failure: str  # why nvidia-smi failed, or ""
     saved_unified: bool  # the saved file's unified memory, kept while the GPUs are unknown
-    drives: dict[str, tuple[Drive, list[tuple[str, int]]]]
+    drives: dict[str, ModelDrive]
     refresh: Refresh
 
     @property
@@ -507,10 +572,10 @@ def profile(
                 for entry in base["storage"]
                 if STORAGE_PREFIX + entry["drive_key"] not in refresh
             ]
-    for key, (drive, files) in drives.items():
+    for key, place in drives.items():
         if STORAGE_PREFIX + key in refresh:
             entry, sections[STORAGE_PREFIX + key] = measure_drive(
-                drive, files, probes, clock, progress
+                host, place, probes, clock, progress
             )
             if entry is not None:
                 storage.append(entry)

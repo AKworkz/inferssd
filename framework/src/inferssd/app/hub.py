@@ -9,10 +9,9 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
-MODELS = {
-    "mrfakename/DeepSeek-V4.1-Flash-1017-GGUF": "Q8_0",
-    "unsloth/Muse-Spark-Open-816B-A42B-GGUF": "UD-Q4_K_XL",
-}
+from inferssd.app import catalog
+
+MODELS = {model.repo: model.quantization for model in catalog.MODELS}
 SPLIT = re.compile(r"(.+)-(\d{5})-of-(\d{5})\.gguf$")
 
 

@@ -7,6 +7,7 @@ import copy
 import json
 import os
 import plistlib
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,9 +15,16 @@ from test_machine_identity import SMI, FakeHost, darwin_commands, linux_tree, nv
 from test_machine_probes import CPU_REPORT, MEMORY_REPORT, PATHS, FakeRunner, replies
 
 from inferssd.machine.characteristics import validate
-from inferssd.machine.identity import Command
+from inferssd.machine.identity import Command, Drive
 from inferssd.machine.probes import Completed, Probes
-from inferssd.machine.profile import linux_topology, model_files, profile, split_fastest
+from inferssd.machine.profile import (
+    ModelDrive,
+    linux_topology,
+    model_files,
+    models_drive,
+    profile,
+    split_fastest,
+)
 
 GIB = 1 << 30
 
@@ -219,9 +227,75 @@ def test_missing_model_path_is_an_error(tmp_path):
     host, _ = linux_machine(tmp_path)
     with pytest.raises(FileNotFoundError):
         run(host, [str(tmp_path / "absent.gguf")], FakeRunner(replies()))
-    (tmp_path / "empty" / "sub").mkdir(parents=True)
-    with pytest.raises(ValueError, match="no files under .*empty$"):
-        run(host, [str(tmp_path / "empty")], FakeRunner(replies()))
+
+
+def test_a_directory_without_large_files_is_measured_with_a_test_file(tmp_path):
+    host, files = linux_machine(tmp_path)
+    empty = tmp_path / "models" / "empty"
+    (empty / "sub").mkdir(parents=True)
+    runner = FakeRunner(replies())
+    value, lines = run(host, [str(empty)], runner)
+    ((test_file, size, existed),) = host.test_files
+    assert (os.path.dirname(test_file), size, existed) == (str(empty), 4 * GIB, True)
+    assert not os.path.exists(test_file) and sorted(os.listdir(empty)) == ["sub"]
+    assert runner.calls[-1] == (
+        ["/opt/inferssd/bin/inferssd-ssdprobe", "--file", test_file],
+        1800.0,
+    )
+    section = value["sections"]["storage:" + nvme_key()]
+    assert section["status"] == "ok" and section["method"] == (
+        "inferssd-ssdprobe/1 random extents in a 4294967296-byte test file of random data, "
+        "removed after, io_uring reader"
+    )
+    assert any(line.startswith("SSD probe: random reads in a 4 GiB test file") for line in lines)
+    # Existing files of 1 GiB on the drive are read instead; no test file is written.
+    run(host, [str(tmp_path / "models")], FakeRunner(replies()), reprofile=True)
+    assert len(host.test_files) == 1
+
+
+def test_a_killed_runs_test_file_is_neither_read_nor_kept(tmp_path):
+    host, _ = linux_machine(tmp_path)
+    empty = tmp_path / "models" / "empty"
+    empty.mkdir()
+    child = subprocess.Popen(["true"])
+    child.wait()
+    left = empty / f".inferssd-drive-test-{child.pid}-x"
+    with open(left, "wb") as stream:
+        stream.truncate(4 * GIB)
+    runner = FakeRunner(replies())
+    run(host, [str(empty)], runner)
+    ((test_file, _, _),) = host.test_files
+    assert runner.calls[-1][0][-1] == test_file != str(left)
+    assert os.listdir(empty) == []
+
+
+def test_the_models_drive_holds_most_of_the_files_else_the_directory():
+    big, small = (Drive(key, "x", "nvme") for key in ("big", "small"))
+    assert (
+        models_drive(
+            {"small": ModelDrive(small, [("/a", 5)], []), "big": ModelDrive(big, [("/b", 9)], [])}
+        )
+        == "big"
+    )
+    assert (
+        models_drive({"small": ModelDrive(small, [], []), "big": ModelDrive(big, [], ["/m"])})
+        == "big"
+    )
+    assert models_drive({}) is None
+
+
+def test_a_directory_without_room_for_the_test_file_fails_its_drive(tmp_path):
+    host, _ = linux_machine(tmp_path)
+    host.free = 5 * GIB - 1
+    empty = tmp_path / "models" / "empty"
+    empty.mkdir()
+    value, _ = run(host, [str(empty)], FakeRunner(replies()))
+    section = value["sections"]["storage:" + nvme_key()]
+    assert (
+        section["status"] == "failed"
+        and "leave no room for a 4294967296-byte test file" in (section["detail"])
+    )
+    assert host.test_files == [] and value["storage"] == []
 
 
 def test_split_gguf_in_a_directory_with_glob_characters(tmp_path):
