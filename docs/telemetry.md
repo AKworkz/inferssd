@@ -37,7 +37,7 @@ settings or telemetry owner.
 The server option `--ssd-telemetry FILE` creates the context-owned writer; all
 publishers are joined before it is destroyed. The writer publishes the effective
 settings first, then `ssd.controller.begin` (see
-[controller observations](architecture/controller-observations.md)).
-`inferssd launch` writes this stream to `native-events.jsonl` in its output
-directory. Numerical equality with channels enabled and disabled is an engine
+[native observations](architecture/native-observations.md)).
+`inferssd serve` and `cli` write this stream to `native-events.jsonl` in the
+launch's run directory. Numerical equality with channels enabled and disabled is an engine
 integration check, not a conclusion of the JSON protocol unit tests.

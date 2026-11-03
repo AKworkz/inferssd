@@ -516,7 +516,7 @@ def operator_summary(stream, report):
         launches = [(row, entry) for row, entry in cells if isinstance(entry.get("derived_launch"), dict)]
         if launches:
             stream.write("\n### Derived launches\n\n")
-            stream.write("Each side started its servers the way `inferssd launch` does: that side's own launch strategy "
+            stream.write("Each side started its servers the way `inferssd serve` does: that side's own launch strategy "
                          "derived the settings, thread pools and server arguments from the device's machine "
                          "characteristics (a baseline job profiles them; a PR job takes those of the device's most "
                          "recent baseline job), the model's GGUF header and the job's memory budget. Origin is "

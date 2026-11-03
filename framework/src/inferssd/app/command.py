@@ -30,13 +30,23 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
         source.add_argument("-m", "--model", type=Path, help="local first GGUF shard (no download)")
         parser.add_argument("--revision", default="main", help="Hugging Face revision")
         parser.add_argument("--model-dir", type=Path, default=data_directory() / "models")
-        # For developers: the installer sets the descriptor and the launch derives the rest.
-        parser.add_argument("--resources", type=Path, help=argparse.SUPPRESS)
+        parser.add_argument(
+            "--resources",
+            type=Path,
+            help="engine descriptor of a source build (the installer sets this)",
+        )
         parser.add_argument("--port", type=int, default=8080)
         parser.add_argument("--context", type=int, default=8192)
-        parser.add_argument("--settings", type=Path, help=argparse.SUPPRESS)
         parser.add_argument(
-            "--set", dest="overrides", action="append", default=[], help=argparse.SUPPRESS
+            "--settings", type=Path, help="typed settings file (see docs/configuration.md)"
+        )
+        parser.add_argument(
+            "--set",
+            dest="overrides",
+            action="append",
+            default=[],
+            metavar="KEY=VALUE",
+            help="override one setting; repeat for more",
         )
         parser.add_argument("--machine", type=Path, help=argparse.SUPPRESS)
         parser.add_argument("--reprofile", action="store_true")

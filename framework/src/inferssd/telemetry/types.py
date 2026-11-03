@@ -1,4 +1,4 @@
-"""Typing views of legacy observations; these do not validate or copy input data."""
+"""Typing views of native observations; these do not validate or copy input data."""
 
 from __future__ import annotations
 
@@ -17,37 +17,8 @@ class ArmFiles(Protocol):
     def gzip_open(self, path: str, mode: str = "r", *, errors: Optional[str] = None) -> TextIO: ...
 
 
-class ControllerArmResult(TypedDict):
+class ObservedArm(TypedDict):
     groups: list[list[TokenKey]]
     trace: dict[TokenKey, dict[int, TraceLayer]]
     prof: dict[TokenKey, list[float]]
     pf_graphs: list[Record]
-
-
-class ArmResult(ControllerArmResult):
-    cache_load: Optional[Record]
-    new_slot_bytes: float
-    new_slot_windows: list[float]
-    load_s: Optional[float]
-    segments: list[list[dict[int, TraceLayer]]]
-    window: list[TokenKey]
-    lprof: dict[tuple[tuple[int, int], int, int], tuple[float, float]]
-    prefill: list[Record]
-    admission: list[Record]
-    threads: Optional[Record]
-    host: Optional[Record]
-    tier_slots_max: Optional[float]
-    tier_slots_first: Optional[int]
-    tier_bytes: Optional[tuple[float, Optional[float]]]
-    mrc: Any
-    tier_min_count: Optional[float]
-    lio: dict[TokenKey, list[float]]
-    client: list[Record]
-    memory: Record
-    checkpoint_align: Optional[int]
-    ledger: Optional[Record]
-    prefetch: Optional[Record]
-    ram_slots: Optional[int]
-    decode_place: Optional[Record]
-    host_register: Optional[Record]
-    prefill_engine: Optional[Record]

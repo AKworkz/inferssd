@@ -6,8 +6,8 @@ file. The file describes the machine only: its CPUs, memory, GPUs and
 the drives that hold models. It holds no model data, no placement and no cache
 sizes; each launch works those out from the model's GGUF header and this file.
 
-You do not need to run anything for this: the first `inferssd launch` on a
-machine measures it, and later launches reuse the file (see
+You do not need to run anything for this: the first `inferssd serve` or `cli` on
+a machine measures it, and later launches reuse the file (see
 [launches](#launches)). `inferssd profile` measures or shows it on its own.
 
 Linux and macOS are supported. Windows is not supported yet.
@@ -48,7 +48,7 @@ running.
 
 ## Launches
 
-Before `inferssd launch --execute` starts the server, it checks that the
+Before a launch starts the server, it checks that the
 characteristics file exists and is current for this machine and for the drive
 that holds the model. When it is not, the launch measures what is missing
 first, printing its progress on stderr. On a new machine this takes one to
@@ -86,10 +86,8 @@ memory, the available memory) to choose:
 
 Only the prefill route and the pass size change the model's output, the way
 any GPU kernel or batch shape does; the rest keeps it bit for bit. The launch fills only the settings
-you left at their defaults and the thread options you did not give: a value
-from `--set`, from the settings file or from `--threads`, `--batch-threads` or
-`--cpus` always wins, and a choice that contradicts one of your values is left
-out. Every choice and its reason is written to `strategy.json` in the run
+you left at their defaults: a value from `--set` or from the settings file always
+wins, and a choice that contradicts one of your values is left out. Every choice and its reason is written to `strategy.json` in the run
 directory and to the settings file the launch generates. Windows launches do
 not use a profile yet.
 

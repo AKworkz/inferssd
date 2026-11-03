@@ -472,7 +472,7 @@ def prepare(args, api=None):
                                        identities, mode, protocol)
         if template.get("device") != device or manifest.get("job_id") != job_id:
             raise ValueError("device/job template differs from selected slot")
-        # Timed servers start the way a user's `inferssd launch` starts them: each
+        # Timed servers start the way a user's `inferssd serve` starts them: each
         # side resolves its launch on the device from a reviewed request.
         if mode == MODE and not staged_launch.derived(template):
             raise ValueError("operator performance launches are derived on the device; every model needs a launch request")

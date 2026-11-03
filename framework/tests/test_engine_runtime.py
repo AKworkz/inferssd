@@ -11,9 +11,8 @@ from observe_engine_reference import CASES, observe
 from observe_engine_reference import Effects as FEffects
 from observe_engine_reference import api as reference_api
 
-from inferssd.engine import core, owned, runtime
-from inferssd.launch.typed import LaunchSpec
-from inferssd.launch.types import LaunchInput, Resolution
+from inferssd.engine import core, owned
+from inferssd.launch.types import Resolution
 from inferssd.platform.policy import Policy
 from inferssd.platform.run_directory import reserve
 
@@ -263,37 +262,6 @@ def test_loader_environment_only_restored_for_server():
     restored = dict(transported)
     restored.update(json.loads(restored.pop("INFERSSD_INTERNAL_SERVER_ENV")))
     assert restored == env
-
-
-def test_linux_factory_wires_real_dependencies_and_darwin_rejects(tmp_path, monkeypatch):
-    captured = {}
-    monkeypatch.setattr(
-        runtime, "TypedController", lambda *a, **kw: captured.update(args=a, **kw) or captured
-    )
-    value = runtime.Runtime(
-        LaunchInput("/fixture/repo", ()),
-        policy(tmp_path, "linux"),
-        host=object(),
-        emit=lambda _: None,
-        configuration=LaunchSpec("/fixture/model.gguf", 8080),
-    )
-    result = value.controller(
-        "/recorded", "/output", 8080, (4, "2:2"), [], host_threads=lambda: 4, stdout=io.StringIO()
-    )
-    assert result["engine_factory"].__self__ is value
-    assert result["post"] is core.post
-    assert result["session"].__class__.__name__ == "NativeObservationSession"
-    value.policy = replace(value.policy, platform="darwin")
-    with pytest.raises(ValueError, match="M2"):
-        value.controller(
-            "/recorded",
-            "/output",
-            8080,
-            (4, "2:2"),
-            [],
-            host_threads=lambda: 4,
-            stdout=io.StringIO(),
-        )
 
 
 def test_directory_existing_empty_allowed_but_completed_claim_not_reused(tmp_path):

@@ -2,7 +2,7 @@
 """Launches resolved on the device by each side's own framework; no device, broker or server.
 
 The resolution records are real: the sandbox program runs the framework's own
-`inferssd launch --dry-run` on a header-only GGUF and the x86 machine
+the typed launch's `--dry-run` on a header-only GGUF and the x86 machine
 characteristics fixture, then the paths are spelled as the Linux sandbox sees them.
 """
 
@@ -605,7 +605,7 @@ def test_the_report_shows_each_sides_derived_thread_pools_and_the_changed_settin
                dict(device="dgx-spark", model="muse", status="baseline", performance=[dict(tier="512", **entry)],
                     machine_profile=dict(sha256="9" * 64, returncode=0, side="candidate", sections=dict(cpu="ok")))]))
     text = stream.getvalue()
-    assert "### Derived launches" in text and "the way `inferssd launch` does" in text
+    assert "### Derived launches" in text and "the way `inferssd serve` does" in text
     assert ("- cloud-5090: machine characteristics SHA `" + CHARACTERISTICS + "`, taken from the baseline job of `"
             + BASE + "`; sections not ok: gpus failed.") in text
     assert "- dgx-spark: machine characteristics SHA `" + "9" * 64 + "`, profiled by this baseline job; " in text

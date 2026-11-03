@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from test_offline_planner import exact, load
+from reference_oracles import exact, load
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REFERENCE_HEADER = load("gguf_header")

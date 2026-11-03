@@ -1,8 +1,0 @@
-{
-  "platform": "linux",
-  "lock_path": "/tmp/inferssd.lock",
-  "stop_path": "/tmp/inferssd.stop",
-  "memory_budget_bytes": 17179869184,
-  "minimum_memlock_bytes": 0,
-  "cleanup_seconds": 30
-}

@@ -1,4 +1,4 @@
-"""Local filesystem and installed CLI boundaries using header-only synthetic files."""
+"""Local filesystem boundaries of the source operations, using header-only synthetic files."""
 
 from __future__ import annotations
 
@@ -27,8 +27,23 @@ def original_command(argv):
         )
 
 
+def operation(argv):
+    """Run one source operation with the original command line's arguments, in process."""
+    kind, *words = argv
+    if kind == "index":
+        experts.index(words[0], words[1] if len(words) == 3 else None, words[-1])
+    elif kind == "facts":
+        experts.facts(words[0], words[1] if len(words) == 2 else None)
+    elif kind == "lane-args":
+        experts.lane_args(words[0])
+    elif kind == "dense":
+        experts.dense(*words)
+    else:
+        experts.iolog(words[0], int(words[1]), int(words[2]), words[3], None)
+
+
 @pytest.mark.parametrize("kind", ["gguf", "pack", "split"])
-def test_real_files_and_cli_bytes(tmp_path, kind):
+def test_real_files_and_output_bytes(tmp_path, kind):
     model = tmp_path / ("model-00001-of-00002.gguf" if kind == "split" else "model.gguf")
     model.write_bytes(gguf({}))
     if kind == "split":
@@ -56,13 +71,10 @@ def test_real_files_and_cli_bytes(tmp_path, kind):
     original_files = {p.name: p.read_bytes() for p in target.iterdir()}
     shutil.rmtree(target)
     for argv, (stdout, stderr) in zip(commands, expected):
-        result = subprocess.run(
-            [sys.executable, "-m", "inferssd", "source", *argv],
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-        assert (result.stdout, result.stderr) == (stdout, stderr)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            operation(argv)
+        assert (out.getvalue(), err.getvalue()) == (stdout, stderr)
     assert {p.name: p.read_bytes() for p in target.iterdir()} == original_files
     # The local mmap adapter produces the same NamedTuple data after unmapping.
     assert header.read_model(str(model)) == REFERENCE_HEADER.read_model(str(model))
@@ -86,13 +98,8 @@ def test_real_mtime_and_glob_escape(tmp_path):
 
 def test_real_missing_input_no_artifact(tmp_path):
     missing, out = str(tmp_path / "missing.gguf"), tmp_path / "index"
-    result = subprocess.run(
-        [sys.executable, "-m", "inferssd", "source", "index", missing, str(out)],
-        text=True,
-        capture_output=True,
-    )
-    assert result.returncode != 0
-    assert "FileNotFoundError" in result.stderr
+    with pytest.raises(FileNotFoundError):
+        operation(["index", missing, str(out)])
     # The reference creates the directory before header access; preserve that failure side effect.
     assert out.is_dir() and not list(out.iterdir())
 
@@ -111,7 +118,7 @@ with patch.object(builtins, 'open', unexpected), \
      patch.object(os, 'replace', unexpected), \
      patch.object(os.path, 'getmtime', unexpected), \
      patch.object(random.Random, 'choice', unexpected):
-    import inferssd.source.header, inferssd.source.experts, inferssd.source.command
+    import inferssd.source.header, inferssd.source.experts
 print('inert')
 """
     result = subprocess.run(

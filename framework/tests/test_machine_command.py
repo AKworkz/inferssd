@@ -180,11 +180,11 @@ def test_missing_installed_descriptor_is_not_silently_ignored(tmp_path):
     assert not (tmp_path / "state/inferssd/machine.json").exists()
 
 
-def test_profile_stays_available_when_unlisted(capsys):
+def test_profile_is_listed(capsys):
     with pytest.raises(SystemExit) as error:
         main(["--help"])
     text = capsys.readouterr().out
-    assert error.value.code == 0 and "measure this machine" not in text
+    assert error.value.code == 0 and "measure this machine" in text
     with pytest.raises(SystemExit) as error:
         main(["profile", "--help"])
     text = capsys.readouterr().out

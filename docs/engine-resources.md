@@ -1,12 +1,8 @@
 # Engine deployment resources
 
-The installed framework does not discover a source checkout. Pass `--resources`
-to bind one deployment, or provide both `--binary` and `--template`. The optional
-`--repo` adapter uses `engine/models/templates/` in a development checkout and
-the first `bin/inferssd-server` it finds under the preset build directory
-(`build-linux-cuda`, then `build-linux-cpu` on Linux; `build-macos-metal` on
-Darwin; `build-x64-windows-llvm-release` on Windows, where the server is
-`bin\inferssd-server.exe`), then under `build-mac` (Darwin only) or `build`.
+`inferssd serve` and `cli` use the engine the installer set up. The installed
+framework does not discover a source checkout: pass `--resources` to use a
+deployment descriptor, for example one generated from a source build.
 
 A descriptor is ordinary JSON. Relative paths resolve against its own directory:
 
@@ -30,7 +26,7 @@ A descriptor is ordinary JSON. Relative paths resolve against its own directory:
 
 Use `darwin` for an Apple Silicon deployment and `windows` for a Windows one. The
 `qwen4exp` profile needs no template: it launches with the chat template in its
-GGUF. `--binary` and `--template` override those individual descriptor paths. Missing selected resources or incompatible
+GGUF. Missing selected resources or incompatible
 contract versions fail before engine startup. The descriptor is an operator's
 explicit deployment contract, not a claim that untrusted binaries were verified.
 Normal process ownership, memory policy and runtime evidence checks still apply.
@@ -48,9 +44,7 @@ wheel needs only its standard-library Python runtime. Existing source indexing
 uses packaged code and reads GGUF metadata directly, without importing engine
 source files or requiring a separate GGUF Python installation.
 
-Use the [typed runtime guide](../framework/README.md#explicit-owned-server-execution)
-for the required resource policy and settings. Replacing `--repo` with
-`--resources /deployment/engine.json` works from any current directory. The
-optional `probes` map names `io`, `memory`, `ssd` and `cpu` executable
-resources; it does not trigger automatic probing, and the launcher does not
-orchestrate a live bootstrap.
+`--resources /deployment/engine.json` works from any current directory; see the
+[settings](configuration.md) for what a launch can be given. The optional `probes`
+map names `io`, `memory`, `ssd` and `cpu` executable resources, which
+`inferssd profile` and the first launch run to measure the machine.

@@ -29,7 +29,7 @@ run/attempt, reviewed source identities and reviewed device config.
 
 ## Launches
 
-Every server is started the way `inferssd launch` starts it on a user's machine.
+Every server is started the way `inferssd serve` starts it on a user's machine.
 A user profiles a machine once and then reuses the characteristics file, and
 device CI does the same: only the baseline job of a `main` commit (see
 [baseline history](#baseline-history)) profiles the device. After building that

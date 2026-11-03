@@ -152,29 +152,3 @@ def test_host_and_artifact_requests_keep_reference_order(record):
             if f.name in names
         ]
         assert actual == external_order(run["calls"])
-
-
-def test_complete_settings_command_feeds_resolver():
-    import copy
-
-    from test_offline_planner import runtime_key
-    from test_settings_command import observe_candidate
-
-    fixtures = Path(__file__).parent / "fixtures"
-    case = json.loads((fixtures / "settings-command-goldens.json").read_text())["cases"][0]
-    generated = observe_candidate(case)
-    assert generated == case["expected"][runtime_key()]
-    record = next(
-        r
-        for r in json.loads((fixtures / "launch-settings-composed-reference.json").read_text())
-        if r["case"]["name"].endswith(runtime_key())
-    )
-    record = copy.deepcopy(record)
-    record["case"]["settings"] = generated["writes"]["/case/settings.env"]
-    result, _ = replay(record, record["runs"][0])
-    assert result.code == 0
-    for channel in ("stdout", "stderr"):
-        assert (
-            "".join(e.text for e in result.outputs if e.channel == channel)
-            == record["runs"][0][channel]
-        )

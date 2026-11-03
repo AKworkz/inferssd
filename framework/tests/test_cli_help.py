@@ -1,29 +1,25 @@
-"""The top-level help lists the public commands; the others still run."""
+"""The inferssd command offers serve, cli and profile, and lists all three."""
 
 import pytest
 
 from inferssd.cli import main
-from inferssd.configuration.settings import host_platform
 
 
-def test_help_lists_public_commands_only(capsys):
+def test_help_lists_every_command(capsys):
     with pytest.raises(SystemExit) as error:
         main(["--help"])
-    text = capsys.readouterr().out
-    assert error.value.code == 0 and "{cli,serve}" in text
-    assert "launch-recorded" not in text and "bootstrap-records" not in text
-    assert "configuration" not in text
+    text = " ".join(capsys.readouterr().out.split())
+    assert error.value.code == 0 and "{cli,serve,profile}" in text
+    for line in ("chat in the terminal", "start the OpenAI-compatible API", "measure this machine"):
+        assert line in text
 
 
-def test_unlisted_commands_still_parse(capsys):
+@pytest.mark.parametrize(
+    "command",
+    ["launch", "launch-recorded", "configuration", "source", "bootstrap-records", "report"]
+    + ["probe", "validate", "plan", "settings", "fit"],
+)
+def test_removed_commands_are_refused(capsys, command):
     with pytest.raises(SystemExit) as error:
-        main(["plan", "--help"])
-    assert error.value.code == 0 and " plan [-h] --prompts" in capsys.readouterr().out
-
-
-def test_configuration_platform_defaults_to_this_host(tmp_path):
-    host = host_platform()
-    implicit, explicit = tmp_path / "implicit.ssd", tmp_path / "explicit.ssd"
-    assert main(["configuration", "write", "--output", str(implicit)]) == 0
-    assert main(["configuration", "write", "--platform", host, "--output", str(explicit)]) == 0
-    assert implicit.read_text() == explicit.read_text()
+        main([command, "--help"])
+    assert error.value.code == 2 and "invalid choice" in capsys.readouterr().err

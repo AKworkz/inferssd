@@ -33,8 +33,7 @@ def observe(session, config, model, output, *, platform):
     events.write_bytes((output / "stdout.log").read_bytes())
     # These imports belong to the pinned installed controller wheel, never the
     # candidate source tree. A server.log is intentionally absent here.
-    from inferssd.engine.runtime import LocalObservations
-    from inferssd.telemetry.controller import NativeObservationSession
+    from inferssd.telemetry.observations import LocalObservations, NativeObservationSession
     arm = NativeObservationSession(files=LocalObservations()).read_arm_cached(str(output), 0)
     if not arm["groups"] or not arm["trace"] or not arm["prof"]:
         raise ValueError("production observer did not consume native route and profile records")

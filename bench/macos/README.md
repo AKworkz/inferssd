@@ -24,8 +24,9 @@ admission order remain unchanged. This setting exists for controlled experiments
 a production default requires numerical, memory and end-to-end validation.
 
 `GGML_MOE_EXPERT_GGUF_ALIAS_TSV` selects the same index format as the Linux reader.
-Generate the index from GGUF metadata with `inferssd source index`
-(see the [framework README](../../framework/README.md)).
+Generate the index from GGUF metadata with
+`python3 -m inferssd.source.gguf_alias --model-glob 'MODEL-*.gguf' --out alias.tsv --summary-json alias.json`,
+the generator a launch runs when `expert.source` is not set.
 It is mutually exclusive with `SSD_LLAMA_MAC_EXPERT_PACK`. GGUF slices can be unaligned
 and end exactly at EOF. With read alignment 1, the reader requests logical bytes.
 Alignment 4096 or 16384 expands the source interval to page boundaries, capped at

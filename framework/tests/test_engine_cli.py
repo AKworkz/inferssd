@@ -1,4 +1,4 @@
-"""Installed command entry checks; substitute Runtime before any native effect."""
+"""Typed launch entry checks; substitute Runtime before any native effect."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def test_command_reports_final_owner_failure_in_subprocess(tmp_path, failure):
     script = r"""
 import sys
 from inferssd.engine import command
-from inferssd import cli
+from inferssd.launch import typed_command
 class Engine:
     ok = True
     def alive(self): return False
@@ -32,10 +32,10 @@ class Runtime:
     def __init__(self, *args, **kwargs): pass
     def engine(self, *args): return Engine()
 command.Runtime = Runtime
-arguments = ["launch", "--execute", "--platform", "darwin", "--repo", sys.argv[3],
+arguments = ["--execute", "--platform", "darwin", "--repo", sys.argv[3],
              "--runtime-policy", sys.argv[2], "--output-dir", sys.argv[3] + "/run",
              "--port", "8080", "--model", sys.argv[3] + "/fixture.gguf"]
-raise SystemExit(cli.main(arguments))
+raise SystemExit(typed_command.main(arguments))
 """
     result = subprocess.run(
         [
@@ -71,9 +71,8 @@ def test_execute_missing_policy_fails_before_host_or_files(tmp_path):
     result = subprocess.run(
         [
             sys.executable,
-            "-m",
-            "inferssd",
-            "launch",
+            "-c",
+            "from inferssd.launch import typed_command; raise SystemExit(typed_command.main())",
             "--execute",
             "--platform",
             "linux",

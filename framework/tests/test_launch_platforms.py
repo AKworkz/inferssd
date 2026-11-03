@@ -13,8 +13,6 @@ from pathlib import Path
 
 import pytest
 
-from inferssd.cli import main
-from inferssd.configuration import command as configuration
 from inferssd.configuration.settings import host_platform
 from inferssd.launch import typed_command
 from inferssd.launch.prepare import prepare
@@ -117,19 +115,15 @@ def test_platform_options_default_to_this_host(monkeypatch, host, expected):
     assert host_platform() == expected
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command")
-    configuration.add_command(commands)
     typed_command.add_command(commands)
-    for words in (
-        ["configuration", "schema"],
-        ["launch", "--dry-run", "--model", "model.gguf", "--runtime-policy", "policy.json"],
-    ):
-        assert parser.parse_args(words).platform == expected
+    words = ["launch", "--dry-run", "--model", "model.gguf", "--runtime-policy", "policy.json"]
+    assert parser.parse_args(words).platform == expected
 
 
 def test_windows_owned_execution_is_refused_before_any_effect(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
-    command = ["launch", "--execute", "--platform", "windows", "--model", "model.gguf"]
+    command = ["--execute", "--platform", "windows", "--model", "model.gguf"]
     with pytest.raises(SystemExit) as error:
-        main(command + ["--runtime-policy", "policy.json"])
+        typed_command.main(command + ["--runtime-policy", "policy.json"])
     assert error.value.code == 2 and "--dry-run" in capsys.readouterr().err
     assert not list(tmp_path.iterdir())

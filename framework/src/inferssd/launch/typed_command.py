@@ -1,4 +1,8 @@
-"""Explicit typed production launch and recorded-host preparation commands."""
+"""The typed launch behind `inferssd serve` and `cli`, and its recorded-host dry-run.
+
+`serve` and `cli` call it in-process. The device CI calls ``main`` with ``--dry-run``
+to resolve a launch from a recorded machine without starting a server.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +12,11 @@ import os
 import sys
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
+from typing import Optional
 
 from inferssd.configuration.settings import PLATFORMS, cpus, host_platform
 from inferssd.launch.prepare import prepare
@@ -24,9 +30,14 @@ from inferssd.platform.run_directory import reserve
 
 
 def add_command(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    launch = commands.add_parser(
-        "launch", help="launch from typed settings with explicit process ownership"
+    add_arguments(
+        commands.add_parser(
+            "launch", help="launch from typed settings with explicit process ownership"
+        )
     )
+
+
+def add_arguments(launch: argparse.ArgumentParser) -> None:
     mode = launch.add_mutually_exclusive_group(required=True)
     mode.add_argument("--execute", action="store_true")
     mode.add_argument("--dry-run", action="store_true")
@@ -223,3 +234,17 @@ def run(args: argparse.Namespace) -> int:
             json.dump(receipt, stream, ensure_ascii=False, indent=2)
             stream.write("\n")
     return int(result.code or 0)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Run one typed launch from its own arguments."""
+    parser = argparse.ArgumentParser(
+        prog="inferssd-launch",
+        description="launch from typed settings with explicit process ownership",
+    )
+    add_arguments(parser)
+    args = parser.parse_args(argv)
+    try:
+        return run(args)
+    except (OSError, ValueError, RuntimeError) as error:
+        parser.exit(2, f"inferssd: {error}\n")

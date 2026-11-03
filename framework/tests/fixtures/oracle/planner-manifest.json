@@ -1,6 +1,0 @@
-{
-  "reference_revision": "8b12192920b339a4ef31c9006d1ebe20304ce45a",
-  "source": "tools/adaptive/plan.py",
-  "sha256": "5250ec202ea48bb0d14ab5f3b3784db9d1b80e063fe7b215bf40d32b9659d0ce",
-  "scope": "Complete plan script, Machine constructor/state/prediction, reloaded plan to settings; dependencies retain existing whole-file reference oracles."
-}

@@ -1,8 +1,3 @@
 line-length = 120
 [lint]
 select = ["E4", "E7", "E9", "F"]
-
-# Frozen compatibility fixtures preserve the original statement shapes.
-[lint.per-file-ignores]
-"logparse.py" = ["E702"]
-"**/compat/test_settings.py" = ["E731"]

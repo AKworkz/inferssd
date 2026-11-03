@@ -12,14 +12,11 @@ import sys
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
-from test_model_metadata import FIXTURES, data, observe, reference_api, runtime
+from test_model_metadata import FIXTURES, data, observe, runtime
 
-from inferssd import cli
 from inferssd.source import experts, header
-from inferssd.source.command import run_source
 
 HEADER_IO = {"read", "shards", "read_model"}
 SOURCE_IO = {
@@ -192,46 +189,3 @@ def test_executable_ast_and_constants(old, module):
             n.value for n in new.body if isinstance(n, ast.Assign) and n.targets[0].id == name
         )
         assert ast.dump(f_node) == ast.dump(n_node)
-
-
-@pytest.mark.parametrize("case_name", ["complete-old-cli", "fault-stderr-", "fault-stdout-"])
-def test_real_cli_dispatch_with_original_io_observer(case_name):
-    case = copy.deepcopy(next(c for c in data()["cases"] if c["name"] == case_name))
-    if case_name != "complete-old-cli":
-        case["actions"] = [["cli", "index", "/case/model.gguf", "/case/idx"]]
-
-    @contextlib.contextmanager
-    def real_cli_api(fs):
-        with candidate_api(fs) as (h, s):
-            port = s.index.keywords["filesystem"]
-
-            def dispatch(model, pack, directory):
-                return cli.main(
-                    ["source", "index", model, *([pack] if pack is not None else []), directory]
-                )
-
-            # The reference argv block calls these adapters; each adapter invokes the new argparse
-            # CLI and its actual command implementation, not the frozen reference function.
-            s.index = lambda *a: dispatch(*a)
-            s.facts = lambda model, alias=None: cli.main(
-                ["source", "facts", model, *([alias] if alias is not None else [])]
-            )
-            s.lane_args = lambda d: cli.main(["source", "lane-args", d])
-            s.dense = lambda *a: cli.main(["source", "dense", *a])
-            s.iolog = lambda d, n, seed, out, only=None: cli.main(
-                [
-                    "source",
-                    "iolog",
-                    d,
-                    str(n),
-                    str(seed),
-                    out,
-                    *([only] if only is not None else []),
-                ]
-            )
-            with patch.object(
-                cli, "run_source", partial(run_source, filesystem=port, random_factory=fs.rng)
-            ):
-                yield h, s
-
-    assert observe(case, api=real_cli_api) == observe(case, api=reference_api)

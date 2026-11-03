@@ -70,7 +70,7 @@ use the same reviewed model/settings/resource values and unchanged prompt bytes;
 settings payload hashes must match their declarations.
 
 Server launches are not written into the template: each side resolves them on
-the device with its own `inferssd launch` (see
+the device with its own typed launch, the one behind `inferssd serve` (see
 [performance acceptance](PERFORMANCE.md#launches)). Every model of both sides
 carries the same `launch` request: `{"profile", "port", "extra"}` (the
 launcher's model profile, the server port and extra server arguments, which the

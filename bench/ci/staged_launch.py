@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Resolve each side's server launch on the device with that side's own framework.
 
-A user starts a server with `inferssd launch`: the machine is profiled once,
+A user starts a server with `inferssd serve`: the machine is profiled once,
 and every launch derives its settings, thread pools and server arguments from
 the machine characteristics, the model's GGUF header and the memory budget.
 Device CI does the same inside the broker sandbox. The baseline job of a main
@@ -10,7 +10,7 @@ characteristics file, in the framework's own format, in the job's scratch; the
 operator stores it with the device's baseline history. A PR job does not
 profile: it takes the file of the device's most recent baseline job, sealed
 into the job and staged read-only by root. Each side's own framework then
-resolves its launch from that file with `inferssd launch --dry-run`, given the
+resolves its launch from that file with the typed launch's `--dry-run`, given the
 runtime facts its live launch reads, and the broker starts exactly the resolved
 argv as the server stage, in place of the launcher's own process scope. A
 change to the launch strategy is therefore measured with the settings it
@@ -70,7 +70,7 @@ RESOLVE = """\
 import json, os, platform, sys
 source, machine, policy, folder, shards = sys.argv[1:6]
 sys.path.insert(0, source)
-from inferssd.cli import main
+from inferssd.launch.typed_command import main as launch
 from inferssd.strategy import inputs
 # The facts an executed launch reads live, read here the same way.
 runtime = inputs.read_runtime()
@@ -87,8 +87,8 @@ for name, value in (("facts", facts), ("policy", json.loads(policy))):
     with open(paths[name], "x", encoding="utf-8") as stream:
         json.dump(value, stream)
 try:
-    code = main(["launch", "--dry-run", "--host-facts", paths["facts"], "--runtime-policy", paths["policy"],
-                 "--machine", machine, "--output-dir", folder, "--result", paths["result"]] + sys.argv[6:])
+    code = launch(["--dry-run", "--host-facts", paths["facts"], "--runtime-policy", paths["policy"],
+                   "--machine", machine, "--output-dir", folder, "--result", paths["result"]] + sys.argv[6:])
 except SystemExit as stop:
     code = stop.code
 if code != 0:
@@ -278,7 +278,7 @@ def profile(session, config, side, models, output):
 
 
 def resolve(session, config, side, model, machine, output):
-    """Resolve one model's launch with the side's own `inferssd launch --dry-run`."""
+    """Resolve one model's launch with the side's own typed launch `--dry-run`."""
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)
     spec, data = config["sides"][side], config["sides"][side]["models"][model]

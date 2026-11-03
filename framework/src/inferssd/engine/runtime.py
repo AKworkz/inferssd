@@ -7,16 +7,12 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
 from functools import partial
-from pathlib import Path
-from typing import BinaryIO, Optional, TextIO, cast
+from typing import Optional
 
-from inferssd.configuration.derive import Selection
-from inferssd.configuration.settings import Snapshot, parse
-from inferssd.engine.core import Engine, NativeEffects, post
+from inferssd.configuration.settings import Snapshot
+from inferssd.engine.core import Engine, NativeEffects
 from inferssd.engine.owned import OwnedProcess
 from inferssd.launch.live import Host, LiveArtifacts
 from inferssd.launch.machine import MachineSource
@@ -24,43 +20,9 @@ from inferssd.launch.machine import characteristics as machine_characteristics
 from inferssd.launch.prepare import prepare
 from inferssd.launch.recorded import run_indexer
 from inferssd.launch.resources import probe_paths, server_binary
-from inferssd.launch.typed import BATCH, LaunchSpec, reject_legacy_environment, resolve_typed
+from inferssd.launch.typed import LaunchSpec, reject_legacy_environment, resolve_typed
 from inferssd.launch.types import LaunchInput, Output, Resolution
-from inferssd.loop.controller import Controller
-from inferssd.loop.typed_controller import TypedController
-from inferssd.model.typed import TypedMachine
-from inferssd.plan.recorded import DirectoryArtifacts
 from inferssd.platform.policy import Policy
-from inferssd.telemetry.controller import NativeObservationSession
-from inferssd.telemetry.files import LocalArmFiles
-
-
-class LocalEffects:
-    def __init__(self, environment: Mapping[str, str], stdout: TextIO) -> None:
-        self.environment, self.stdout = environment, stdout
-
-    def open(self, path: str, mode: str = "r") -> TextIO:
-        return cast(TextIO, open(path, mode))
-
-    def makedirs(self, path: str, *, exist_ok: bool = False) -> None:
-        os.makedirs(path, exist_ok=exist_ok)
-
-    def getenv(self, name: str, default: str) -> str:
-        return self.environment.get(name, default)
-
-    def clock(self) -> float:
-        return time.time()
-
-
-class LocalObservations(LocalArmFiles):
-    def exists(self, path: str) -> bool:
-        return os.path.exists(path)
-
-    def stat(self, path: str) -> os.stat_result:
-        return os.stat(path)
-
-    def open_binary(self, path: str) -> BinaryIO:
-        return open(path, "rb")
 
 
 class Runtime:
@@ -204,97 +166,4 @@ class Runtime:
             own=own,
             prepare_environment=environment_for,
             check_port=True,
-        )
-
-    def controller(
-        self,
-        run: str,
-        out: str,
-        port: int,
-        start: tuple[int, str],
-        args: Sequence[str],
-        *,
-        host_threads: Callable[[], int],
-        stdout: TextIO,
-        loop: bool = True,
-        window: tuple[int, int] = (129, 512),
-        decode: int = 512,
-        horizon: int = 3,
-        keeps_history: bool = False,
-    ) -> Controller:
-        if self.policy.platform != "linux":
-            raise ValueError(
-                "Darwin adaptive Controller requires the unimplemented M2 placement adapter"
-            )
-        if self.configuration is None:
-            raise ValueError("production Controller requires explicit typed LaunchSpec")
-        if keeps_history:
-            raise ValueError("typed launches do not configure cross-server prompt persistence")
-        specification = self.configuration
-        base = parse(
-            Path(specification.settings_file).read_text(encoding="utf-8")
-            if specification.settings_file
-            else None,
-            specification.settings_file or "",
-            overrides=specification.overrides,
-            platform=self.policy.platform,
-        )
-
-        def typed_engine(
-            directory: str,
-            selected_port: int,
-            tier: int,
-            cpus: str,
-            extra: Sequence[str],
-            chosen: Selection,
-        ) -> Engine:
-            suffix = cpus.partition("@")[2]
-            selected = replace(specification, threads=chosen.threads)
-            if suffix:
-                selected = replace(selected, ubatch=int(suffix))
-            return self.engine(
-                directory,
-                selected_port,
-                tier,
-                cpus,
-                "",
-                list(extra),
-                configured=chosen.settings,
-                specification=selected,
-            )
-
-        def machine_factory(path: str) -> TypedMachine:
-            machine = TypedMachine(
-                DirectoryArtifacts(Path(path)),
-                base=base,
-                threads=specification.threads,
-                native_ubatch=specification.ubatch or BATCH,
-                host_threads=host_threads,
-            )
-            if start not in machine.configs:
-                raise ValueError(
-                    "start configuration is excluded by typed settings or measured capacity"
-                )
-            return machine
-
-        return TypedController(
-            run,
-            out,
-            port,
-            start,
-            args,
-            loop,
-            window,
-            decode,
-            horizon,
-            machine_factory=machine_factory,
-            engine_factory=self.engine,
-            configuration=lambda machine, tier, cpus: cast(TypedMachine, machine).selected(
-                tier, cpus
-            ),
-            typed_engine=typed_engine,
-            keeps_history=keeps_history,
-            post=post,
-            effects=LocalEffects({}, stdout),
-            session=NativeObservationSession(files=LocalObservations()),
         )

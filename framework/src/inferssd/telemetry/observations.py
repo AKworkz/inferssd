@@ -1,28 +1,58 @@
-"""Versioned native observations consumed by the online controller.
+"""Versioned native observations read from a run's native-events.jsonl.
 
-Historical calibration/log imports stay in ``legacy``. The live boundary reads
-only native-events.jsonl and does not infer data from human-readable logging.
+The benchmark CI reads them to record what each run did. Only native-events.jsonl
+is read; nothing is inferred from human-readable logging.
 """
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
-from typing import Any, Optional
+from typing import Any, BinaryIO, Optional, Protocol
 
-from inferssd.loop.ports import ObservationFiles
+from inferssd.telemetry.files import LocalArmFiles
 from inferssd.telemetry.jsonl import Event, read_events
-from inferssd.telemetry.types import ControllerArmResult, Record, TokenKey, TraceLayer
+from inferssd.telemetry.types import ArmFiles, ObservedArm, Record, TokenKey, TraceLayer
+
+
+class FileStatus(Protocol):
+    @property
+    def st_size(self) -> int: ...
+
+    @property
+    def st_mtime_ns(self) -> int: ...
+
+
+class ObservationFiles(ArmFiles, Protocol):
+    def exists(self, path: str) -> bool: ...
+
+    def stat(self, path: str) -> FileStatus: ...
+
+    def open_binary(self, path: str) -> BinaryIO: ...
+
+
+class LocalObservations(LocalArmFiles):
+    """ObservationFiles on this machine's file system."""
+
+    def exists(self, path: str) -> bool:
+        return os.path.exists(path)
+
+    def stat(self, path: str) -> os.stat_result:
+        return os.stat(path)
+
+    def open_binary(self, path: str) -> BinaryIO:
+        return open(path, "rb")
 
 
 def number(payload: Record, key: str, *, integer: bool = False) -> Any:
     value = payload.get(key)
     kinds = (int,) if integer else (int, float)
     if value is None or type(value) not in kinds or value < 0:
-        raise ValueError("invalid controller observation field " + key)
+        raise ValueError("invalid native observation field " + key)
     return value
 
 
-class ControllerObservations:
+class NativeObservations:
     def __init__(self) -> None:
         self.started = False
         self.sequence = 0
@@ -36,12 +66,12 @@ class ControllerObservations:
 
     def feed(self, event: Event) -> None:
         if event.sequence != self.sequence:
-            raise ValueError("controller telemetry sequence mismatch")
+            raise ValueError("native event sequence mismatch")
         self.sequence += 1
         p = dict(event.payload)
         if event.name == "ssd.controller.begin":
             if self.started or type(p.get("schema")) is not int or p["schema"] != 1:
-                raise ValueError("unsupported or duplicate controller observation contract")
+                raise ValueError("unsupported or duplicate native observation contract")
             self.started = True
             return
         if event.name not in (
@@ -52,7 +82,7 @@ class ControllerObservations:
         ):
             return
         if not self.started:
-            raise ValueError("native engine lacks the controller observation contract")
+            raise ValueError("native engine lacks the observation contract")
         if event.name == "ssd.prefill.graph":
             self.graphs.append(
                 {
@@ -126,9 +156,9 @@ class ControllerObservations:
             ):
                 profile[index] += value
 
-    def result(self) -> ControllerArmResult:
+    def result(self) -> ObservedArm:
         if not self.started:
-            raise ValueError("native engine did not publish the controller observation contract")
+            raise ValueError("native engine did not publish the observation contract")
         groups: list[list[TokenKey]] = []
         for key in sorted(self.trace):
             if groups and groups[-1][-1][0] == key[0] and key[1] == groups[-1][-1][1] + 1:
@@ -148,12 +178,12 @@ class NativeObservationSession:
 
     def __init__(self, *, files: ObservationFiles) -> None:
         self.files = files
-        self.live: dict[str, tuple[ControllerObservations, int]] = {}
+        self.live: dict[str, tuple[NativeObservations, int]] = {}
 
-    def read_arm_cached(self, directory: str, skip: int) -> ControllerArmResult:
-        # skip is applied by the existing controller when selecting its window.
+    def read_arm_cached(self, directory: str, skip: int) -> ObservedArm:
+        # skip is applied by the caller when selecting its window.
         path = directory + "/native-events.jsonl"
-        parser, offset = self.live.get(path, (ControllerObservations(), 0))
+        parser, offset = self.live.get(path, (NativeObservations(), 0))
         if self.files.stat(path).st_size < offset:
             raise ValueError("native observation file was truncated")
         with self.files.open_binary(path) as stream:

@@ -160,7 +160,7 @@ builds precede timing. Only the baseline job profiles the machine, once per
 stores the characteristics file with the device's baseline history. A PR job
 takes the file of the device's most recent baseline job, sealed into the job
 and staged read-only by root, and cannot run on a device that has none yet.
-Each side starts its servers the way `inferssd launch` does: its own launch
+Each side starts its servers the way `inferssd serve` does: its own launch
 strategy derives the settings and thread pools from that characteristics file,
 the model's GGUF header and the job's memory budget, and the report shows what
 the PR's launch sets differently. The same model shards, toolchain, templates,
