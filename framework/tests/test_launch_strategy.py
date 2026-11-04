@@ -260,6 +260,8 @@ def render_golden(case, strategy):
         if name == "write_exclusive":
             written[arguments[0]] = arguments[1]
             return Reply()
+        if name == "engine_gpu_backends":
+            return Reply(case["host"].get(name))
         return Reply(case["host"][name])
 
     pools = case["threads"]
@@ -316,6 +318,16 @@ def test_goldens_without_a_strategy_ask_nothing_new(name):
 
 def recorded(host):
     return RecordedArtifacts(LaunchInput("", ()), host, run=None, replace=None, python="")
+
+
+def test_recorded_engine_gpu_backends():
+    fact = Fact("engine_gpu_backends", ("server",))
+    # Recordings made before the fact existed: the engine's backends are unknown.
+    assert recorded({})(fact).value is None
+    assert recorded({"engine_gpu_backends": ["Metal"]})(fact).value == ["Metal"]
+    for value in (["ROCm"], "CUDA", ["CUDA", "CUDA"]):
+        with pytest.raises(ValueError, match="engine_gpu_backends"):
+            recorded({"engine_gpu_backends": value})(fact)
 
 
 def test_recorded_machine_characteristics(tmp_path):

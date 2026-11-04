@@ -19,6 +19,7 @@ from typing import Optional, Protocol
 
 from inferssd.launch.linux import cpu_count
 from inferssd.launch.recorded import RecordedArtifacts
+from inferssd.launch.resources import cmake_gpu_backends
 from inferssd.launch.types import Fact, LaunchInput, Reply
 from inferssd.platform.captured_command import run_captured
 from inferssd.strategy import inputs as strategy_inputs
@@ -62,7 +63,7 @@ class NativeHost:
         return shutil.which(name) is not None
 
     def text(self, path: str) -> str:
-        return Path(path).read_text()
+        return Path(path).read_text(encoding="utf-8", errors="replace")
 
     def contains(self, path: str, needle: bytes) -> bool:
         try:
@@ -97,7 +98,7 @@ HOST_FACTS = frozenset(
     "gpu_available ss_available has_uring systemd cgroup_v2 user_manager memory_controller euid "
     "memory_kib filesystem gpu_memory gpu_processes port_busy scope_suffix "
     "platform_system platform_machine default_threads physical_memory disk_free "
-    "runtime_facts model_drive_key".split()
+    "runtime_facts model_drive_key engine_gpu_backends".split()
 )
 
 
@@ -215,4 +216,12 @@ class LiveArtifacts:
             return strategy_inputs.runtime_facts_json(facts)
         if name == "model_drive_key":
             return strategy_inputs.model_drive_key(args, self.strategy_host)
+        if name == "engine_gpu_backends":
+            # The build the server executable came from: build/bin/inferssd-server lies beside
+            # build/CMakeCache.txt.
+            build = os.path.dirname(os.path.dirname(args[0]))
+            try:
+                return list(cmake_gpu_backends(host.text(os.path.join(build, "CMakeCache.txt"))))
+            except OSError:
+                return None
         raise ValueError("Unknown live host fact: " + name)

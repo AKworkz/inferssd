@@ -19,14 +19,20 @@ A descriptor is ordinary JSON. Relative paths resolve against its own directory:
   "capabilities": {
     "settings": "inferssd-settings 1",
     "telemetry": 1,
-    "platform": "linux"
+    "platform": "linux",
+    "gpu_backends": ["CUDA"]
   }
 }
 ```
 
-Use `darwin` for an Apple Silicon deployment and `windows` for a Windows one. The
-`qwen4exp` and `qwen35moe` profiles need no template: they launch with the chat
-template in their GGUF. Missing selected resources or incompatible
+Use `darwin` for an Apple Silicon deployment and `windows` for a Windows one.
+`gpu_backends` lists the GPU backends the engine was built with, of `CUDA`,
+`Metal` and `Vulkan`; an empty list is a CPU-only build. The launch takes the CUDA
+expert tier's settings only from an engine that has `CUDA`. Without the field,
+the launch reads the backends from the `CMakeCache.txt` of the build holding the
+server; when neither says, the launch strategy takes them to be those of the
+machine's GPUs. The `qwen4exp` and `qwen35moe` profiles need no template: they
+launch with the chat template in their GGUF. Missing selected resources or incompatible
 contract versions fail before engine startup. The descriptor is an operator's
 explicit deployment contract, not a claim that untrusted binaries were verified.
 Normal process ownership, memory policy and runtime evidence checks still apply.
@@ -37,7 +43,8 @@ From a source checkout, generate the descriptor after building:
 python3 scripts/engine-resources.py --build build-linux-cuda --output engine-resources.json
 ```
 
-This inspects the schema without running a model. It describes existing paths;
+This inspects the schema without running a model, and reads the GPU backends from
+the build's `CMakeCache.txt`. It describes existing paths;
 for a standalone deployment, copy the executable and its runtime libraries plus
 templates, then use paths relative to the deployed descriptor. The framework
 wheel needs only its standard-library Python runtime. Existing source indexing

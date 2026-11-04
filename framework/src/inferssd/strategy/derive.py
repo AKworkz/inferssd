@@ -93,6 +93,17 @@ def literal(item: Setting, platform: str) -> str:
     return body.partition("=")[2].strip(" \t\r\n")
 
 
+def engine_gpu_backends(
+    known: Optional[Sequence[str]], characteristics: Optional[Characteristics]
+) -> frozenset[str]:
+    """The launch engine's GPU backends: KNOWN, else those of the machine's GPUs, else none."""
+    if known is not None:
+        return frozenset(known)
+    if characteristics is None:
+        return frozenset()
+    return frozenset(gpu["backend"] for gpu in characteristics["identity"]["hard"]["gpus"])
+
+
 def _validated(choices: Mapping[str, tuple[str, str]], platform: str) -> dict[str, Choice]:
     """Each choice parsed by the configuration layer and written back in its canonical form."""
     for _, reason in choices.values():
@@ -569,7 +580,8 @@ def derive(
 
     one_pass = False
     mixed = [role for role in model.roles if len(role.formats) > 1]
-    if platform == "linux":
+    # The CUDA tier's budget, where the engine has the tier.
+    if "CUDA" in engine_gpu_backends(runtime.gpu_backends, characteristics):
         listed = {
             gpu["uuid"]
             for gpu in characteristics["identity"]["hard"]["gpus"]

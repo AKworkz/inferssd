@@ -22,6 +22,22 @@ BUILDS = {
 }
 # The machine probes by the name a resource descriptor's probes map gives them.
 PROBES = {"ssd": "inferssd-ssdprobe", "cpu": "inferssd-cpuprobe", "memory": "inferssd-memprobe"}
+# The GPU backends an engine can be built with, by the name the machine identity
+# gives a GPU's backend, and the CMake option that builds each.
+GPU_BACKENDS = {"CUDA": "GGML_CUDA", "Metal": "GGML_METAL", "Vulkan": "GGML_VULKAN"}
+
+
+def cmake_gpu_backends(cache: str) -> tuple[str, ...]:
+    """The GPU backends a build has, read from the text of its CMakeCache.txt."""
+    values = {}
+    for line in cache.splitlines():
+        name, _, value = line.partition("=")
+        values[name.partition(":")[0].strip()] = value.strip().upper()
+    return tuple(
+        backend
+        for backend, option in GPU_BACKENDS.items()
+        if values.get(option) in ("ON", "TRUE", "YES", "Y", "1")
+    )
 
 
 def data_directory(environ: Mapping[str, str] = os.environ, home: Optional[Path] = None) -> Path:
@@ -44,6 +60,9 @@ class EngineResources:
     probes: tuple[tuple[str, str], ...] = ()
     platform: Optional[str] = None
     revision: str = "unknown"
+    # The GPU backends the engine was built with; None in a descriptor written before they
+    # were recorded.
+    gpu_backends: Optional[tuple[str, ...]] = None
 
     def template(self, profile: str) -> str:
         try:
@@ -70,6 +89,13 @@ def read_resources(path: Path) -> EngineResources:
     revision = data.get("revision", "unknown")
     if not isinstance(revision, str) or not revision:
         raise ValueError("engine revision must be nonempty text")
+    backends = capabilities.get("gpu_backends")
+    if backends is not None and (
+        not isinstance(backends, list)
+        or any(backend not in GPU_BACKENDS for backend in backends)
+        or len(set(backends)) != len(backends)
+    ):
+        raise ValueError("engine gpu_backends must list distinct " + ", ".join(GPU_BACKENDS))
 
     def filename(value: object) -> str:
         if not isinstance(value, str) or not value or "\0" in value:
@@ -90,6 +116,7 @@ def read_resources(path: Path) -> EngineResources:
         paths("probes", False),
         platform,
         revision,
+        None if backends is None else tuple(backends),
     )
 
 

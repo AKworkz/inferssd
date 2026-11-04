@@ -319,6 +319,46 @@ def nvidia(host: Host) -> tuple[list[GPUIdentity], Optional[str], Optional[str]]
     return gpus, ",".join(sorted(drivers)) or None, None
 
 
+# The GPU backend for each PCI vendor whose GPUs the engine runs: NVIDIA's on CUDA, as nvidia-smi
+# lists them; AMD's and Intel's on Vulkan. Apple's GPU runs on Metal and is found through ioreg.
+PCI_BACKENDS = {"10de": "CUDA", "1002": "Vulkan", "8086": "Vulkan"}
+# The order an engine's build prefers the backends of a machine's GPUs in.
+BUILD_ORDER = ("CUDA", "Metal", "Vulkan")
+
+
+def build_backend(gpus: Sequence[GPUIdentity]) -> Optional[str]:
+    """The GPU backend to build the engine with for GPUS, or None to build it for the CPU alone."""
+    present = {gpu["backend"] for gpu in gpus}
+    return next((backend for backend in BUILD_ORDER if backend in present), None)
+
+
+def linux_adapters(host: Host) -> list[GPUIdentity]:
+    """The PCI display controllers a Vulkan build can use (PCI_BACKENDS), by their bus address."""
+    root = "/sys/bus/pci/devices"
+    try:
+        addresses = host.listdir(root)
+    except OSError:
+        return []
+    found: list[GPUIdentity] = []
+    for address in addresses:
+        base = f"{root}/{address}/"
+        kind, vendor, device = (read(host, base + name) for name in ("class", "vendor", "device"))
+        vendor = (vendor or "").lower().removeprefix("0x")
+        if not (kind or "").startswith("0x03") or PCI_BACKENDS.get(vendor) != "Vulkan":
+            continue
+        # Only a GPU with its own memory reports it (amdgpu); an integrated one shares the host's.
+        vram = read(host, base + "mem_info_vram_total")
+        found.append(
+            {
+                "backend": "Vulkan",
+                "uuid": "pci-" + address,
+                "name": f"PCI {vendor}:{(device or '').lower().removeprefix('0x')}",
+                "vram_bytes": int(vram) if vram and vram.isdigit() else 0,
+            }
+        )
+    return found
+
+
 def probe_versions(system: str, gpus: Sequence[GPUIdentity]) -> dict[str, str]:
     versions = {"ssd": PROBE_SCHEMAS["ssd"], "cpu": PROBE_SCHEMAS["cpu"]}
     if system == "linux" and any(gpu["backend"] == "CUDA" for gpu in gpus):
@@ -355,6 +395,7 @@ def with_saved_gpus(live: Identity, saved: Identity) -> Identity:
 def _linux(host: Host) -> Identity:
     machine_id = read(host, "/etc/machine-id") or read(host, "/var/lib/dbus/machine-id")
     gpus, driver, failure = nvidia(host)
+    gpus = gpus + linux_adapters(host)
     identity: Identity = {
         "hard": {
             "platform": "linux",

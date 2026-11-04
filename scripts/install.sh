@@ -12,11 +12,13 @@ need() { command -v "$1" >/dev/null 2>&1 || die "Install $1 first. See docs/quic
 main() (
     if [ "${1:-}" = --help ]; then
         cat <<'EOF'
-Install InferSSD from source for Apple Silicon / Metal or Linux / NVIDIA CUDA.
+Install InferSSD from source for Apple Silicon macOS or Linux x86_64/ARM64.
 Requires Git, Python >=3.9 with venv and a C/C++ compiler.
-macOS requires the Xcode Command Line Tools.
-Linux requires the CUDA toolkit, liburing development headers and systemd/cgroup v2
-at runtime.
+macOS requires the Xcode Command Line Tools; the engine runs on the Apple GPU.
+Linux requires liburing development headers, and systemd/cgroup v2 at runtime.
+The engine is built for the machine's GPUs: with an NVIDIA GPU it uses CUDA and
+needs the CUDA toolkit; with an AMD or Intel GPU it uses Vulkan when the Vulkan
+SDK (glslc) is installed; otherwise it runs on the CPU.
 CMake, Ninja and the Python framework are installed in a private environment.
 
 Environment:
@@ -42,25 +44,13 @@ EOF
     need c++
     python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die 'Python >=3.9 is required.'
     case "$(uname -s):$(uname -m)" in
-        Darwin:arm64)
-            preset=macos-metal
-            ;;
+        Darwin:arm64) system=darwin ;;
         Linux:x86_64|Linux:aarch64|Linux:arm64)
-            preset=linux-cuda
-            if [ -z "${CUDACXX:-}" ]; then
-                if command -v nvcc >/dev/null 2>&1; then
-                    CUDACXX=$(command -v nvcc)
-                elif [ -x /usr/local/cuda/bin/nvcc ]; then
-                    CUDACXX=/usr/local/cuda/bin/nvcc
-                else
-                    die 'Install the CUDA toolkit or set CUDACXX to nvcc.'
-                fi
-            fi
-            export CUDACXX
+            system=linux
             printf '#include <liburing.h>\n' | cc -E - >/dev/null 2>&1 ||
                 die 'Install liburing development headers (e.g. liburing-dev).'
             ;;
-        *) die 'Supported platforms: Apple Silicon macOS and NVIDIA CUDA Linux x86_64/ARM64.' ;;
+        *) die 'Supported platforms: Apple Silicon macOS and Linux x86_64/ARM64.' ;;
     esac
     install_home=${INFERSSD_HOME:-"$HOME/.local/share/inferssd"}
     bin_dir=${INFERSSD_BIN_DIR:-"$HOME/.local/bin"}
@@ -74,9 +64,37 @@ EOF
     trap 'if [ "$complete" != yes ]; then rm -rf -- "$release"; fi' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    printf 'Building InferSSD (%s). This may take several minutes.\n' "$preset"
     git clone --depth 1 --branch "${INFERSSD_REF:-$DEFAULT_REF}" \
         https://github.com/wici-ai/inferssd.git "$release/source"
+    # The GPU backend for this machine's GPUs, by the table the launch reads.
+    backend=$(PYTHONPATH="$release/source/framework/src" python3 -m inferssd.machine.backend)
+    vulkan=
+    case "$system:$backend" in
+        darwin:*) preset=macos-metal ;;
+        linux:CUDA)
+            preset=linux-cuda
+            if [ -z "${CUDACXX:-}" ]; then
+                if command -v nvcc >/dev/null 2>&1; then
+                    CUDACXX=$(command -v nvcc)
+                elif [ -x /usr/local/cuda/bin/nvcc ]; then
+                    CUDACXX=/usr/local/cuda/bin/nvcc
+                else
+                    die 'An NVIDIA GPU was found: install the CUDA toolkit or set CUDACXX to nvcc.'
+                fi
+            fi
+            export CUDACXX
+            ;;
+        linux:Vulkan)
+            preset=linux-cpu
+            if command -v glslc >/dev/null 2>&1; then
+                vulkan=-DGGML_VULKAN=ON
+            else
+                printf 'inferssd: an AMD or Intel GPU was found; install the Vulkan SDK (glslc) to use it.\n' >&2
+            fi
+            ;;
+        linux:*) preset=linux-cpu ;;
+    esac
+    printf 'Building InferSSD (%s%s). This may take several minutes.\n' "$preset" "${vulkan:+, Vulkan}"
     python3 -m venv "$release/venv"
     py="$release/venv/bin/python"
     "$py" -m pip install --upgrade pip
@@ -84,7 +102,7 @@ EOF
     PATH="$release/venv/bin:$PATH"
     export PATH
     cd "$release/source"
-    cmake --preset "$preset"
+    cmake --preset "$preset" $vulkan
     if [ "$preset" = linux-cuda ]; then
         cmake --build "build-$preset" --parallel "$jobs" \
             --target inferssd-server inferssd-cpuprobe inferssd-ssdprobe inferssd-memprobe

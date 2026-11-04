@@ -308,8 +308,8 @@ std::string scope_name(uint32_t scope) {
 
 const std::vector<descriptor> & registry() {
     static const std::vector<descriptor> entries = {
-#define SSD_SETTING(key, type, low, high, literal, unit, producer, scope, description) \
-    { key, kind::type, low##ULL, high##ULL, literal, unit, producer, scope, description },
+#define SSD_SETTING(key, type, low, high, literal, unit, producer, scope, backend, description) \
+    { key, kind::type, low##ULL, high##ULL, literal, unit, producer, scope, backend, description },
 #include "registry.def"
 #undef SSD_SETTING
     };
@@ -498,6 +498,7 @@ result<std::string> schema_json() noexcept {
             out += json::quote(d.key) + ":{\"description\":" + json::quote(d.description) +
                    ",\"kind\":" + json::quote(type) + ",\"unit\":" + json::quote(d.unit) +
                    ",\"producer\":" + json::quote(d.producer) + ",\"scope\":" + json::quote(scope_name(d.scope)) +
+                   (*d.backend ? ",\"backend\":" + json::quote(d.backend) : std::string()) +
                    ",\"cli\":" + json::quote(cli_option(d.key)) +
                    ",\"default_literal\":" + json::quote(d.default_literal);
             if (d.type == kind::integer) {

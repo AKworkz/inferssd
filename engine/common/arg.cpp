@@ -1064,7 +1064,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & p, const std::string & value) { p.ssd_enabled = true; p.ssd_telemetry_file = value; }));
     // Each block owns the spelling for common_arg's borrowed char pointers.
     // No SSD option has an environment mirror.
-#define SSD_SETTING(key, type, min, max, default_value, unit, producer, scope, description) \
+#define SSD_SETTING(key, type, min, max, default_value, unit, producer, scope, backend, description) \
     { \
         static const std::string name = common_ssd_option_name(key); \
         add_opt(common_arg({name.c_str()}, "VALUE", description, \

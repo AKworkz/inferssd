@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from inferssd.launch.darwin import PROFILES
+from inferssd.launch.resources import GPU_BACKENDS
 from inferssd.launch.types import Fact, LaunchInput, Reply
 from inferssd.machine import characteristics
 from inferssd.source import experts
@@ -146,7 +147,7 @@ class RecordedArtifacts:
         if name == "is_executable":
             return Reply(os.access(args[0], os.X_OK))
         if name == "read_text":
-            with open(args[0], newline="") as stream:
+            with open(args[0], encoding="utf-8", newline="") as stream:
                 return Reply(stream.read())
         if name == "model_matches":
             directory, pattern = args
@@ -194,8 +195,11 @@ class RecordedArtifacts:
             # Read from the model's own headers, as the alias index is.
             header = strategy_inputs.shard_facts(args)
             return Reply(strategy_inputs.model_facts_json(header))
-        if name in ("machine_characteristics", "model_drive_key") and name not in self.host:
-            # Absent: no strategy, or no drive term in it.
+        if (
+            name in ("machine_characteristics", "model_drive_key", "engine_gpu_backends")
+            and name not in self.host
+        ):
+            # Absent: no strategy, no drive term in it, or an engine whose GPU backends are unknown.
             return Reply(None)
         if name == "systemd" and name not in self.host:
             # Recordings made before this fact existed came from systemd hosts.
@@ -243,6 +247,17 @@ class RecordedArtifacts:
         if name == "model_drive_key":
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"Recorded host fact {name}: expected text or null")
+            return Reply(value)
+        if name == "engine_gpu_backends":
+            if value is not None and (
+                not isinstance(value, list)
+                or any(backend not in GPU_BACKENDS for backend in value)
+                or len(set(value)) != len(value)
+            ):
+                raise ValueError(
+                    f"Recorded host fact {name}: expected null or distinct names of "
+                    + ", ".join(GPU_BACKENDS)
+                )
             return Reply(value)
         if name in boolean:
             if not isinstance(value, bool):

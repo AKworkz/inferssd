@@ -41,7 +41,8 @@ struct descriptor {
     const char * default_literal;
     const char * unit;
     const char * producer;
-    uint32_t     scope;  // platform_scope bits
+    uint32_t     scope;    // platform_scope bits
+    const char * backend;  // the GPU backend whose expert tier the setting configures, or ""
     const char * description;
 };
 

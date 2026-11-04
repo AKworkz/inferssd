@@ -27,6 +27,16 @@ def test_recorded_adapter_never_queries_host(monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_a_settings_file_is_read_as_utf8_whatever_the_locale(tmp_path):
+    settings = tmp_path / "input.ssd"
+    text = "inferssd-settings 1\nprefetch.depth=4 # 来源=测量, Kovač\n"
+    settings.write_bytes(text.encode())
+    adapter = RecordedArtifacts(
+        LaunchInput("/repo", ()), {}, run=None, replace=None, python="unused"
+    )
+    assert adapter(Fact("read_text", (str(settings),))).value == text
+
+
 @pytest.mark.parametrize(
     "name,value",
     [

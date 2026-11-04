@@ -5,26 +5,28 @@ The C++ schema/help and packaged Python schema are generated from that table;
 the cross-language contract compares the actual C++ output with the installed
 Python resource. There are no environment mirrors or legacy-name aliases.
 
-| Key | Kind / unit | Default literal | Producer | Scope |
-|---|---|---|---|---|
-| `expert.source` | paths / path | `[]` | plan | all |
-| `cpu.io_cpus` | cpus / CPU ID | `empty` | plan | all |
-| `cpu.decode_participants` | integer / compute participants | `0` | plan | all |
-| `prefetch.depth` | integer / predicted experts | `2` | plan | all |
-| `place.costs` | costs / named us and GB/s terms | `empty` | plan | all |
-| `prefill.cpu_max_tokens` | integer / tokens | `4294967295` | plan | linux |
-| `vram.budget` | budget / bytes | `auto` | plan | linux |
-| `vram.max_slots` | integer / slots | `0` | plan | linux |
-| `vram.reserve_mib` | integer / MiB | `0` | launch | linux |
-| `host.headroom_mib` | integer / MiB | `512` | plan | all |
-| `host.budget_mib` | integer / MiB | `0` | plan | darwin, windows |
-| `model.engram_prefetch` | integer / boolean | `0` | model | all |
-| `model.hc_fused` | integer / boolean | `1` | model | all |
+| Key | Kind / unit | Default literal | Producer | Scope | Backend |
+|---|---|---|---|---|---|
+| `expert.source` | paths / path | `[]` | plan | all |  |
+| `cpu.io_cpus` | cpus / CPU ID | `empty` | plan | all |  |
+| `cpu.decode_participants` | integer / compute participants | `0` | plan | all |  |
+| `prefetch.depth` | integer / predicted experts | `2` | plan | all |  |
+| `place.costs` | costs / named us and GB/s terms | `empty` | plan | all |  |
+| `prefill.cpu_max_tokens` | integer / tokens | `4294967295` | plan | all | CUDA |
+| `vram.budget` | budget / bytes | `auto` | plan | linux |  |
+| `vram.max_slots` | integer / slots | `0` | plan | all | CUDA |
+| `vram.reserve_mib` | integer / MiB | `0` | launch | all | CUDA |
+| `host.headroom_mib` | integer / MiB | `512` | plan | all |  |
+| `host.budget_mib` | integer / MiB | `0` | plan | darwin, windows |  |
+| `model.engram_prefetch` | integer / boolean | `0` | model | all |  |
+| `model.hc_fused` | integer / boolean | `1` | model | all |  |
 
 These are conservative parser defaults and retained policy priors, not claimed
 per-device performance optima. The framework must provide its measured CPU,
 cache and placement configuration. The platforms are `linux`, `darwin` and
-`windows`; a scope is `all` or the platforms it lists. Expert compute runs on
+`windows`; a scope is `all` or the platforms it lists. A backend names the GPU
+backend whose expert tier a key configures: the key parses on every platform, and
+an engine built or running without that tier refuses it when it is set. Expert compute runs on
 ggml's threads (`-t`, `-tb`, `-C`, `-Cb`, `--cpu-strict`; see
 [how it works](architecture.md#threads)); `cpu.io_cpus` places the executor's
 own I/O, prefetch and watch threads, and macOS, which cannot pin threads, only

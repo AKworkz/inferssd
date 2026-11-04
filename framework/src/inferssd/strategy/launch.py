@@ -42,13 +42,14 @@ def plan(
     paths: Sequence[str],
     settings: Snapshot,
     threads: Threads,
+    gpu_backends: Optional[tuple[str, ...]] = None,
 ) -> Planned:
     """SETTINGS and the user's THREADS completed by the strategy for this launch.
 
     MEMORY is the launch's memory budget: it is the strategy's budget and
-    bounds the memory available to it. Without characteristics, or on a
-    platform that cannot be profiled yet, the launch keeps its inputs and the
-    receipt names why.
+    bounds the memory available to it. GPU_BACKENDS are the engine's, None
+    when unknown. Without characteristics, or on a platform that cannot be
+    profiled yet, the launch keeps its inputs and the receipt names why.
     """
 
     def skipped(reason: str) -> Planned:
@@ -69,6 +70,7 @@ def plan(
         runtime,
         available_bytes=None if available is None else min(available, memory),
         memory_budget_bytes=memory,
+        gpu_backends=gpu_backends,
     )
     try:
         strategy = derive(characteristics, model, runtime, platform, model_drive_key=key)

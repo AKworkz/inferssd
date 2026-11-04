@@ -12,12 +12,14 @@ from pathlib import Path
 
 import pytest
 
+from inferssd.machine.backend import machine_backend
 from inferssd.machine.identity import (
     Command,
     Drive,
     GPUQueryFailed,
     NativeHost,
     UnsupportedPlatform,
+    build_backend,
     cpu_brand,
     drive_info,
     drive_key,
@@ -252,6 +254,48 @@ def test_failing_nvidia_smi_is_not_an_absent_gpu(tmp_path):
     # A driver without devices is a machine without GPUs, not a failure.
     commands[SMI] = Command(6, "No devices were found\n")
     assert live_identity(FakeHost(tmp_path, commands=commands))["hard"]["gpus"] == []
+
+
+def pci(root, address, kind, vendor, device, vram=None):
+    base = f"/sys/bus/pci/devices/{address}/"
+    write(root, base + "class", kind + "\n")
+    write(root, base + "vendor", vendor + "\n")
+    write(root, base + "device", device + "\n")
+    if vram is not None:
+        write(root, base + "mem_info_vram_total", f"{vram}\n")
+
+
+def test_linux_lists_the_gpus_a_vulkan_build_can_use(tmp_path):
+    commands = linux_tree(tmp_path)
+    pci(tmp_path, "0000:00:02.0", "0x030000", "0x8086", "0x7d55")  # an Intel iGPU
+    pci(tmp_path, "0000:03:00.0", "0x030000", "0x1002", "0x744c", vram=24 << 30)  # an AMD card
+    pci(tmp_path, "0000:01:00.0", "0x030000", "0x10de", "0x2b85")  # nvidia-smi lists it
+    pci(tmp_path, "0000:05:00.0", "0x030000", "0x1a03", "0x2000")  # a server's BMC display
+    pci(tmp_path, "0000:00:1f.3", "0x040300", "0x8086", "0x51c8")  # Intel audio, not a display
+    gpus = live_identity(FakeHost(tmp_path, commands=commands))["hard"]["gpus"]
+    assert [(gpu["backend"], gpu["uuid"], gpu["name"], gpu["vram_bytes"]) for gpu in gpus] == [
+        ("CUDA", "GPU-1111", "NVIDIA GeForce RTX 5090", 32607 * 1048576),
+        ("Vulkan", "pci-0000:00:02.0", "PCI 8086:7d55", 0),
+        ("Vulkan", "pci-0000:03:00.0", "PCI 1002:744c", 24 << 30),
+    ]
+
+
+def test_the_engine_builds_for_the_machines_gpus(tmp_path):
+    assert build_backend([]) is None
+    vulkan = {"backend": "Vulkan", "uuid": "pci-0", "name": "PCI 8086:7d55", "vram_bytes": 0}
+    cuda = {"backend": "CUDA", "uuid": "GPU-1", "name": "NVIDIA", "vram_bytes": 1}
+    metal = {"backend": "Metal", "uuid": "M5:10", "name": "Apple M5", "vram_bytes": 0}
+    assert build_backend([vulkan]) == "Vulkan"
+    assert build_backend([vulkan, cuda]) == "CUDA" and build_backend([metal]) == "Metal"
+    commands = linux_tree(tmp_path)
+    assert machine_backend(FakeHost(tmp_path, commands=commands)) == "CUDA"
+    del commands[SMI]
+    assert machine_backend(FakeHost(tmp_path, commands=commands)) == "CPU"
+    pci(tmp_path, "0000:00:02.0", "0x030000", "0x8086", "0x7d55")
+    assert machine_backend(FakeHost(tmp_path, commands=commands)) == "Vulkan"
+    # A driver that cannot list its GPUs still has them.
+    commands[SMI] = Command(18, "Failed to initialize NVML: Driver/library version mismatch\n")
+    assert machine_backend(FakeHost(tmp_path, commands=commands)) == "CUDA"
 
 
 def test_arm_cpu_brand_lists_implementer_and_parts():

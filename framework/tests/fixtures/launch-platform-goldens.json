@@ -48,7 +48,10 @@
         "user_manager": true,
         "memory_controller": true,
         "gpu_available": true,
-        "gpu_processes": ""
+        "gpu_processes": "",
+        "engine_gpu_backends": [
+          "CUDA"
+        ]
       }
     },
     "argv": [
@@ -152,7 +155,10 @@
         "cgroup_v2": true,
         "euid": 0,
         "gpu_available": true,
-        "gpu_processes": ""
+        "gpu_processes": "",
+        "engine_gpu_backends": [
+          "CUDA"
+        ]
       }
     },
     "argv": [

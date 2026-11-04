@@ -46,6 +46,9 @@ elif name in ("python3", "python"):
         app.chmod(0o755)
     elif args[:2] == ["-m", "pip"]:
         pass
+    elif args[:2] == ["-m", "inferssd.machine.backend"]:
+        assert os.environ["PYTHONPATH"].endswith("/source/framework/src")
+        print(os.environ.get("TEST_GPU_BACKEND", "CUDA"))
     elif args and args[0] == "scripts/engine-resources.py":
         pathlib.Path(args[args.index("--output") + 1]).write_text("{}")
     else:
@@ -94,6 +97,31 @@ def test_piped_install_and_upgrade(installation, system):
     assert app.read_text() == previous
     assert Path(descriptor).is_file()
     assert len(list((home / "releases").iterdir())) == 1
+
+
+@pytest.mark.parametrize(
+    "backend, glslc, preset, warned",
+    [
+        ("CPU", False, "--preset linux-cpu\n", False),
+        ("Vulkan", False, "--preset linux-cpu\n", True),
+        ("Vulkan", True, "--preset linux-cpu -DGGML_VULKAN=ON\n", False),
+    ],
+)
+def test_linux_builds_for_the_machines_gpus(installation, backend, glslc, preset, warned):
+    home, bindir, env = installation
+    tools = Path(env["PATH"].split(os.pathsep)[0])
+    # Without an NVIDIA GPU the CUDA toolkit is not needed.
+    (tools / "nvcc").unlink()
+    if glslc:
+        (tools / "glslc").symlink_to(tools / "helper")
+    env.update(TEST_SYSTEM="Linux", TEST_GPU_BACKEND=backend)
+    result = subprocess.run(
+        ["sh"], input=INSTALLER.read_text(), text=True, env=env, capture_output=True
+    )
+    assert result.returncode == 0, result.stderr
+    log = Path(env["CMAKE_LOG"]).read_text()
+    assert preset in log and "inferssd-memprobe" not in log
+    assert ("install the Vulkan SDK" in result.stderr) == warned
 
 
 def test_mac_asks_for_the_command_line_tools(installation):

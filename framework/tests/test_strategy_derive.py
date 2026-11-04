@@ -50,8 +50,10 @@ def models(tmp_path_factory):
     }
 
 
-def runtime(cpus, gpus=(), budget=None):
-    return RuntimeFacts(tuple(cpus), tuple(gpus) if gpus is not None else None, 1 << 36, budget)
+def runtime(cpus, gpus=(), budget=None, backends=None):
+    return RuntimeFacts(
+        tuple(cpus), tuple(gpus) if gpus is not None else None, 1 << 36, budget, backends
+    )
 
 
 def costs(strategy):
@@ -373,9 +375,21 @@ def test_no_usable_gpu_sets_a_zero_vram_budget(models):
     assert sorted(costs(s)) == ["cpu_fixed_us", "cpu_route_us", "drive_gbps"]
     c["identity"]["hard"]["gpus"], c["gpus"] = [], []
     c["identity"]["soft"]["probe_versions"].pop("memory")
-    s = derive(c, models["dsv"], runtime(range(61)), "linux", model_drive_key=drive(c))
+    # A CUDA engine on a machine without a GPU.
+    facts = runtime(range(61), backends=("CUDA",))
+    s = derive(c, models["dsv"], facts, "linux", model_drive_key=drive(c))
     assert s.settings["vram.budget"].value_text == "0"
     assert s.settings["vram.budget"].reason == "no CUDA GPU is usable now"
+
+
+def test_the_cuda_budget_follows_the_engine_not_the_platform(models):
+    # An engine built without CUDA leaves the budget alone beside a usable NVIDIA GPU.
+    c = machine(X86)
+    gpu = GPUState(X86_GPU, 30 << 30, 2)
+    for backends in ((), ("Vulkan",)):
+        facts = runtime(range(61), [gpu], backends=backends)
+        s = derive(c, models["dsv"], facts, "linux", model_drive_key=drive(c))
+        assert "vram.budget" not in s.settings and "vram.reserve_mib" not in s.settings
 
 
 def test_gpu_states_that_leave_the_vram_budget_alone(models):

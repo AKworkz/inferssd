@@ -10,7 +10,7 @@ Both platforms use the `main` branch of `wici-ai/inferssd`. Use the
 
 ## Before you start
 
-- Install Git, CMake, Ninja, a C/C++ compiler, and Python 3.9 or later. macOS also needs the Xcode Command Line Tools; Linux needs a compatible CUDA toolkit and `liburing` development files.
+- Install Git, CMake, Ninja, a C/C++ compiler, and Python 3.9 or later. macOS also needs the Xcode Command Line Tools; Linux needs `liburing` development files, and a compatible CUDA toolkit on a machine with an NVIDIA GPU.
 - Choose a [tested GGUF checkpoint](../README.md#models). `cli -hf` and `serve -hf` download all shards of its tested quantization. For manual `launch`, obtain a complete local copy and keep all shards together.
 - Plan storage for the checkpoint. The benchmarked DeepSeek GGUF files take about **473 GiB**; an optional DeepSeek expert pack adds about **269 GiB**, and a Muse pack about **450 GiB**. The framework can index GGUF experts directly, so a pack is optional and must match its source checkpoint.
 - Choose CPU, cache and process-memory budgets for your machine. The README benchmark settings describe their recorded runs, not universal deployment defaults.
@@ -23,8 +23,12 @@ curl -fsSL https://github.com/wici-ai/inferssd/releases/latest/download/install.
 
 This is a source installer, not a prebuilt binary release. It checks for a C/C++
 compiler, Git, Python 3.9+ with `venv`, and the platform toolchain. On macOS,
-the Xcode Command Line Tools must be installed; on Linux, provide `nvcc` on PATH, under
-`/usr/local/cuda`, or through `CUDACXX`, and install `liburing` headers.
+the Xcode Command Line Tools must be installed. On Linux, install `liburing`
+headers. The engine is built for the machine's GPUs, as the
+[machine profile](machine-profile.md) lists them: for an NVIDIA GPU with CUDA, which
+needs `nvcc` on PATH, under `/usr/local/cuda`, or through `CUDACXX`; for an AMD or
+Intel GPU with Vulkan, when the Vulkan SDK's `glslc` is on PATH; and for the CPU
+alone otherwise.
 The [Linux runtime requirements](#linux-requirements) still apply.
 
 CMake, Ninja, Hugging Face support and the framework are installed into a private
@@ -133,6 +137,8 @@ python3 scripts/engine-resources.py \
   --build build-linux-cuda --output engine-resources.json
 ```
 
+Without an NVIDIA GPU, build `--preset linux-cpu` and leave out `inferssd-memprobe`; add
+`-DGGML_VULKAN=ON` with the Vulkan SDK to run an AMD or Intel GPU through Vulkan.
 The [Linux resource prerequisites](testing.md#linux-resource-prerequisites) describe I/O, cgroup and pinned-memory requirements.
 
 ### Linux requirements

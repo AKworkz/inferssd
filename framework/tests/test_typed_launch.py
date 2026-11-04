@@ -50,6 +50,7 @@ def setup(tmp_path, platform="linux", automatic=False):
         "cgroup_v2": True,
         "gpu_available": True,
         "gpu_processes": "",
+        "engine_gpu_backends": ["CUDA"] if platform == "linux" else ["Metal"],
     }
     inputs = LaunchInput(str(root), (("PATH", "/bin"), ("PRIVATE_TOKEN", "never-persist")))
     out = tmp_path / "run"

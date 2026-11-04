@@ -46,6 +46,9 @@ def render(case):
         if name == "write_exclusive":
             written[arguments[0]] = arguments[1]
             return Reply()
+        if name == "engine_gpu_backends":
+            # As a recorded launch: an engine whose GPU backends a case leaves out is unknown.
+            return Reply(case["host"].get(name))
         return Reply(case["host"][name])
 
     pools = case["threads"]

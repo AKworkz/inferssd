@@ -307,6 +307,10 @@ class RuntimeFacts:
     # read. The engine sizes its caches from its own reading at run time.
     available_bytes: Optional[int]
     memory_budget_bytes: Optional[int] = None  # the user's memory budget, when given
+    # The GPU backends of the engine the launch starts, as its build names them; None when
+    # unknown, and then taken to be the backends of the machine's GPUs (engine_gpu_backends).
+    # Set by the launch, not recorded with the facts above.
+    gpu_backends: Optional[tuple[str, ...]] = None
 
 
 class Host(identity.Host, Protocol):

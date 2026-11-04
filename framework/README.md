@@ -40,8 +40,9 @@ result afterwards (`--reprofile` measures again; `--machine PATH` uses a given
 characteristics file and measures nothing); see [machine profile](../docs/machine-profile.md).
 From that file, the model's GGUF header and the CPUs, GPUs and memory it finds
 at that moment, the launch chooses thread counts, CPU placement, `place.costs`
-and, without a usable CUDA GPU, `vram.budget = 0` (on macOS also
-`host.budget_mib` from the runtime policy). With one usable CUDA GPU on Linux it
+and, for an engine with CUDA but no usable CUDA GPU, `vram.budget = 0` (on macOS also
+`host.budget_mib` from the runtime policy). With an engine that has CUDA and one usable
+CUDA GPU it
 also chooses `prefill.cpu_max_tokens`, the longest prompt pass the CPU prefills
 no slower than the GPU graph, and prefills each prompt in one pass (`-b` and
 `-ub` as large as the context); on a GPU that shares host memory it keeps

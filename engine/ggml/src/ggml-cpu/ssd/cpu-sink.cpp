@@ -3305,6 +3305,15 @@ sink_configuration configured(const settings::snapshot * input, const runtime_se
     if (!out.has_gpu && out.settings.vram_budget()->tier_bytes(false)) {
         throw std::runtime_error("nonzero GPU tier budget requires an injected GPU provider");
     }
+    // A setting of a GPU backend's expert tier would do nothing without the tier: one set explicitly is refused.
+    const bool tier = out.has_gpu && out.gpu.residency;
+    for (const auto & d : settings::registry()) {
+        const auto * value = out.settings.find(d.key);
+        if (*d.backend && !tier && value && value->origin != "default") {
+            throw std::runtime_error(std::string(d.key) + " (" + value->location + ") configures the " + d.backend +
+                                     " expert tier, which this engine runs without");
+        }
+    }
     auto & p = out.policy;
     p.ready_first = p.early_up_gate = p.role_major = p.nonblocking_down_sched = p.dynamic_rows = true;
     p.dynamic_chunk_rows = 64;

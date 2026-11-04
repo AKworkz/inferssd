@@ -6,6 +6,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# The framework beside this script reads a build's GPU backends, whether or not it is installed.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "framework" / "src"))
+from inferssd.launch.resources import cmake_gpu_backends  # noqa: E402
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--build", required=True, type=Path)
 parser.add_argument("--output", required=True, type=Path)
@@ -29,7 +33,11 @@ except (OSError, subprocess.CalledProcessError):
     revision = "unknown"
 value = {
     "schema": "inferssd-engine 1", "binary": str(binary), "revision": revision,
-    "capabilities": {"settings": "inferssd-settings 1", "telemetry": 1, "platform": platform},
+    "capabilities": {
+        "settings": "inferssd-settings 1", "telemetry": 1, "platform": platform,
+        "gpu_backends": list(cmake_gpu_backends(
+            (args.build / "CMakeCache.txt").read_text(encoding="utf-8", errors="replace"))),
+    },
     "templates": {name: str(path) for name, path in templates.items()},
     "probes": {name: str(path.resolve()) for name, path in {
         "io": args.build / ("bin/inferssd-ioreplay" + executable),

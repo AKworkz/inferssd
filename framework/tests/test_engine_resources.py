@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 from test_engine_runtime import policy
 
-from inferssd.launch.live import Command, LiveArtifacts
+from inferssd.launch.live import Command, LiveArtifacts, NativeHost
+from inferssd.launch.resources import cmake_gpu_backends
 from inferssd.launch.types import Fact, LaunchInput
 from inferssd.platform import resources
 
@@ -210,3 +211,32 @@ def test_gpu_failed_or_na_and_checked_command_error():
     host.replies["nvidia-smi"] = Command(1, "", "failure")
     with pytest.raises(RuntimeError, match="host command failed"):
         adapter(Fact("gpu_processes"))
+
+
+def test_a_builds_gpu_backends_are_read_from_its_cmake_cache():
+    cache = "GGML_CUDA:BOOL=ON\nGGML_METAL:BOOL=OFF\n// comment\nGGML_VULKAN:BOOL=TRUE\n"
+    assert cmake_gpu_backends(cache) == ("CUDA", "Vulkan")
+    metal = "GGML_METAL:BOOL=ON\nGGML_CUDA_KIMI_VRAM_TIER:BOOL=ON\n"
+    assert cmake_gpu_backends(metal) == ("Metal",)
+    assert cmake_gpu_backends("") == ()
+
+
+def test_the_engine_gpu_backends_fact_reads_the_servers_build(tmp_path):
+    build = tmp_path / "build-linux-cuda"
+    (build / "bin").mkdir(parents=True)
+    binary = str(build / "bin" / "inferssd-server")
+    adapter = LiveArtifacts(
+        LaunchInput(str(tmp_path), ()),
+        host=NativeHost(),
+        run=lambda _: pytest.fail("unexpected indexer"),
+        replace=lambda *_: None,
+        python="fixture-python",
+    )
+    # A server outside a CMake build: its backends are unknown.
+    assert adapter(Fact("engine_gpu_backends", (binary,))).value is None
+    # A UTF-8 cache, whatever this host's locale: it names the build's paths.
+    cache = (
+        "CMAKE_HOME_DIRECTORY:INTERNAL=/home/测/Kovač\nGGML_CUDA:BOOL=ON\nGGML_VULKAN:BOOL=OFF\n"
+    )
+    (build / "CMakeCache.txt").write_bytes(cache.encode())
+    assert adapter(Fact("engine_gpu_backends", (binary,))).value == ["CUDA"]
