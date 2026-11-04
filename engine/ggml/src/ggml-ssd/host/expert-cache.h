@@ -589,9 +589,7 @@ struct expert_cache {
                 (unsigned long long) stats.last_guard_extra_bytes, enabled_slots());
     }
     static source_key key(const kimi_cpu_sink_source & s) {
-        ssd::platform::file_identity file;
-        if (!ssd::platform::identity(s.fd_direct, file)) { throw detail::cache_sys_error("CPU sink cache file identity"); }
-        const auto v = kimi_vram_source_identity(file, s.offset + s.data_offset, s.payload_nbytes ? s.payload_nbytes : s.nbytes);
+        const auto v = kimi_vram_source_identity(s.file, s.offset + s.data_offset, s.payload_nbytes ? s.payload_nbytes : s.nbytes);
         return { v.device, v.inode, v.size, v.offset, v.bytes, v.mtime_s, v.mtime_ns, v.ctime_s, v.ctime_ns, v.inode_hi };
     }
     static bool matches(const entry & e, const expert_request & r) {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
+#include "../platform/file.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -11,4 +12,5 @@ struct kimi_cpu_sink_source {
     size_t nbytes;
     size_t data_offset;
     size_t payload_nbytes;
+    ssd::platform::file_identity file; // of fd_direct, filled in by the sink as it resolves
 };

@@ -1403,6 +1403,33 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
         GGML_ASSERT(*cur_backend_id != -1);
     }
 
+    // pass 4b: an op that writes through a view (set_rows, the _inplace ops) writes into its view_src's storage, so
+    // it runs on the backend that holds that storage: on any other it writes to a copy, or into memory it does not
+    // own. If that backend refuses the op, storage not allocated yet moves to the op's backend, with its views.
+    for (int i = 0; i < graph->n_nodes; i++) {
+        struct ggml_tensor * node = graph->nodes[i];
+        if (node->view_src == NULL || ggml_is_view_op(node->op)) {
+            continue;
+        }
+        int * node_backend_id = &tensor_backend_id(node);
+        int * view_src_backend_id = &tensor_backend_id(node->view_src);
+        if (*view_src_backend_id == -1 || *view_src_backend_id == *node_backend_id) {
+            continue;
+        }
+        if (ggml_backend_supports_op(sched->backends[*view_src_backend_id], node)) {
+            *node_backend_id = *view_src_backend_id;
+            SET_CAUSE(node, "4.ipl");
+        } else if (node->view_src->buffer == NULL) {
+            *view_src_backend_id = *node_backend_id;
+            SET_CAUSE(node->view_src, "4.ipl");
+            for (int j = 0; j < graph->n_nodes; j++) {
+                if (graph->nodes[j]->view_src == node->view_src) {
+                    tensor_backend_id(graph->nodes[j]) = *node_backend_id;
+                }
+            }
+        }
+    }
+
     // pass 5: split graph, find tensors that need to be copied
     {
         int i_split = 0;

@@ -1050,7 +1050,7 @@ static void schedule_invalid_tests(fixture_inputs & inputs) {
         { "role_major", "2" },
         { "nonblocking_down_sched", "2" },
         { "poll_us", "-1" },
-        { "poll_us", "1001" },
+        { "poll_us", "10001" },
         { "poll_us", "100x" },
         { "dynamic_rows", "2" },
         { "dynamic_chunk_rows", "0" },

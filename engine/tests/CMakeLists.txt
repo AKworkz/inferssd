@@ -136,6 +136,13 @@ target_link_libraries(test-ssd-model-adapter PRIVATE ggml-base)
 add_test(NAME ssd_model_adapter COMMAND test-ssd-model-adapter)
 set_property(TEST ssd_model_adapter PROPERTY LABELS main)
 
+add_executable(test-sched-inplace ssd/test-sched-inplace.cpp)
+target_compile_features(test-sched-inplace PRIVATE cxx_std_17)
+target_include_directories(test-sched-inplace PRIVATE ../ggml/src)
+target_link_libraries(test-sched-inplace PRIVATE ggml)
+add_test(NAME sched_inplace COMMAND test-sched-inplace)
+set_property(TEST sched_inplace PROPERTY LABELS main)
+
 add_executable(test-ssd-runtime-policy ssd/test-ssd-runtime-policy.cpp)
 target_compile_features(test-ssd-runtime-policy PRIVATE cxx_std_17)
 target_compile_options(test-ssd-runtime-policy PRIVATE -ffp-contract=off)

@@ -1631,10 +1631,11 @@ ggml_tensor * llm_graph_context::build_moe_prefetch_hint(
 llama_expert_gating_func_type gating_op,
              int64_t   n_expert,
                  int   il) {
-    if (!cpu_sink_runtime || n_tokens != 1 || !next_norm || !next_gate_inp) {
+    if (!cpu_sink_runtime || n_tokens != 1 || !next_gate_inp) {
         return nullptr;
     }
-    ggml_tensor * x = build_norm(ffn_inp, next_norm, nullptr, LLM_NORM_RMS, il);
+    // a router that reads the stream as it is has no norm of its own
+    ggml_tensor * x = next_norm ? build_norm(ffn_inp, next_norm, nullptr, LLM_NORM_RMS, il) : ffn_inp;
     ggml_tensor * logits = build_lora_mm(next_gate_inp, x);
     ggml_prec_set_acc(logits, GGML_PREC_F32);
     ggml_tensor * probs = nullptr;

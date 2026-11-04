@@ -438,16 +438,17 @@ def link_rates(
 def prefill_split(
     model: ModelFacts, line: tuple[float, float], drive_gbps: float, io_gbps: float
 ) -> tuple[Optional[int], str]:
-    """The longest prompt pass the CPU prefills no slower than the GPU graph, and why.
+    """The longest prompt pass the CPU prefills faster than the GPU graph, and why.
 
     A pass of n tokens touches U(n) = E (1 - (1 - k/E)^n) of a layer's E
     experts when each token routes to k of them uniformly. The CPU route reads
     those experts from the drive while it computes them, n k routes a layer on
     the CPU line, so it takes the longer of the two; the graph reads the same
     experts into the GPU at the slower of the drive and the link, and its
-    compute is taken as free. The CPU is faster for short passes, while U(n)
-    still grows with n, and slower past the crossing. None when the GPU never
-    wins within MAX_PASS tokens.
+    compute is taken as free. Only a link slower than the drive leaves the CPU
+    faster, for short passes while U(n) still grows with n, and slower past the
+    crossing. A tie goes to the graph: it leaves those experts in the VRAM tier,
+    which decode reads next. None when the GPU never wins within MAX_PASS tokens.
     """
     k = model.experts_used
     E, L, B = model.experts, model.layers, model.mean_expert_read_bytes
@@ -455,27 +456,27 @@ def prefill_split(
     if not k:
         return None, "the GGUF header gives no experts per token"
 
-    def cpu_no_slower(n: int) -> bool:
+    def cpu_faster(n: int) -> bool:
         touched = L * E * (1 - (1 - k / E) ** n)
         read = touched * B / (drive_gbps * GB)
         cpu = (touched * fixed + n * k * L * route) * 1e-6
-        return max(read, cpu) <= touched * B / (io_gbps * GB)
+        return max(read, cpu) < touched * B / (io_gbps * GB)
 
     why = (
         f"{L} layers of {E} experts, {k} a token, {size(B)} read an expert; CPU {fixed:.1f} + "
         f"{route:.2f} us a route reading {drive_gbps:.2f} GB/s, "
         f"GPU graph reading {io_gbps:.2f} GB/s"
     )
-    if not cpu_no_slower(1):
+    if not cpu_faster(1):
         return 0, why
     lo, hi = 1, 2
-    while cpu_no_slower(hi):
+    while cpu_faster(hi):
         lo, hi = hi, hi * 2
         if hi > MAX_PASS:
-            return None, why + f": the CPU is no slower up to {MAX_PASS} tokens"
+            return None, why + f": the CPU is faster up to {MAX_PASS} tokens"
     while hi - lo > 1:
         mid = (lo + hi) // 2
-        if cpu_no_slower(mid):
+        if cpu_faster(mid):
             lo = mid
         else:
             hi = mid
@@ -636,7 +637,7 @@ def derive(
             else:
                 choices["prefill.cpu_max_tokens"] = (
                     str(split),
-                    f"the longest pass the CPU prefills no slower than the GPU graph: {why}",
+                    f"the longest pass the CPU prefills faster than the GPU graph: {why}",
                 )
                 notes.append(f"prefill.cpu_max_tokens: {split}; {why}")
             one_pass = True

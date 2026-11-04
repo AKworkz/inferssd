@@ -150,7 +150,7 @@ extern "C" bool kimi_cpu_sink_run_cache_compute(kimi_cpu_sink * sink,
                 if(native_ids[n]>=up->ne[2]){throw std::runtime_error("native ID exceeds tensor metadata");}
                 for(int role=0;role<3;++role) {
                     auto & source=c.role[role];
-                    if(!sink->resolver(sink->userdata,tensors[role]->name,native_ids[n],&source)) {
+                    if(!sink->resolve(tensors[role]->name,native_ids[n],&source)) {
                         throw std::runtime_error("cache location source resolve failed");
                     }
                     const size_t bytes=tensors[role]->nb[2];

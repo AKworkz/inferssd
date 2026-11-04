@@ -86,8 +86,9 @@ memory, the available memory) to choose:
   machine's memory (`host.headroom_mib`), since macOS compresses the cold pages
   of a RAM cache that leaves less free;
 - with one usable CUDA GPU on Linux, which prompt passes the CPU prefills
-  (`prefill.cpu_max_tokens`, the longest pass the CPU prefills no slower than
-  the GPU graph reading the same experts) and one prefill pass per prompt; on
+  (`prefill.cpu_max_tokens`, the longest pass the CPU prefills faster than the
+  GPU graph reading the same experts; a tie goes to the graph, which warms the
+  VRAM tier for decode) and one prefill pass per prompt; on
   a GPU sharing host memory, a host margin of 4096 MiB (`host.headroom_mib`).
 
 Only the prefill route and the pass size change the model's output, the way

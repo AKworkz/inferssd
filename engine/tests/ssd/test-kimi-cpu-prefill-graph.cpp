@@ -101,8 +101,17 @@ static void graph_case(ggml_backend_t cpu, int ntokens, bool prefill, bool decod
     ggml_set_name(up, "blk.0.ffn_up_exps.weight");
     ggml_set_name(gate, "blk.0.ffn_gate_exps.weight");
     ggml_set_name(down, "blk.0.ffn_down_exps.weight");
+    // The Qwen routers read the stream as it is, with no norm of their own: the next layer's router predicts from it.
+    const bool qwen = arch == LLM_ARCH_QWEN4EXP || arch == LLM_ARCH_QWEN35MOE;
+    const bool predicted = qwen && decode && ntokens == 1;
+    if (predicted) {
+        ggml_tensor * next_router = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, latent, experts);
+        context.cpu_sink_prefetch_hint = context.build_moe_prefetch_hint(input, nullptr, next_router, nullptr,
+            LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX, experts, 0);
+        require(context.cpu_sink_prefetch_hint, "a router without a norm must still predict the next experts");
+    }
     ggml_tensor * output = context.build_moe_ffn(input, nullptr, up, gate, down, nullptr,
-        experts, slots, LLM_FFN_SILU, true, 1.0f, arch == LLM_ARCH_QWEN4EXP ? LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX :
+        experts, slots, LLM_FFN_SILU, true, 1.0f, qwen ? LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX :
         LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID, 0, logits);
     ggml_build_forward_expand(result.get_gf(), output);
     require(output->type == GGML_TYPE_F32 && output->ne[0] == latent && output->ne[1] == ntokens &&
@@ -123,7 +132,7 @@ static void graph_case(ggml_backend_t cpu, int ntokens, bool prefill, bool decod
         const auto & descriptor = *result.cpu_sink_nodes[0];
         require(descriptor.runtime == &runtime && descriptor.prefill == prefill,
                 "custom node lost its context runtime or execution phase");
-        require(arch == LLM_ARCH_QWEN4EXP ? descriptor.activation.kind == KIMI_CPU_SINK_ACTIVATION_SWIGLU :
+        require(qwen ? descriptor.activation.kind == KIMI_CPU_SINK_ACTIVATION_SWIGLU :
                 descriptor.activation.kind == KIMI_CPU_SINK_ACTIVATION_SWIGLU_CLAMP && descriptor.activation.swiglu_limit == 7.0f,
                 "custom node carries another activation than the model's");
         for (const auto * metadata : { &descriptor.up, &descriptor.gate, &descriptor.down }) {
@@ -134,6 +143,11 @@ static void graph_case(ggml_backend_t cpu, int ntokens, bool prefill, bool decod
             }
         }
         require(ggml_backend_sched_get_tensor_backend(scheduler.get(), output) == cpu, "custom node not assigned to CPU");
+        require(bool(output->src[5]) == predicted, "the custom node must carry the prediction it was given");
+        if (predicted) {
+            require(output->src[5]->type == GGML_TYPE_I32 && output->src[5]->ne[0] == slots,
+                    "the prediction must rank as many experts as the router selects");
+        }
         require(output->src[0] && output->src[1] && output->src[2] && !output->src[3], "custom node source count mismatch");
         for (int source = 0; source < 3; ++source) {
             require(ggml_is_contiguous(output->src[source]), "custom node input must be contiguous");
@@ -170,6 +184,8 @@ int main() {
         graph_case(cpu.get(), 2, false, true, "decode_two_legacy");
         graph_case(cpu.get(), 64, true, false, "qwen4exp_prefill_ub64", GGML_TYPE_Q8_0, LLM_ARCH_QWEN4EXP);
         graph_case(cpu.get(), 1, false, true, "qwen4exp_decode_one", GGML_TYPE_Q8_0, LLM_ARCH_QWEN4EXP);
+        graph_case(cpu.get(), 64, true, false, "qwen35moe_prefill_ub64", GGML_TYPE_Q8_0, LLM_ARCH_QWEN35MOE);
+        graph_case(cpu.get(), 1, false, true, "qwen35moe_decode_one", GGML_TYPE_Q8_0, LLM_ARCH_QWEN35MOE);
         bool refused = false;
         try {
             graph_case(cpu.get(), 1, false, true, "unsupported_f16", GGML_TYPE_F16);

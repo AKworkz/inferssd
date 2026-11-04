@@ -223,7 +223,7 @@ int main(int argc, char ** argv) {
             }
         }
         require(threads >= 1 && threads <= 255 && calls >= 200 && warmup >= 0 && experts >= 2 * routed &&
-            poll_us >= 0 && poll_us <= 1000 &&
+            poll_us >= 0 && poll_us <= 10000 &&
             (variant == "hit" || variant == "cold" || variant == "both" || variant == "empty"), "invalid bench options");
         ggml_cpu_init();
         test_resources::io_ring();

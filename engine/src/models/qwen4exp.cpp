@@ -774,6 +774,11 @@ ggml_tensor * llm_build_qwen4exp::build_layer_attn_linear(
 ggml_tensor * llm_build_qwen4exp::build_layer_ffn(ggml_tensor * cur, const int il) {
     GGML_ASSERT(model.layers[il].ffn_gate_inp != nullptr);
 
+    if (il + 1 < n_layer) {
+        cpu_sink_prefetch_hint = build_moe_prefetch_hint(cur, nullptr, model.layers[il + 1].ffn_gate_inp, nullptr,
+            LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX, n_expert, il);
+    }
+
     ggml_tensor * moe_out =
         build_moe_ffn(cur,
             model.layers[il].ffn_gate_inp,
@@ -790,6 +795,7 @@ ggml_tensor * llm_build_qwen4exp::build_layer_ffn(ggml_tensor * cur, const int i
             model.layers[il].ffn_gate_exps_s,
             model.layers[il].ffn_down_exps_s);
     cb(moe_out, "ffn_moe_out", il);
+    cpu_sink_prefetch_hint = nullptr;
 
     // shared experts, as in the Qwen3Next reference
     if (model.layers[il].ffn_up_shexp != nullptr) {
