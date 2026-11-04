@@ -24,6 +24,8 @@ struct sink_vram {
     kimi_vram_prefill_lane prefill_lane = {};
     bool prefill_batched = false, prefill_in_place = false;
     bool exclusive = false, decode = false, prefill_open = false, async_upload = false, prefill_enabled = false;
+    // A tier with no residency table holds nothing across layers: it serves grouped prefill alone, decode never calls it.
+    bool prefill_only = false;
     bool prefill_job_active = false;
     // The batched lanes' transient candidates and the per-layer SSD transient cap: the makespan decides by default
     // (1 route, no cap: a streamed transient holds only a ring slot and a device slot, whatever the count);
@@ -116,6 +118,8 @@ struct sink_vram {
         if (!bytes) { return; }
         if (!ready_first) { throw std::runtime_error("GPU tier requires READY_FIRST=1 for ordered reduction"); }
         if (!configuration.has_gpu) { throw std::runtime_error("GPU provider was not injected; no fallback"); }
+        prefill_only = !configuration.gpu.residency;
+        if (prefill_only) { async_upload = exclusive = deferred_upload = false; }
         api = configuration.gpu.api;
         if (!api || api->version != 2 || api->size != sizeof(*api) || !api->create || !api->destroy ||
                 !api->begin || !api->prepare || !api->launch || !api->admit || !api->finish || !api->cancel) {
@@ -135,7 +139,7 @@ struct sink_vram {
                     !prefill_api->admit_cold || !prefill_api->lane) {
                 throw std::runtime_error("GPU tier grouped-prefill ABI missing or incompatible; no fallback");
             }
-            if (!format) { throw std::runtime_error("GPU tier grouped prefill requires the explicit-format ABI"); }
+            if (!format && !prefill_only) { throw std::runtime_error("GPU tier grouped prefill requires the explicit-format ABI"); }
         }
         if (configuration.gpu.elastic) {
             elastic = configuration.gpu.elastic;
@@ -144,7 +148,7 @@ struct sink_vram {
                 throw std::runtime_error("GPU tier elastic lifecycle ABI mismatch");
             }
         }
-        {
+        if (!prefill_only) {
             // what the tier holds (the next-layer prefetch asks), and with VRAM_EXCLUSIVE its ready leases
             residency = configuration.gpu.residency;
             if (!residency || residency->version != 2 || residency->size != sizeof(*residency) || !residency->held ||
@@ -266,7 +270,7 @@ struct sink_vram {
     // bytes are the tensors' per-expert strides, as the decode requests carry them; the key is not needed.
     void reserve(const ggml_tensor * up, const ggml_tensor * gate, const ggml_tensor * down,
                  const std::vector<int32_t> & layer_ids) {
-        if (!context || !elastic || !format || layer_ids.empty()) { return; }
+        if (!context || !elastic || (!format && !prefill_only) || layer_ids.empty()) { return; }
         kimi_vram_request r = {};
         r.layer = layer_ids.front(); r.weight = 1.0f;
         const ggml_tensor * tensors[] = { up, gate, down };
@@ -286,7 +290,7 @@ struct sink_vram {
     void prepare(std::vector<sink_request> & source, const ggml_tensor * up, const ggml_tensor * down,
                  int latent, int hidden, const std::vector<int32_t> & layer_ids, sink_cache & cache, bool unweighted = false) {
         hits = 0;
-        if (!context) { return; }
+        if (!context || prefill_only) { return; }
         place_threads();
         int layer = -1, consumed = 0;
         const char * tensor_name = up->name;
@@ -329,7 +333,7 @@ struct sink_vram {
     }
     void launch(const void * quantized, size_t quantized_bytes, const float * f32, size_t f32_bytes,
                 const kimi_cpu_sink_activation & activation) {
-        if (!context) { return; }
+        if (!context || prefill_only) { return; }
         char error[512] = {};
         int result;
         if (format_path) {
@@ -354,7 +358,7 @@ struct sink_vram {
         }
     }
     void admit(size_t index, const void * const * data, bool borrow_until_finish) {
-        if (!context) { return; }
+        if (!context || prefill_only) { return; }
         char error[512] = {};
         if (deferred_upload && borrow_until_finish) {
             int queued = 0;
@@ -421,7 +425,7 @@ struct sink_vram {
         return accepted != 0;
     }
     void finish(float * contributions, size_t stride, sink_cache & cache, const std::vector<sink_request> & source) {
-        if (!context) { return; }
+        if (!context || prefill_only) { return; }
         char error[512] = {};
         const int result = api->finish(context, contributions, stride, error, sizeof(error));
         check(result, error);

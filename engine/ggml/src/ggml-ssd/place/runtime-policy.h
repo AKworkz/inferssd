@@ -81,7 +81,7 @@ struct lane_measurement {
     double resident_call_us, resident_expert_us, host_call_us, host_expert_us;
     int vector_tokens;
     double copy_us_per_mb, pageable_us_per_mb, link_busy_us;
-    bool in_place;
+    bool in_place, in_place_only;
 };
 struct lane_geometry {
     uint64_t token_bytes, output_bytes;
@@ -128,6 +128,7 @@ inline kimi_place_table make_table(const cost_lines & s, const cost_lines & prio
         1e3 / (s.pageable_gbps > 0 ? s.pageable_gbps : s.link_gbps);
     t.link_busy_us = c.link_busy_us;
     t.in_place = c.in_place && (t.one(ntokens) || (lane.batched && lane.in_place));
+    t.in_place_only = c.in_place_only;
     t.route_us = t.one(ntokens) ? 0.0 : route_bytes / 1e6 * rows_us_per_mb;
     t.overhead_fixed_us = s.gpu_overhead_fixed_us;
     t.token_us = s.gpu_token_us >= 0 ? s.gpu_token_us : overhead_row_prior(prior, lane, c.copy_us_per_mb);

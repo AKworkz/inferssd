@@ -56,8 +56,10 @@ if (Vulkan_FOUND)
 
     ggml_add_backend_library(ggml-vulkan
                              ggml-vulkan.cpp
+                             ../ggml-ssd/gpu/graph-lane.cpp
                              ../../include/ggml-vulkan.h
                             )
+    target_link_libraries(ggml-vulkan PRIVATE ggml-ssd)
 
     set(VULKAN_SHADER_GEN_CMAKE_ARGS "")
 

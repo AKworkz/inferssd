@@ -11,9 +11,11 @@ ggml_add_backend_library(ggml-metal
                          ggml-metal-common.cpp
                          ggml-metal-context.m
                          ggml-metal-ops.cpp
+                         ../ggml-ssd/gpu/graph-lane.cpp
                         )
 
 target_link_libraries(ggml-metal PRIVATE
+                      ggml-ssd
                       ${FOUNDATION_LIBRARY}
                       ${METAL_FRAMEWORK}
                       ${METALKIT_FRAMEWORK}

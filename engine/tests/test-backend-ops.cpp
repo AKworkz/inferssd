@@ -5908,6 +5908,16 @@ struct test_dsv4_hc : public test_case {
         return seed;
     }
 
+    // slice reads an input through a view that skips the first element of each row
+    ggml_tensor * input(ggml_context * ctx, const char * name, int64_t ne0, int64_t ne1, int64_t ne2, bool slice) {
+        ggml_tensor * t = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, ne0 + (slice ? 1 : 0), ne1, ne2);
+        ggml_set_name(t, name);
+        if (slice) {
+            t = ggml_view_3d(ctx, t, ne0, ne1, ne2, t->nb[1], t->nb[2], t->nb[0]);
+        }
+        return t;
+    }
+
     // value ranges close to the model's: weights and comb are probabilities, post is 2*sigmoid
     static bool tensor_range(const std::string & name, float & lo, float & hi) {
         if (name == "mixes")                     { lo = -2.0f;  hi = 2.0f;  return true; }
@@ -5946,6 +5956,7 @@ struct test_dsv4_hc_comb : public test_dsv4_hc {
     const int64_t n_tokens;
     const int32_t n_iter;
     const float eps;
+    const bool slice;
 
     std::string op_desc(ggml_tensor * t) override {
         GGML_UNUSED(t);
@@ -5953,21 +5964,16 @@ struct test_dsv4_hc_comb : public test_dsv4_hc {
     }
 
     std::string vars() override {
-        return VARS_TO_STR3(n_tokens, n_iter, eps);
+        return VARS_TO_STR4(n_tokens, n_iter, eps, slice);
     }
 
-    test_dsv4_hc_comb(int64_t n_tokens = 17, int32_t n_iter = 4, float eps = 1e-6f)
-        : n_tokens(n_tokens), n_iter(n_iter), eps(eps) {}
+    test_dsv4_hc_comb(int64_t n_tokens = 17, int32_t n_iter = 4, float eps = 1e-6f, bool slice = false)
+        : n_tokens(n_tokens), n_iter(n_iter), eps(eps), slice(slice) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * mixes = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (2 + hc)*hc, n_tokens);
-        ggml_set_name(mixes, "mixes");
-
-        ggml_tensor * scale = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 3);
-        ggml_set_name(scale, "scale");
-
-        ggml_tensor * base = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, (2 + hc)*hc);
-        ggml_set_name(base, "base");
+        ggml_tensor * mixes = input(ctx, "mixes", (2 + hc)*hc, n_tokens, 1, slice);
+        ggml_tensor * scale = input(ctx, "scale", 3, 1, 1, slice);
+        ggml_tensor * base  = input(ctx, "base", (2 + hc)*hc, 1, 1, slice);
 
         ggml_tensor * out = ggml_dsv4_hc_comb(ctx, mixes, scale, base, eps, n_iter);
         ggml_set_name(out, "out");
@@ -5994,25 +6000,15 @@ struct test_dsv4_hc_pre : public test_dsv4_hc {
     test_dsv4_hc_pre(int64_t n_embd = 31, int64_t hc_mult = 4, int64_t n_tokens = 17, bool gated = false, bool slice = false)
         : n_embd(n_embd), hc_mult(hc_mult), n_tokens(n_tokens), gated(gated), slice(slice) {}
 
-    // slice reads every input through a view that skips the first element of each row
-    ggml_tensor * input(ggml_context * ctx, const char * name, int64_t ne0, int64_t ne1, int64_t ne2) {
-        ggml_tensor * t = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, ne0 + (slice ? 1 : 0), ne1, ne2);
-        ggml_set_name(t, name);
-        if (slice) {
-            t = ggml_view_3d(ctx, t, ne0, ne1, ne2, t->nb[1], t->nb[2], t->nb[0]);
-        }
-        return t;
-    }
-
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * x = input(ctx, "x", n_embd, hc_mult, n_tokens);
+        ggml_tensor * x = input(ctx, "x", n_embd, hc_mult, n_tokens, slice);
 
         ggml_tensor * out = nullptr;
         if (gated) {
-            ggml_tensor * gate = input(ctx, "gate", n_embd, hc_mult, n_tokens);
+            ggml_tensor * gate = input(ctx, "gate", n_embd, hc_mult, n_tokens, slice);
             out = ggml_dsv4_hc_pre_gated(ctx, x, gate, 1.0f/hc_mult);
         } else {
-            ggml_tensor * weights = input(ctx, "weights", hc_mult, n_tokens, 1);
+            ggml_tensor * weights = input(ctx, "weights", hc_mult, n_tokens, 1, slice);
             out = ggml_dsv4_hc_pre(ctx, x, weights);
         }
         ggml_set_name(out, "out");
@@ -6024,6 +6020,7 @@ struct test_dsv4_hc_post : public test_dsv4_hc {
     const int64_t n_embd;
     const int64_t n_tokens;
     const bool    identity;
+    const bool    slice;
 
     std::string op_desc(ggml_tensor * t) override {
         GGML_UNUSED(t);
@@ -6031,26 +6028,20 @@ struct test_dsv4_hc_post : public test_dsv4_hc {
     }
 
     std::string vars() override {
-        return VARS_TO_STR3(n_embd, n_tokens, identity);
+        return VARS_TO_STR4(n_embd, n_tokens, identity, slice);
     }
 
-    test_dsv4_hc_post(int64_t n_embd = 31, int64_t n_tokens = 17, bool identity = false)
-        : n_embd(n_embd), n_tokens(n_tokens), identity(identity) {}
+    test_dsv4_hc_post(int64_t n_embd = 31, int64_t n_tokens = 17, bool identity = false, bool slice = false)
+        : n_embd(n_embd), n_tokens(n_tokens), identity(identity), slice(slice) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, n_tokens);
-        ggml_set_name(x, "x");
-
-        ggml_tensor * residual = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, n_embd, hc, n_tokens);
-        ggml_set_name(residual, "residual");
-
-        ggml_tensor * post = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hc, n_tokens);
-        ggml_set_name(post, "post");
+        ggml_tensor * x        = input(ctx, "x", n_embd, n_tokens, 1, slice);
+        ggml_tensor * residual = input(ctx, "residual", n_embd, hc, n_tokens, slice);
+        ggml_tensor * post     = input(ctx, "post", hc, n_tokens, 1, slice);
 
         ggml_tensor * comb = nullptr;
         if (!identity) {
-            comb = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, hc, hc, n_tokens);
-            ggml_set_name(comb, "comb");
+            comb = input(ctx, "comb", hc, hc, n_tokens, slice);
         }
 
         ggml_tensor * out = ggml_dsv4_hc_post(ctx, x, residual, post, comb);
@@ -9125,6 +9116,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_dsv4_hc_comb(1, 1));
     test_cases.emplace_back(new test_dsv4_hc_comb(17, 4));
     test_cases.emplace_back(new test_dsv4_hc_comb(257, 8));
+    test_cases.emplace_back(new test_dsv4_hc_comb(17, 4, 1e-6f, true));
     // DeepSeek-V4.1 uses 20 iterations; 1 = decode, 64 = the envelope's ubatch
     for (int64_t n_tokens : {1, 64, 256, 513}) {
         test_cases.emplace_back(new test_dsv4_hc_comb(n_tokens, 20));
@@ -9136,6 +9128,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_dsv4_hc_post(4096, 64));
     test_cases.emplace_back(new test_dsv4_hc_post(31, 17, true));
     test_cases.emplace_back(new test_dsv4_hc_post(4096, 21, true));
+    test_cases.emplace_back(new test_dsv4_hc_post(31, 17, false, true));
+    test_cases.emplace_back(new test_dsv4_hc_post(31, 17, true, true));
 
     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
         // blocks with extra cells and scores (k-pool)

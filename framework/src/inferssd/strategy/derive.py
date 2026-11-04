@@ -580,7 +580,8 @@ def derive(
 
     one_pass = False
     mixed = [role for role in model.roles if len(role.formats) > 1]
-    # The CUDA tier's budget, where the engine has the tier.
+    # The CUDA tier's budget, where the engine has the tier. A GPU lane (Vulkan, Metal) takes
+    # the default.
     if "CUDA" in engine_gpu_backends(runtime.gpu_backends, characteristics):
         listed = {
             gpu["uuid"]

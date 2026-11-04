@@ -13,7 +13,7 @@ Python resource. There are no environment mirrors or legacy-name aliases.
 | `prefetch.depth` | integer / predicted experts | `2` | plan | all |  |
 | `place.costs` | costs / named us and GB/s terms | `empty` | plan | all |  |
 | `prefill.cpu_max_tokens` | integer / tokens | `4294967295` | plan | all | CUDA |
-| `vram.budget` | budget / bytes | `auto` | plan | linux |  |
+| `vram.budget` | budget / bytes | `auto` | plan | all |  |
 | `vram.max_slots` | integer / slots | `0` | plan | all | CUDA |
 | `vram.reserve_mib` | integer / MiB | `0` | launch | all | CUDA |
 | `host.headroom_mib` | integer / MiB | `512` | plan | all |  |
@@ -39,10 +39,13 @@ the GPU admits; on a GPU that shares the host's memory, such as GB10, that is
 the host memory envelope below less the slots the next-layer prefetch lands in,
 which are all the RAM cache keeps beside a tier there (with `vram.budget = 0`
 the RAM cache takes the envelope). Auto gives no tier where no CUDA backend
-runs: on macOS and Windows, on a CPU-only build, or with only Metal or another
-GPU backend, which then runs the dense layers while the CPU sink computes every
-routed expert. An
-explicit nonzero budget without a CUDA backend is an error.
+runs. On Vulkan and Metal, a GPU that shares the host's memory takes the heavy
+experts of a prompt pass through the [GPU lane](architecture.md#the-gpu-lane),
+which keeps nothing across layers, and `vram.budget = 0` leaves them on the CPU.
+On a CPU-only build, or with another GPU backend, the GPU runs the dense layers
+while the CPU sink computes every routed expert, and an explicit nonzero budget
+is an error. The lane holds no expert across layers, so for it a nonzero budget,
+like auto, only turns it on.
 
 `vram.reserve_mib` is VRAM that prefill and decode leave free for other processes.
 On a discrete GPU it is kept against what this process holds, not against what the

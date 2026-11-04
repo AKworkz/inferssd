@@ -93,18 +93,14 @@ int main(int argc, char ** argv) {
     assert(!parse("inferssd-settings 2\n", "version.ssd"));
     assert(parse("inferssd-settings 1\nprefetch.depth=8\n", "mac.ssd", {}, "darwin"));
     assert(!parse("inferssd-settings 1\nhost.expert_cache_mib=12288\n", "mac.ssd", {}, "darwin"));
-    assert(!parse("inferssd-settings 1\nvram.budget=auto\n", "mac.ssd", {}, "darwin"));
-    // The executor's keys apply on every platform, and so do the CUDA tier's: the engine refuses those where it runs
-    // without the tier, whatever the platform. vram.budget stays Linux-only.
+    assert(parse("inferssd-settings 1\nvram.budget=0\n", "mac.ssd", {}, "darwin"));
+    // The executor's keys apply on every platform. The CUDA tier's keys too: the engine refuses them where it runs
+    // without the tier, whatever the platform.
     assert(parse("inferssd-settings 1\ncpu.io_cpus=3\ncpu.decode_participants=2\nprefetch.depth=4\n"
                  "place.costs=cpu_fixed_us=204\nhost.headroom_mib=1024\nhost.budget_mib=8192\n"
                  "model.hc_fused=0\n", "win.ssd", {}, "windows"));
     assert(parse("inferssd-settings 1\ncpu.io_cpus=0-2\ncpu.decode_participants=1\nhost.budget_mib=8192\n", "mac.ssd", {},
                  "darwin"));
-    {
-        const auto rejected = parse("inferssd-settings 1\nvram.budget = auto\n", "win.ssd", {}, "windows");
-        assert(!rejected && rejected.error.find("win.ssd:2") != std::string::npos);
-    }
     for (const std::string platform : { "linux", "darwin", "windows" }) {
         assert(parse("inferssd-settings 1\nvram.max_slots=1\nprefill.cpu_max_tokens=1\nvram.reserve_mib=64\n", "tier.ssd",
                      {}, platform));
@@ -116,8 +112,8 @@ int main(int argc, char ** argv) {
         assert(scopes.at("host.budget_mib").object.at("scope").text == "darwin,windows");
         assert(scopes.at("cpu.io_cpus").object.at("scope").text == "all");
         assert(scopes.at("cpu.decode_participants").object.at("scope").text == "all");
-        assert(scopes.at("vram.budget").object.at("scope").text == "linux");
         assert(scopes.at("vram.max_slots").object.at("scope").text == "all");
+        assert(scopes.at("vram.budget").object.at("scope").text == "all");
         // The CUDA tier's keys name their backend; the others have none.
         for (const char * key : { "prefill.cpu_max_tokens", "vram.max_slots", "vram.reserve_mib" }) {
             assert(scopes.at(key).object.at("backend").text == "CUDA");

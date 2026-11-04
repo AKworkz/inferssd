@@ -1,0 +1,89 @@
+#version 450
+
+#include "dsv4_hc_head.glsl"
+
+// ne0 = n_tokens, flag = Sinkhorn iterations, param = eps. One invocation per token.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly buffer M {float data_m[];};
+layout (binding = 1) readonly buffer S {float data_s[];};
+layout (binding = 2) readonly buffer B {float data_b[];};
+layout (binding = 3) writeonly buffer D {float data_d[];};
+
+const uint HC = 4;
+const uint COMB_OFFSET = 2*HC;
+
+float comb[HC*HC];
+
+void norm_cols() {
+    for (uint idst = 0; idst < HC; ++idst) {
+        float sum = p.param;
+        for (uint isrc = 0; isrc < HC; ++isrc) {
+            sum += comb[idst + HC*isrc];
+        }
+        const float inv_sum = 1.0 / sum;
+        for (uint isrc = 0; isrc < HC; ++isrc) {
+            comb[idst + HC*isrc] *= inv_sum;
+        }
+    }
+}
+
+void norm_rows() {
+    for (uint isrc = 0; isrc < HC; ++isrc) {
+        float sum = p.param;
+        for (uint idst = 0; idst < HC; ++idst) {
+            sum += comb[idst + HC*isrc];
+        }
+        const float inv_sum = 1.0 / sum;
+        for (uint idst = 0; idst < HC; ++idst) {
+            comb[idst + HC*isrc] *= inv_sum;
+        }
+    }
+}
+
+void main() {
+    const uint it = gl_GlobalInvocationID.x;
+
+    if (it >= p.ne0) {
+        return;
+    }
+
+    const float scale_comb = data_s[p.offs1 + 2*p.nb10];
+
+    for (uint isrc = 0; isrc < HC; ++isrc) {
+        float largest = 0.0;
+        for (uint idst = 0; idst < HC; ++idst) {
+            const uint idx = idst + HC*isrc;
+            const float v = data_m[p.offs0 + (COMB_OFFSET + idx)*p.nb00 + it*p.nb01] * scale_comb +
+                            data_b[p.offs2 + (COMB_OFFSET + idx)*p.nb20];
+            comb[idx] = v;
+            largest = idst == 0 ? v : max(largest, v);
+        }
+
+        float sum = 0.0;
+        for (uint idst = 0; idst < HC; ++idst) {
+            const uint idx = idst + HC*isrc;
+            const float v = exp(comb[idx] - largest);
+            comb[idx] = v;
+            sum += v;
+        }
+
+        const float inv_sum = 1.0 / sum;
+        for (uint idst = 0; idst < HC; ++idst) {
+            const uint idx = idst + HC*isrc;
+            comb[idx] = comb[idx] * inv_sum + p.param;
+        }
+    }
+
+    norm_cols();
+    for (uint i = 1; i < p.flag; ++i) {
+        norm_rows();
+        norm_cols();
+    }
+
+    for (uint isrc = 0; isrc < HC; ++isrc) {
+        for (uint idst = 0; idst < HC; ++idst) {
+            data_d[p.offs4 + idst*p.nb40 + isrc*p.nb41 + it*p.nb42] = comb[idst + HC*isrc];
+        }
+    }
+}

@@ -376,6 +376,7 @@ struct kimi_place_table {
     double link_busy_us = 0;                   // copies already queued on the link
     double drive_fixed_us = 0, drive_us_per_mb = 0; // a layer's reads: fixed + per MB (0: not known, no read time)
     bool in_place = false;                     // this pass's engine can read host memory in place (one token: does)
+    bool in_place_only = false;                // and it has no device memory to copy to: nothing to compare with
     bool one(int ntokens) const { return ntokens <= vector_tokens; }
     const kimi_place_engine & engine(int ntokens) const { return one(ntokens) ? vector : batched; }
     double cpu(int ntokens, double routes) const { return one(ntokens) ? cpu_one_us : cpu_fixed_us + cpu_route_us * routes; }
@@ -423,7 +424,7 @@ inline kimi_place_result kimi_place_layer(const kimi_place_table & t, int ntoken
     // in place: one token wherever the GPU can (decode's rule); a batched pass where its moved line at the layer's mean
     // routes off the tier is no longer than the device line plus the mean copy
     bool in_place = t.in_place;
-    if (in_place && !one) {
+    if (in_place && !one && !t.in_place_only) {
         double routes = 0.0, copy = 0.0, count = 0.0;
         for (size_t i = 0; i < n; ++i) {
             const auto & x = items[i];

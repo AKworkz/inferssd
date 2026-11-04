@@ -301,9 +301,9 @@ static void sink_copy_services(sink_configuration & value, const ssd::runtime_se
     }
     if (services->gpu) {
         const auto * gpu = services->gpu;
-        if (gpu->version != 1 || gpu->size != sizeof(*gpu) || !gpu->api || !gpu->residency ||
-                !gpu->location || !gpu->format || !gpu->prefill || !gpu->elastic || !gpu->deferred ||
-                !gpu->host || !gpu->policy || !gpu->settings || !gpu->testing || !gpu->transport || !gpu->stream ||
+        // The tables a tier needs are checked when it starts (sink_vram::initialize): a tier with no residency
+        // serves grouped prefill alone and has fewer of them.
+        if (gpu->version != 1 || gpu->size != sizeof(*gpu) || !gpu->api || !gpu->prefill || !gpu->settings || !gpu->stream ||
                 !gpu->device_is_unified || !gpu->device_ordinal || !gpu->attach_services || services->gpu_device < 0) {
             throw std::runtime_error("GPU provider ABI missing or incompatible");
         }
@@ -1687,7 +1687,7 @@ struct kimi_cpu_sink {
         if (vram.context && vram.host_api) { vram.host_api->costs2(vram.context, &c); }
         const ssd::place::lane_measurement measured = {
             c.resident_call_us, c.resident_expert_us, c.host_call_us, c.host_expert_us,
-            c.vector_tokens, c.copy_us_per_mb, c.pageable_us_per_mb, c.link_busy_us, c.in_place != 0 };
+            c.vector_tokens, c.copy_us_per_mb, c.pageable_us_per_mb, c.link_busy_us, c.in_place != 0, c.in_place_only != 0 };
         return ssd::place::make_table(vram.cost, vram.prior, learning, vram.learning, measured,
             vram.lane_geometry(), ntokens, route_bytes);
     }
@@ -1814,7 +1814,7 @@ struct kimi_cpu_sink {
                 !vram.prefill_api->transient_available(vram.context) || slots.empty()) { return; }
         kimi_vram_host_costs c = {};
         vram.host_api->costs2(vram.context, &c);
-        if (c.in_place) { return; }  // the GPU reads the ring in place: nothing to page-lock
+        if (c.in_place && !c.in_place_only) { return; }  // the GPU reads the ring in place: nothing to page-lock
         if (!ring_pages.lock_pages) {
             ring_pages.lock_pages = [this](const void * p, size_t bytes, std::string * why) { return vram.register_host(p, bytes, why); };
             ring_pages.unlock_pages = [this](const void * p) { return vram.unregister_host(p); };
@@ -3334,7 +3334,7 @@ kimi_cpu_sink * create_configured(const settings::snapshot * input, const runtim
     try {
         const auto value = configured(input, services);
         if (!resolver) { throw std::runtime_error("missing SSD expert resolver"); }
-        return new kimi_cpu_sink(8, resolver, userdata, value);
+        return new kimi_cpu_sink(ssd::io::expert_ring_depth, resolver, userdata, value);
     } catch (const std::exception & e) {
         sink_error(error, error_size, e.what());
         return nullptr;

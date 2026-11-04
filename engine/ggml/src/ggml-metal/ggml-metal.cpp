@@ -1,4 +1,5 @@
 #include "ggml-metal.h"
+#include "gpu/graph-lane.h"
 
 #include "ggml-impl.h"
 #include "ggml-backend-impl.h"
@@ -869,6 +870,9 @@ static ggml_backend_feature * ggml_backend_metal_get_features(ggml_backend_reg_t
 static void * ggml_backend_metal_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     if (strcmp(name, "ggml_backend_get_features") == 0) {
         return (void *)ggml_backend_metal_get_features;
+    }
+    if (strcmp(name, "ggml_backend_ssd_provider_v1") == 0) {
+        return (void *)ssd::gpu::graph_lane_provider;
     }
 
     return NULL;

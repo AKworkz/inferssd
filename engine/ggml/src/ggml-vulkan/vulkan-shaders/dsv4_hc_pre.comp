@@ -1,0 +1,33 @@
+#version 450
+
+#include "dsv4_hc_head.glsl"
+
+// ne0 = n_embd, flag = gated, param = scale. One invocation per output element: x = embedding, y = token.
+layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly buffer X {float data_x[];};
+layout (binding = 1) readonly buffer W {float data_w[];};
+layout (binding = 2) writeonly buffer D {float data_d[];};
+
+void main() {
+    const uint i0 = gl_GlobalInvocationID.x;
+    const uint it = gl_GlobalInvocationID.y;
+
+    if (i0 >= p.ne0) {
+        return;
+    }
+
+    float sum = 0.0;
+    for (uint ih = 0; ih < p.hc; ++ih) {
+        const float xv = data_x[p.offs0 + i0*p.nb00 + ih*p.nb01 + it*p.nb02];
+        float wv;
+        if (p.flag != 0) {
+            wv = 1.0 / (1.0 + exp(-data_w[p.offs1 + i0*p.nb10 + ih*p.nb11 + it*p.nb12]));
+        } else {
+            wv = data_w[p.offs1 + ih*p.nb10 + it*p.nb11];
+        }
+        sum += xv * wv;
+    }
+
+    data_d[p.offs4 + i0*p.nb40 + it*p.nb41] = p.param * sum;
+}

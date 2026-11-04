@@ -146,8 +146,6 @@ def test_the_cuda_tiers_keys_parse_on_every_platform_by_both(native_contract, tm
     "platform,body",
     [
         ("linux", "host.budget_mib=8192"),
-        ("windows", "vram.budget=auto"),
-        ("darwin", "vram.budget=auto"),
     ],
 )
 def test_platform_scope_refused_by_both(native_contract, tmp_path, platform, body):

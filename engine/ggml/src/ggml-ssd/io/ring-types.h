@@ -4,6 +4,8 @@
 #include <cstdint>
 
 namespace ssd { namespace io {
+// The experts a CPU sink keeps in flight on its read ring, three role reads each.
+constexpr int expert_ring_depth = 8;
 // The request and completion shapes every read ring shares, whatever the OS.
 // fd_direct comes from platform::open_direct.
 struct read_range { int fd_direct; uint64_t offset; size_t nbytes; };

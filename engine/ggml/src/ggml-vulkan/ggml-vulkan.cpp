@@ -1,4 +1,5 @@
 #include "ggml-vulkan.h"
+#include "gpu/graph-lane.h"
 #include <vulkan/vulkan_core.h>
 #if defined(GGML_VULKAN_RUN_TESTS) || defined(GGML_VULKAN_CHECK_RESULTS)
 #include <chrono>
@@ -750,6 +751,7 @@ struct vk_device_struct {
     vk_pipeline pipeline_clamp_f32;
     vk_pipeline pipeline_pad_f32;
     vk_pipeline pipeline_roll_f32;
+    vk_pipeline pipeline_dsv4_hc_comb_f32, pipeline_dsv4_hc_pre_f32, pipeline_dsv4_hc_post_f32;
     vk_pipeline pipeline_repeat_f32, pipeline_repeat_back_f32;
     vk_pipeline pipeline_cpy_f32_f32, pipeline_cpy_f32_f16, pipeline_cpy_f16_f16, pipeline_cpy_f16_f32, pipeline_cpy_f32_bf16, pipeline_cpy_f32_i32, pipeline_cpy_i32_f32;
     vk_pipeline pipeline_contig_cpy_f32_f32, pipeline_contig_cpy_f32_f16, pipeline_contig_cpy_f16_f16, pipeline_contig_cpy_f16_f32, pipeline_contig_cpy_f32_bf16, pipeline_contig_cpy_f32_i32, pipeline_contig_cpy_i32_f32;
@@ -1277,6 +1279,16 @@ struct vk_op_binary_push_constants {
     uint32_t ne20; uint32_t ne21; uint32_t ne22; uint32_t ne23; uint32_t nb20; uint32_t nb21; uint32_t nb22; uint32_t nb23;
     uint32_t misalign_offsets;
     float param1; float param2; int32_t param3;
+};
+
+struct vk_op_dsv4_hc_push_constants {
+    uint32_t ne0;
+    uint32_t hc;
+    uint32_t flag;
+    float param;
+    // src0 to src3, then dst, in floats
+    uint32_t offsets[5];
+    uint32_t nb[5][3];
 };
 
 struct vk_op_multi_add_push_constants {
@@ -2811,8 +2823,12 @@ static vk_buffer ggml_vk_create_buffer_device(vk_device& device, size_t size) {
             buf = ggml_vk_create_buffer(device, size, {vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
                                                        vk::MemoryPropertyFlagBits::eDeviceLocal});
         } else if (device->uma) {
-            // Fall back to host memory type
-            buf = ggml_vk_create_buffer(device, size, {vk::MemoryPropertyFlagBits::eDeviceLocal,
+            // The CPU and the GPU share this memory, and a type both can use spares each tensor copy a submit and a
+            // fence wait. Cached, since the CPU reads uncached memory far slower than it writes it. Fall back to
+            // device memory, then to any host memory type
+            buf = ggml_vk_create_buffer(device, size, {vk::MemoryPropertyFlagBits::eDeviceLocal | vk::MemoryPropertyFlagBits::eHostVisible |
+                                                           vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
+                                                       vk::MemoryPropertyFlagBits::eDeviceLocal,
                                                        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent});
         } else if (device->disable_host_visible_vidmem) {
             if (device->allow_sysmem_fallback) {
@@ -4547,6 +4563,10 @@ static void ggml_vk_load_shaders(vk_device& device) {
     ggml_vk_create_pipeline(device, device->pipeline_pad_f32, "pad_f32", pad_f32_len, pad_f32_data, "main", 2, sizeof(vk_op_pad_push_constants), {512, 1, 1}, {}, 1);
 
     ggml_vk_create_pipeline(device, device->pipeline_roll_f32, "roll_f32", roll_f32_len, roll_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
+
+    ggml_vk_create_pipeline(device, device->pipeline_dsv4_hc_comb_f32, "dsv4_hc_comb_f32", dsv4_hc_comb_f32_len, dsv4_hc_comb_f32_data, "main", 4, sizeof(vk_op_dsv4_hc_push_constants), {64, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_dsv4_hc_pre_f32, "dsv4_hc_pre_f32", dsv4_hc_pre_f32_len, dsv4_hc_pre_f32_data, "main", 3, sizeof(vk_op_dsv4_hc_push_constants), {512, 1, 1}, {}, 1);
+    ggml_vk_create_pipeline(device, device->pipeline_dsv4_hc_post_f32, "dsv4_hc_post_f32", dsv4_hc_post_f32_len, dsv4_hc_post_f32_data, "main", 5, sizeof(vk_op_dsv4_hc_push_constants), {512, 1, 1}, {}, 1);
 
     ggml_vk_create_pipeline(device, device->pipeline_repeat_f32, "repeat_f32", repeat_f32_len, repeat_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
     ggml_vk_create_pipeline(device, device->pipeline_repeat_back_f32, "repeat_back_f32", repeat_back_f32_len, repeat_back_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {512, 1, 1}, {}, 1);
@@ -9429,6 +9449,12 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
             return ctx->device->pipeline_roll_f32;
         }
         return nullptr;
+    case GGML_OP_DSV4_HC_COMB:
+        return ctx->device->pipeline_dsv4_hc_comb_f32;
+    case GGML_OP_DSV4_HC_PRE:
+        return ctx->device->pipeline_dsv4_hc_pre_f32;
+    case GGML_OP_DSV4_HC_POST:
+        return ctx->device->pipeline_dsv4_hc_post_f32;
     case GGML_OP_REPEAT:
         if (ggml_type_size(src0->type) == sizeof(float) && ggml_type_size(dst->type) == sizeof(float)) {
             return ctx->device->pipeline_repeat_f32;
@@ -9864,6 +9890,13 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
     GGML_UNUSED(src2);
 }
 
+template <> void init_pushconst_tensor_offsets(ggml_backend_vk_context * ctx, vk_op_dsv4_hc_push_constants &p, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, const ggml_tensor * src3, ggml_tensor * dst) {
+    const ggml_tensor * tensors[5] = { src0, src1, src2, src3, dst };
+    for (int i = 0; i < 5; ++i) {
+        p.offsets[i] = tensors[i] ? get_misalign_bytes(ctx, tensors[i]) / sizeof(float) : 0;
+    }
+}
+
 template <> void init_pushconst_tensor_offsets(ggml_backend_vk_context * ctx, vk_op_unary_push_constants &p, const ggml_tensor * src0, const ggml_tensor * src1, const ggml_tensor * src2, const ggml_tensor * src3, ggml_tensor * dst) {
     const uint32_t a_offset = get_misalign_bytes(ctx, src0) / ggml_type_size(src0->type);
     const uint32_t d_offset = get_misalign_bytes(ctx, dst) / ggml_type_size(dst->type);
@@ -10225,6 +10258,15 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
             }
         }
         break;
+    case GGML_OP_DSV4_HC_COMB:
+        elements = { (uint32_t)dst->ne[2], 1, 1 };
+        break;
+    case GGML_OP_DSV4_HC_PRE:
+        elements = { (uint32_t)dst->ne[0], (uint32_t)dst->ne[1], 1 };
+        break;
+    case GGML_OP_DSV4_HC_POST:
+        elements = { (uint32_t)dst->ne[0], (uint32_t)dst->ne[1], (uint32_t)dst->ne[2] };
+        break;
     case GGML_OP_SSM_CONV:
         {
             const uint32_t nr  = src0->ne[1];
@@ -10266,6 +10308,10 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
         }
         // im2col uses only src1 and dst buffers
         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src1_buf, dst_buf }, pc, elements);
+    } else if (op == GGML_OP_DSV4_HC_POST) {
+        // Empty src3 (identity comb) is possible in hc_post, but the shader needs a buffer
+        vk_subbuffer subbuf3 = use_src3 ? src3_buf : src0_buf;
+        ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { src0_buf, src1_buf, src2_buf, subbuf3, dst_buf }, pc, elements);
     } else if (op == GGML_OP_COUNT_EQUAL) {
         // count_equal assumes that destination buffer is initialized with zeroes
         ggml_vk_buffer_memset_async(subctx, dst_buf.buffer, dst_buf.offset, 0, dst_buf.size);
@@ -10915,6 +10961,41 @@ static void ggml_vk_clamp(ggml_backend_vk_context * ctx, vk_context& subctx, con
 static void ggml_vk_pad(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
     vk_op_pad_push_constants p = vk_op_pad_push_constants_init(src0, dst);
     ggml_vk_op_f32(ctx, subctx, src0, nullptr, nullptr, nullptr, dst, GGML_OP_PAD, std::move(p));
+}
+
+static void ggml_vk_dsv4_hc(ggml_backend_vk_context * ctx, vk_context& subctx, ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+    const ggml_tensor * src2 = dst->src[2];
+    const ggml_tensor * src3 = dst->src[3];
+
+    vk_op_dsv4_hc_push_constants p = {};
+    switch (dst->op) {
+        case GGML_OP_DSV4_HC_COMB:
+            p.ne0 = (uint32_t)dst->ne[2];
+            p.flag = (uint32_t)ggml_get_op_params_i32(dst, 1);
+            p.param = ggml_get_op_params_f32(dst, 0);
+            break;
+        case GGML_OP_DSV4_HC_PRE:
+            p.ne0 = (uint32_t)dst->ne[0];
+            p.hc = (uint32_t)src0->ne[1];
+            p.flag = (uint32_t)ggml_get_op_params_i32(dst, 1);
+            p.param = ggml_get_op_params_f32(dst, 0);
+            break;
+        default:
+            p.ne0 = (uint32_t)dst->ne[0];
+            p.hc = (uint32_t)src1->ne[1];
+            p.flag = src3 != nullptr;
+            break;
+    }
+    const ggml_tensor * tensors[5] = { src0, src1, src2, src3, dst };
+    for (int i = 0; i < 5; ++i) {
+        for (int j = 0; tensors[i] && j < 3; ++j) {
+            p.nb[i][j] = (uint32_t)(tensors[i]->nb[j] / sizeof(float));
+        }
+    }
+
+    ggml_vk_op_f32(ctx, subctx, src0, src1, src2, src3, dst, dst->op, std::move(p));
 }
 
 static void ggml_vk_roll(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, ggml_tensor * dst) {
@@ -13150,6 +13231,12 @@ static bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgr
         break;
     case GGML_OP_ROLL:
         ggml_vk_roll(ctx, compute_ctx, src0, node);
+
+        break;
+    case GGML_OP_DSV4_HC_COMB:
+    case GGML_OP_DSV4_HC_PRE:
+    case GGML_OP_DSV4_HC_POST:
+        ggml_vk_dsv4_hc(ctx, compute_ctx, node);
 
         break;
     case GGML_OP_CPY:
@@ -15737,6 +15824,17 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
         case GGML_OP_PAD:
         case GGML_OP_ROLL:
             return op->src[0]->type == GGML_TYPE_F32;
+        case GGML_OP_DSV4_HC_COMB:
+        case GGML_OP_DSV4_HC_PRE:
+        case GGML_OP_DSV4_HC_POST:
+            {
+                // float storage only, and a token per invocation or row of invocations in the dispatch
+                const auto is_f32 = [](const ggml_tensor * t) { return t == nullptr || t->type == GGML_TYPE_F32; };
+                const int64_t n_tokens = op->op == GGML_OP_DSV4_HC_PRE ? op->ne[1] : op->ne[2];
+                const int axis = op->op == GGML_OP_DSV4_HC_POST ? 2 : op->op == GGML_OP_DSV4_HC_PRE ? 1 : 0;
+                return is_f32(op) && is_f32(op->src[0]) && is_f32(op->src[1]) && is_f32(op->src[2]) && is_f32(op->src[3]) &&
+                    n_tokens <= (int64_t)device->properties.limits.maxComputeWorkGroupCount[axis];
+            }
         case GGML_OP_DIAG_MASK_INF:
             return ggml_is_contiguous(op->src[0]) && op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_SOFT_MAX:
@@ -16083,11 +16181,19 @@ static ggml_backend_dev_t ggml_backend_vk_reg_get_device(ggml_backend_reg_t reg,
     return devices[device];
 }
 
+static void * ggml_backend_vk_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
+    GGML_UNUSED(reg);
+    if (strcmp(name, "ggml_backend_ssd_provider_v1") == 0) {
+        return (void *) ssd::gpu::graph_lane_provider;
+    }
+    return nullptr;
+}
+
 static const struct ggml_backend_reg_i ggml_backend_vk_reg_i = {
     /* .get_name         = */ ggml_backend_vk_reg_get_name,
     /* .get_device_count = */ ggml_backend_vk_reg_get_device_count,
     /* .get_device       = */ ggml_backend_vk_reg_get_device,
-    /* .get_proc_address = */ NULL,
+    /* .get_proc_address = */ ggml_backend_vk_reg_get_proc_address,
 };
 
 ggml_backend_reg_t ggml_backend_vk_reg() {
@@ -16735,6 +16841,15 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
                                          src_clone[3], src_clone[4], src_clone[5], src_clone[6]);
         } else if (tensor->op == GGML_OP_SSM_CONV) {
             tensor_clone = ggml_ssm_conv(ggml_ctx, src_clone[0], src_clone[1]);
+        } else if (tensor->op == GGML_OP_DSV4_HC_COMB) {
+            tensor_clone = ggml_dsv4_hc_comb(ggml_ctx, src_clone[0], src_clone[1], src_clone[2],
+                                             ggml_get_op_params_f32(tensor, 0), ggml_get_op_params_i32(tensor, 1));
+        } else if (tensor->op == GGML_OP_DSV4_HC_PRE) {
+            tensor_clone = ggml_get_op_params_i32(tensor, 1) ?
+                ggml_dsv4_hc_pre_gated(ggml_ctx, src_clone[0], src_clone[1], ggml_get_op_params_f32(tensor, 0)) :
+                ggml_dsv4_hc_pre(ggml_ctx, src_clone[0], src_clone[1]);
+        } else if (tensor->op == GGML_OP_DSV4_HC_POST) {
+            tensor_clone = ggml_dsv4_hc_post(ggml_ctx, src_clone[0], src_clone[1], src_clone[2], src_clone[3]);
         } else if (tensor->op == GGML_OP_ROLL) {
             const int32_t s0 = tensor->op_params[0];
             const int32_t s1 = tensor->op_params[1];

@@ -147,11 +147,11 @@
             "default": 4294967295
         },
         "vram.budget": {
-            "description": "Expert VRAM byte budget or auto",
+            "description": "GPU expert byte budget or auto; 0 keeps experts on the CPU",
             "kind": "budget",
             "unit": "bytes",
             "producer": "plan",
-            "scope": "linux",
+            "scope": "all",
             "cli": "--ssd-vram-budget",
             "default_literal": "auto",
             "oneOf": [

@@ -1,0 +1,35 @@
+#version 450
+
+#include "dsv4_hc_head.glsl"
+
+// ne0 = n_embd, hc = streams, flag = a comb is bound; without one each stream keeps its own residual.
+// One invocation per output element: x = embedding, y = stream, z = token.
+layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly buffer X {float data_x[];};
+layout (binding = 1) readonly buffer R {float data_r[];};
+layout (binding = 2) readonly buffer P {float data_p[];};
+layout (binding = 3) readonly buffer C {float data_c[];};
+layout (binding = 4) writeonly buffer D {float data_d[];};
+
+void main() {
+    const uint i0   = gl_GlobalInvocationID.x;
+    const uint idst = gl_GlobalInvocationID.y;
+    const uint it   = gl_GlobalInvocationID.z;
+
+    if (i0 >= p.ne0) {
+        return;
+    }
+
+    float sum = data_x[p.offs0 + i0*p.nb00 + it*p.nb01] * data_p[p.offs2 + idst*p.nb20 + it*p.nb21];
+    if (p.flag != 0) {
+        for (uint isrc = 0; isrc < p.hc; ++isrc) {
+            sum += data_r[p.offs1 + i0*p.nb10 + isrc*p.nb11 + it*p.nb12] *
+                   data_c[p.offs3 + idst*p.nb30 + isrc*p.nb31 + it*p.nb32];
+        }
+    } else {
+        sum += data_r[p.offs1 + i0*p.nb10 + idst*p.nb11 + it*p.nb12];
+    }
+
+    data_d[p.offs4 + i0*p.nb40 + idst*p.nb41 + it*p.nb42] = sum;
+}

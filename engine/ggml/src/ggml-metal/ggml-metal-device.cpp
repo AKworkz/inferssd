@@ -1137,6 +1137,18 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argmax(ggml_meta
     return res;
 }
 
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_dsv4_hc(ggml_metal_library_t lib, const ggml_tensor * op) {
+    const char * base = op->op == GGML_OP_DSV4_HC_COMB ? "kernel_dsv4_hc_comb_f32" :
+                        op->op == GGML_OP_DSV4_HC_PRE  ? "kernel_dsv4_hc_pre_f32"  : "kernel_dsv4_hc_post_f32";
+
+    ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, base);
+    if (!res.pipeline) {
+        res = ggml_metal_library_compile_pipeline(lib, base, base, nullptr);
+    }
+
+    return res;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_argsort(ggml_metal_library_t lib, const ggml_tensor * op) {
     assert(op->op == GGML_OP_ARGSORT);
 

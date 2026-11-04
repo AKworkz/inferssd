@@ -2825,6 +2825,139 @@ kernel void kernel_solve_tri_f32(
     }
 }
 
+// The DeepSeek-V4 hyper-connection ops. Pre and post run a threadgroup per output row and split its elements over the
+// threads; comb runs a thread per token.
+static void kernel_dsv4_hc_norm_cols(thread float * comb, float eps) {
+    for (int idst = 0; idst < 4; ++idst) {
+        float sum = eps;
+        for (int isrc = 0; isrc < 4; ++isrc) {
+            sum += comb[idst + 4*isrc];
+        }
+        const float inv_sum = 1.0f / sum;
+        for (int isrc = 0; isrc < 4; ++isrc) {
+            comb[idst + 4*isrc] *= inv_sum;
+        }
+    }
+}
+
+static void kernel_dsv4_hc_norm_rows(thread float * comb, float eps) {
+    for (int isrc = 0; isrc < 4; ++isrc) {
+        float sum = eps;
+        for (int idst = 0; idst < 4; ++idst) {
+            sum += comb[idst + 4*isrc];
+        }
+        const float inv_sum = 1.0f / sum;
+        for (int idst = 0; idst < 4; ++idst) {
+            comb[idst + 4*isrc] *= inv_sum;
+        }
+    }
+}
+
+kernel void kernel_dsv4_hc_comb_f32(
+        constant ggml_metal_kargs_dsv4_hc_comb & args,
+        device const char * mixes,
+        device const char * scale,
+        device const char * base,
+        device       char * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]]) {
+    const int it = tgpig.x;
+    const float scale_comb = *((device const float *) (scale + 2*args.nbs0));
+
+    float comb[16];
+    for (int isrc = 0; isrc < 4; ++isrc) {
+        float largest = -INFINITY;
+        for (int idst = 0; idst < 4; ++idst) {
+            const int idx = idst + 4*isrc;
+            const float xv = *((device const float *) (mixes + (8 + idx)*args.nbm0 + it*args.nbm1));
+            const float bv = *((device const float *) (base + (8 + idx)*args.nbb0));
+            const float v = xv * scale_comb + bv;
+            comb[idx] = v;
+            largest = max(largest, v);
+        }
+
+        float sum = 0.0f;
+        for (int idst = 0; idst < 4; ++idst) {
+            const int idx = idst + 4*isrc;
+            const float v = exp(comb[idx] - largest);
+            comb[idx] = v;
+            sum += v;
+        }
+
+        const float inv_sum = 1.0f / sum;
+        for (int idst = 0; idst < 4; ++idst) {
+            const int idx = idst + 4*isrc;
+            comb[idx] = comb[idx] * inv_sum + args.eps;
+        }
+    }
+
+    kernel_dsv4_hc_norm_cols(comb, args.eps);
+    for (int i = 1; i < args.n_iter; ++i) {
+        kernel_dsv4_hc_norm_rows(comb, args.eps);
+        kernel_dsv4_hc_norm_cols(comb, args.eps);
+    }
+
+    for (int isrc = 0; isrc < 4; ++isrc) {
+        for (int idst = 0; idst < 4; ++idst) {
+            *((device float *) (dst + idst*args.nbd0 + isrc*args.nbd1 + it*args.nbd2)) = comb[idst + 4*isrc];
+        }
+    }
+}
+
+kernel void kernel_dsv4_hc_pre_f32(
+        constant ggml_metal_kargs_dsv4_hc_pre & args,
+        device const char * x,
+        device const char * weights,
+        device       char * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort3 tpitg[[thread_position_in_threadgroup]],
+        ushort3 ntg[[threads_per_threadgroup]]) {
+    const int it = tgpig.x;
+
+    for (int i0 = tpitg.x; i0 < args.n_embd; i0 += ntg.x) {
+        float sum = 0.0f;
+        for (int ih = 0; ih < args.hc; ++ih) {
+            const float xv = *((device const float *) (x + i0*args.nbx0 + ih*args.nbx1 + it*args.nbx2));
+            float wv;
+            if (args.gated) {
+                wv = 1.0f / (1.0f + exp(-*((device const float *) (weights + i0*args.nbw0 + ih*args.nbw1 + it*args.nbw2))));
+            } else {
+                wv = *((device const float *) (weights + ih*args.nbw0 + it*args.nbw1));
+            }
+            sum += xv * wv;
+        }
+        *((device float *) (dst + i0*args.nbd0 + it*args.nbd1)) = args.scale * sum;
+    }
+}
+
+kernel void kernel_dsv4_hc_post_f32(
+        constant ggml_metal_kargs_dsv4_hc_post & args,
+        device const char * x,
+        device const char * residual,
+        device const char * post,
+        device const char * comb,
+        device       char * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        ushort3 tpitg[[thread_position_in_threadgroup]],
+        ushort3 ntg[[threads_per_threadgroup]]) {
+    const int idst = tgpig.x;
+    const int it   = tgpig.y;
+    const float pv = *((device const float *) (post + idst*args.nbp0 + it*args.nbp1));
+
+    for (int i0 = tpitg.x; i0 < args.n_embd; i0 += ntg.x) {
+        float sum = *((device const float *) (x + i0*args.nbx0 + it*args.nbx1)) * pv;
+        if (args.has_comb) {
+            for (int isrc = 0; isrc < args.hc; ++isrc) {
+                const float rv = *((device const float *) (residual + i0*args.nbr0 + isrc*args.nbr1 + it*args.nbr2));
+                const float cv = *((device const float *) (comb + idst*args.nbc0 + isrc*args.nbc1 + it*args.nbc2));
+                sum += rv * cv;
+            }
+        } else {
+            sum += *((device const float *) (residual + i0*args.nbr0 + idst*args.nbr1 + it*args.nbr2));
+        }
+        *((device float *) (dst + i0*args.nbd0 + idst*args.nbd1 + it*args.nbd2)) = sum;
+    }
+}
+
 kernel void kernel_argmax_f32(
         constant ggml_metal_kargs_argmax & args,
         device   const char * src0,

@@ -339,6 +339,8 @@ struct kimi_vram_host_costs {
                                                   // measured): admissions, the start-up probe, prefill transients
     int32_t vector_tokens;                        // grouped prefill passes of at most this many tokens run the vector
                                                   // engine (one call of the layer's residents a token), as decode does
+    int32_t in_place_only;                        // in place and nothing else: no device memory to compare with, and
+                                                  // the device must be shown the read ring first (register_host)
 };
 struct kimi_vram_host_api {
     uint32_t version, size;   // 3

@@ -170,6 +170,12 @@ target_link_libraries(test-kimi-host-lock PRIVATE Threads::Threads)
 add_test(NAME kimi_host_lock COMMAND test-kimi-host-lock)
 set_property(TEST kimi_host_lock PROPERTY LABELS main)
 
+add_executable(test-graph-lane ssd/test-graph-lane.cpp)
+target_compile_features(test-graph-lane PRIVATE cxx_std_17)
+target_include_directories(test-graph-lane PRIVATE ../ggml/src)
+target_link_libraries(test-graph-lane PRIVATE ggml ggml-ssd)
+add_test(NAME graph_lane COMMAND test-graph-lane)
+
 add_executable(test-ssd-gpu-contract ssd/test-ssd-gpu-contract.cpp)
 target_compile_features(test-ssd-gpu-contract PRIVATE cxx_std_17)
 target_include_directories(test-ssd-gpu-contract PRIVATE ../ggml/src ../ggml/include)

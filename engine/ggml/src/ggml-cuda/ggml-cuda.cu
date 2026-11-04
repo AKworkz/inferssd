@@ -6684,7 +6684,7 @@ static ggml_backend_feature * ggml_backend_cuda_get_features(ggml_backend_reg_t 
 static void * ggml_backend_cuda_reg_get_proc_address(ggml_backend_reg_t reg, const char * name) {
     GGML_UNUSED(reg);
 #ifdef GGML_SSD_CUDA_EXECUTOR
-    if (strcmp(name, "ggml_backend_cuda_ssd_api_v1") == 0) {
+    if (strcmp(name, "ggml_backend_ssd_provider_v1") == 0) {
         return (void *) ggml_backend_cuda_ssd_api_v1;
     }
 #endif
