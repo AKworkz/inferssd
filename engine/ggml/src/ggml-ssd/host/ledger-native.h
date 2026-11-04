@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
-// Host-memory ledger on macOS and Windows: the two terms of ledger.h (Linux) from native budget sources, so the
-// arbiter and everything it admits run the same logic on every OS.
+// Host-memory ledger on macOS and Windows: the two terms of room.h from native budget sources, as ledger.h measures
+// them on Linux, so the arbiter and everything it admits run the same logic on every OS.
 //
 // Room for `extra` more bytes is the smaller of two terms.
 //  - envelope, reported in the arbiter's cgroup fields: every finite limit on this process's memory keeps the
@@ -32,7 +32,7 @@
 //    which errs safe. The envelope does not hold them: neither commit nor phys_footprint is charged for a
 //    read-only mapping's file pages, so they never take its room.
 //  - There is no watermark boost: memory_available_at_full_boost() keeps nothing back.
-#include "arbiter.h"
+#include "room.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -61,11 +61,8 @@ bool available(uint64_t & bytes);
 bool job_limits(envelopes & out);
 } // namespace native
 
-struct native_ledger {
-    // The fields the arbiter shares with the Linux ledger; reclaimable_file and the file counters stay inert.
-    bool unified = false, reclaimable_file = false;
-    uint64_t reserve = 512ull << 20, margin = 512ull << 20, explicit_reserve = 0, prefill_pages = 0;
-    uint64_t file_reserve = 0, refaults = 0, file_updates = 0;
+// reclaimable_file and the file counters of ledger_terms stay inert here.
+struct native_ledger : ledger_terms {
     std::string cgroup; // always empty: there is no cgroup to walk
     uint64_t budget = 0;        // host.budget_mib in bytes; 0 derives the envelope
     uint64_t derived_limit = 0; // the derived envelope, fixed at creation; 0 when unreadable then
@@ -75,10 +72,9 @@ struct native_ledger {
         if (native::process_use(used) && native::available(now)) { derived_limit = add(used, now); }
     }
 
-    static uint64_t add(uint64_t a, uint64_t b) { return b > UINT64_MAX - a ? UINT64_MAX : a + b; }
-    uint64_t floor() const { return add(add(file_reserve, margin), explicit_reserve); }
-    // No cgroup files: the arbiter's walk for an unbounded cgroup finds none.
-    bool get(const std::string &, std::string &) const { return false; }
+    // There is always a limit (a job's, host.budget_mib or the derived one), so an unreadable envelope is a failed
+    // query, never the absence of one.
+    bool unbounded() const { return false; }
 
     // The finite envelopes in force; false when one that applies cannot be read.
     bool limits(envelopes & out) const {
@@ -103,29 +99,16 @@ struct native_ledger {
     void envelope_term(uint64_t extra, room & r) const {
         envelopes found;
         if (!limits(found)) { return; }
-        const uint64_t required = add(reserve, extra);
         uint64_t missing = 0, spare = UINT64_MAX;
-        for (size_t i = 0; i < found.count; ++i) {
-            const envelope & e = found.item[i];
-            uint64_t deficit = 0;
-            if (e.used >= e.limit) { deficit = add(e.used - e.limit, required); }
-            else if (required > e.limit - e.used) { deficit = required - (e.limit - e.used); }
-            missing = std::max(missing, deficit);
-            spare = std::min(spare, deficit ? uint64_t(0) : e.limit - e.used - required);
-        }
-        r.cgroup = missing ? room_pressure : room_ok;
-        r.cgroup_shortage = missing;
-        r.cgroup_surplus = missing ? 0 : spare;
+        for (size_t i = 0; i < found.count; ++i) { bound(found.item[i].limit, found.item[i].used, add(reserve, extra), missing, spare); }
+        set_envelope(missing, spare, r);
     }
     room measure(uint64_t extra, bool full_boost = false) const {
         room r;
         envelope_term(extra, r);
-        if (full_boost ? memory_available_at_full_boost(r.available, r.boost_headroom) : memory_available(r.available)) {
-            r.system = true;
-            r.floor = floor();
-            const uint64_t need = add(add(r.floor, prefill_pages), extra);
-            r.system_shortage = need > r.available ? need - r.available : 0;
-            r.system_surplus = r.available > need ? r.available - need : 0;
+        uint64_t available = 0, headroom = 0;
+        if (full_boost ? memory_available_at_full_boost(available, headroom) : memory_available(available)) {
+            system_term(available, headroom, extra, r);
         }
         return r;
     }

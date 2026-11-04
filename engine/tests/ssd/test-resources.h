@@ -118,9 +118,9 @@ inline int open_direct(const std::string & path) {
 
 #if defined(__linux__)
 inline void finite_cgroup(kimi_host_ledger & ledger) {
-    kimi_host_ledger::room room;
+    ssd::host::room room;
     ledger.cgroup_term(0, room);
-    need(room.cgroup != kimi_host_ledger::room_unreadable,
+    need(room.cgroup != ssd::host::room_unreadable,
             "cache fixture needs readable finite cgroup v2 memory.max/current ancestors");
     // Do not infer a payload budget here: individual fixtures change reserves
     // and intentionally exercise pressure. Their size/ownership checks remain authoritative.
@@ -133,7 +133,7 @@ inline void finite_cgroup(kimi_host_ledger & ledger) {
 inline void finite_envelope() {
 #if defined(__linux__)
     kimi_host_ledger ledger;
-    ledger.configure(false);
+    ledger.locate();
     finite_cgroup(ledger);
 #else
     ssd::host::native_ledger ledger;

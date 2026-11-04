@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <future>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -23,7 +24,7 @@ template<class T> static T checked(ssd::result<T> value) {
 }
 static void checked(ssd::result<void> value) { if (!value) { throw std::runtime_error(value.error); } }
 // Tests adapt result/status explicitly; product code never receives these
-// throwing helpers. This also replays the pre-migration equations verbatim.
+// throwing helpers.
 struct checked_client {
     std::unique_ptr<context_client> raw;
     explicit checked_client(std::unique_ptr<context_client> value) : raw(std::move(value)) {}
@@ -86,12 +87,14 @@ struct barrier {
   private: const unsigned original;
 };
 static client_config config(bool unified = false) { client_config c; c.unified = unified; return c; }
-static void equal_room(const room & a, const kimi_host_ledger::room & b) {
+static void equal_room(const room & a, const room & b) {
     require(int(a.cgroup) == int(b.cgroup) && a.cgroup_shortage == b.cgroup_shortage &&
         a.cgroup_surplus == b.cgroup_surplus && a.system == b.system && a.available == b.available &&
         a.floor == b.floor && a.system_shortage == b.system_shortage && a.system_surplus == b.system_surplus &&
         a.boost_headroom == b.boost_headroom && a.fits() == b.fits() && a.surplus() == b.surplus(), "one-client equation changed");
 }
+// One client measures what the ledger measures over the same files, with the open prefill's pages, the file
+// reserve and the margin the client set.
 static void serial_equivalence() {
     files f; auto owner = std::make_shared<test_owner>(f.reader()); auto a = owner->make_client();
     must_throw([&] { auto t = a->take(1); }, "unconfigured client admitted");
@@ -112,10 +115,10 @@ static void serial_equivalence() {
     f.refault = 10;
     require(a->update_file_reserve() == old.update_file_reserve(), "refault growth changed");
     require(a->state().file_reserve == old.file_reserve, "refault reserve differs");
-    old.begin_interval(GiB); a->begin_interval(GiB);
-    f.available -= 2*GiB; uint64_t x = 0, y = 0;
-    require(a->end_interval(true, GiB, x) == old.end_interval(true, GiB, y) && x == y &&
-        a->state().margin == old.margin, "serial interval changed");
+    a->begin_interval(GiB);
+    f.available -= 2*GiB; uint64_t x = 0;
+    require(a->end_interval(true, GiB, x) && x == 2*GiB && a->state().margin == 2*GiB, "serial interval changed");
+    old.margin = 2*GiB;
     f.readable = false; equal_room(a->measure(1), old.measure(1));
     require(!a->take(1), "unreadable budget admitted real allocation");
 }
@@ -131,6 +134,7 @@ static void holds_and_pending() {
     b->set_prefill_pages(GiB); b->set_prefill_pages(GiB);
     require(b->state().all_prefill_pages == GiB, "repeated hold added");
     b->set_prefill_pages(9*GiB); require(!b->take(1) && b->state().prefill_pages == 9*GiB, "refusal lost prefill hold");
+    require(bool(b->take(0)), "a shortage refused a take of nothing");
     b->clear_prefill_pages(); f.limit = 2*GiB; f.current = 0; f.available = 2*GiB;
     auto t = a->take(GiB); require(bool(t), "first take failed");
     require(!b->take(GiB), "unmaterialized allocation granted twice");
@@ -301,8 +305,11 @@ static void result_errors_and_tracked_allocations() {
     auto refused = a->take(1);
     require(!refused && refused.code == ssd::status::io && checked(a->state()).pending_bytes == 0,
         "callback exception escaped core or leaked pending");
+    require(refused.error == "host callback: fixture callback", "a callback's error lost what it threw");
     auto broken = std::make_shared<process_arbiter>([](const std::string &, std::string &) -> bool { throw std::runtime_error("fixture reader"); });
-    require(broken->make_client().code == ssd::status::io, "reader exception escaped owner construction");
+    const auto unread = broken->make_client();
+    require(unread.code == ssd::status::io && unread.error == "host owner initialization: fixture reader",
+        "reader exception escaped owner construction or lost what it threw");
     auto exhausted = std::make_shared<process_arbiter>([](const std::string &, std::string &) -> bool { throw std::bad_alloc(); });
     require(exhausted->make_client().code == ssd::status::resource, "allocation failure escaped owner construction");
 }
@@ -347,11 +354,186 @@ static void unified_device_held() {
     require(d->state().device_held == 0 && d->measure(0).cgroup_surplus == plain.cgroup_surplus,
         "a discrete GPU's memory was counted in the host envelope");
 }
+// A machine of one cgroup scope under an unbounded root, whose files the scenarios below change between steps.
+struct machine {
+    std::string scope = "/sys/fs/cgroup/user.slice/run-1.scope";
+    uint64_t limit = 8*GiB, current = 0, available = 0, file_pages = 0, refaults = 0;
+    std::string zoneinfo; // empty: no /proc/zoneinfo, so no watermark boost
+    process_arbiter::reader reader() {
+        return [this](const std::string & path, std::string & text) {
+            std::map<std::string, std::string> f;
+            f["/proc/self/cgroup"] = "0::/user.slice/run-1.scope\n";
+            f["/sys/fs/cgroup/user.slice/memory.max"] = "max\n";
+            f[scope + "/memory.max"] = limit ? std::to_string(limit) + "\n" : "max\n";
+            f[scope + "/memory.current"] = std::to_string(current) + "\n";
+            f[scope + "/memory.stat"] = "anon 4096\nfile " + std::to_string(file_pages) + "\nactive_file 0\ninactive_file " +
+                std::to_string(file_pages) + "\nworkingset_refault_file " + std::to_string(refaults) + "\n";
+            f["/proc/meminfo"] = "MemTotal:       127000000 kB\nMemFree:          100000 kB\nMemAvailable:   " +
+                std::to_string(available / 1024) + " kB\nActive(file):    1048576 kB\nInactive(file):  3145728 kB\n"
+                "KReclaimable:     512000 kB\nHugePages_Total:       0\nHugepagesize:       2048 kB\n";
+            if (!zoneinfo.empty()) { f["/proc/zoneinfo"] = zoneinfo; f["/proc/sys/vm/watermark_boost_factor"] = "15000\n"; }
+            const auto it = f.find(path);
+            if (it == f.end()) { return false; }
+            text = it->second;
+            return true;
+        };
+    }
+};
+// The zones of a DGX Spark (GB10, 4 KiB pages): their low watermarks reach the largest boost at DMA 613 and
+// Normal 111957 pages, and MemAvailable keeps back (112570 + 20799) pages more at the full boost than with none.
+static std::string spark_zones(uint64_t dma_boost, uint64_t normal_boost) {
+    auto zone = [&](const char * name, uint64_t boost, uint64_t low, uint64_t high, uint64_t managed) {
+        return std::string("Node 0, zone ") + name + "\n  pages free     1000\n        boost    " + std::to_string(boost) +
+            "\n        min      61\n        low      " + std::to_string(low + boost) + "\n        high     " +
+            std::to_string(high + boost) + "\n        spanned  524288\n        managed  " + std::to_string(managed) +
+            "\n  pagesets\n    cpu: 0\n              count: 12\n              high:  999999\n              batch: 63\n";
+    };
+    return zone("DMA", dma_boost, 235, 409, 174798) + zone("DMA32", 0, 0, 0, 0) +
+        zone("Normal", normal_boost, 42934, 74638, 31726918) + zone("Movable", 0, 32, 32, 0);
+}
+// What a take outside the caches asks of the context's reclaimer, in order: on unified memory the deferred uploads,
+// then the GPU tier for the allocation and the open prefill's pages, then the RAM cache; on a discrete GPU the RAM
+// cache alone. A take at the full watermark boost makes room for the boost too.
+static void reclaim_order() {
+    machine m;
+    std::vector<std::string> calls;
+    uint64_t tier_bytes = 0;
+    bool tier_live = false;
+    actions reclaim;
+    reclaim.collect_deferred = [&] { calls.push_back("collect"); };
+    reclaim.reclaim_tier = [&](uint64_t bytes) {
+        calls.push_back("tier"); tier_bytes = bytes;
+        if (tier_live) { return false; }
+        m.available += 512*MiB; // one block of the tier, outside the cgroup
+        return true;
+    };
+    reclaim.reclaim_cache = [&](uint64_t) {
+        calls.push_back("cache");
+        if (!m.current) { return false; }
+        m.current -= 512*MiB; m.available += 512*MiB; // RAM cache slots are cgroup memory
+        return true;
+    };
+    auto client = [&](bool unified) {
+        auto owner = std::make_shared<test_owner>(m.reader());
+        auto c = owner->make_client();
+        auto conf = config(unified); conf.reclaimable_file = false;
+        c->configure(conf); c->set_reclaimer(reclaim);
+        return std::make_pair(owner, std::move(c));
+    };
+    // A discrete GPU: the cgroup term binds; the tier is never asked, the RAM cache gives back.
+    m.available = 100*GiB; m.current = 7*GiB + 768*MiB;
+    {
+        auto [owner, d] = client(false);
+        const auto r = d->measure(256*MiB);
+        require(r.cgroup == room_pressure && r.cgroup_shortage == 512*MiB && r.system && !r.system_shortage,
+            "discrete: the cgroup term did not bind");
+        auto t = d->take(256*MiB);
+        require(bool(t) && calls == std::vector<std::string>{ "cache" }, "discrete: a take did not reclaim only the RAM cache");
+        require(checked(d->raw->dram_bytes(1*MiB, 2*MiB)) == 1*MiB, "discrete: device memory counted against the DRAM");
+    }
+    // Unified memory: the GPU tier is invisible to the cgroup, so the system term binds; the take collects the
+    // deferred uploads, then asks the tier for room for the allocation, and the RAM cache keeps its slots.
+    calls.clear();
+    m.limit = 100*GiB; m.current = 1*GiB; m.file_pages = 300*MiB; m.refaults = 10; m.available = 2*GiB + 256*MiB;
+    const uint64_t checkpoint = 1930*MiB;
+    {
+        auto [owner, u] = client(true);
+        require(u->update_file_reserve() && u->state().floor == 812*MiB, "unified: the file reserve was not measured");
+        require(checked(u->raw->dram_bytes(1*MiB, 2*MiB)) == 3*MiB, "unified: device memory not counted against the DRAM");
+        const auto r = u->measure(checkpoint);
+        require(r.cgroup == room_ok && r.system_shortage == 812*MiB + checkpoint - m.available, "unified: the system term did not bind");
+        auto t = u->take(checkpoint);
+        require(bool(t) && calls == std::vector<std::string>({ "collect", "tier" }) && tier_bytes == checkpoint &&
+            u->state().granted == checkpoint, "unified: a take did not drain deferred uploads and then reclaim the tier");
+        t.cancel();
+        // A live layer: the tier refuses without blocking, the RAM cache cannot cover the rest, the answer is no.
+        calls.clear(); tier_live = true; m.available = 2*GiB; m.current = 0;
+        require(!u->take(checkpoint) && calls == std::vector<std::string>({ "collect", "tier", "cache" }),
+            "unified: a refused tier reclaim was not reported");
+        tier_live = false;
+    }
+    // An open prefill's pages: the tier keeps them free beside the allocation.
+    calls.clear();
+    m.limit = 100*GiB; m.current = 1*GiB; m.file_pages = 0; m.available = 1*GiB;
+    {
+        auto [owner, u] = client(true);
+        u->set_prefill_pages(1*GiB);
+        auto t = u->take(256*MiB);
+        require(calls.size() >= 2 && calls[1] == "tier" && tier_bytes == 256*MiB + 1*GiB,
+            "prefill pages: the tier was not asked to keep them free beside the allocation");
+    }
+    // At the full watermark boost: room for what the boost can still withdraw from MemAvailable.
+    calls.clear();
+    m.zoneinfo = spark_zones(0, 0); m.limit = 100*GiB; m.current = 1*GiB; m.file_pages = 300*MiB; m.refaults = 10;
+    {
+        auto [owner, u] = client(true);
+        require(u->update_file_reserve(), "boost: the file reserve was not measured");
+        const uint64_t page = uint64_t(sysconf(_SC_PAGESIZE)), full = (112570 + 20799) * page;
+        m.available = 812*MiB + checkpoint + 64*MiB; // fits MemAvailable as it is, not at the full boost
+        const auto plain = u->measure(checkpoint), boosted = u->measure(checkpoint, true);
+        require(plain.fits() && plain.boost_headroom == 0 && !boosted.fits() && boosted.boost_headroom == full &&
+            boosted.system_shortage == full - 64*MiB, "boost: the two readings of MemAvailable");
+        auto t = u->take(checkpoint);
+        require(bool(t) && calls == std::vector<std::string>({ "collect", "tier" }) && m.available >= 812*MiB + checkpoint + full,
+            "boost: a take did not make room for the boost");
+    }
+}
+// The margin learns untracked growth within a decode token on unified memory and never shrinks. An interval begins
+// after a boundary resized the caches and ends at the next boundary before it resizes anything.
+static void margin_learning() {
+    machine m; m.limit = 100*GiB; m.available = 50*GiB;
+    auto owner = std::make_shared<test_owner>(m.reader());
+    auto u = owner->make_client(); u->configure(config(true));
+    uint64_t untracked = 0;
+    require(!u->end_interval(true, 10*GiB, untracked) && untracked == 0, "an interval ended that never began");
+    u->begin_interval(10*GiB);
+    m.available -= 1*GiB; // the tier grew a block: tracked
+    require(!u->end_interval(true, 11*GiB, untracked) && untracked == 0, "tracked growth counted as untracked");
+    u->begin_interval(11*GiB);
+    m.available -= 300*MiB; // untracked, below the margin
+    require(!u->end_interval(true, 11*GiB, untracked) && untracked == 300*MiB && u->state().margin == 512*MiB,
+        "growth below the margin raised it");
+    u->begin_interval(11*GiB);
+    m.available -= 900*MiB; // untracked, beyond the margin: the margin becomes it
+    require(u->end_interval(true, 11*GiB, untracked) && untracked == 900*MiB && u->state().margin == 900*MiB &&
+        u->state().floor == 900*MiB && u->state().reserve == 512*MiB, "untracked growth did not raise the margin alone");
+    // The boundary gives 3 GiB of tier blocks back and MemAvailable lags the free: outside every interval.
+    u->begin_interval(8*GiB);
+    m.available += 3*GiB;
+    require(!u->end_interval(true, 8*GiB, untracked) && untracked == 0, "a boundary shrink counted as untracked");
+    u->begin_interval(8*GiB);
+    m.available -= 600*MiB;
+    require(!u->end_interval(true, 8*GiB, untracked) && u->state().margin == 900*MiB, "the margin shrank or moved");
+    u->begin_interval(8*GiB);
+    auto checkpoint = u->take(2*GiB); m.available -= 2*GiB; checkpoint.commit(); // an allocation the arbiter admitted
+    require(!u->end_interval(true, 8*GiB, untracked) && untracked == 0, "a grant counted as untracked");
+    u->begin_interval(8*GiB);
+    m.available -= 5*GiB; // a prefill came between: nothing is learned
+    require(!u->end_interval(false, 8*GiB, untracked) && u->state().margin == 900*MiB, "a non-consecutive boundary learned");
+    // The boost the kernel raises within a decode token is not untracked growth: MemAvailable falls by what the
+    // headroom shrinks.
+    const uint64_t page = uint64_t(sysconf(_SC_PAGESIZE));
+    m.zoneinfo = spark_zones(0, 0); m.available = 50*GiB;
+    u->begin_interval(10*GiB);
+    m.zoneinfo = spark_zones(0, 111957); m.available -= (111957 + 20799) * page; // the reclaimable half's share as well
+    require(!u->end_interval(true, 10*GiB, untracked) && untracked == 0, "boost: a raised boost counted as growth");
+    u->begin_interval(10*GiB);
+    m.zoneinfo = spark_zones(0, 0); m.available += (111957 + 20799) * page; m.available -= 1*GiB; // kswapd dropped it
+    require(u->end_interval(true, 10*GiB, untracked) && untracked == 1*GiB && u->state().margin == 1*GiB,
+        "boost: growth behind a dropped boost");
+    // A discrete GPU learns nothing.
+    machine dm; dm.limit = 100*GiB; dm.available = 50*GiB;
+    auto discrete_owner = std::make_shared<test_owner>(dm.reader());
+    auto d = discrete_owner->make_client(); d->configure(config(false));
+    d->begin_interval(0);
+    dm.available -= 5*GiB;
+    require(!d->end_interval(true, 0, untracked) && d->state().margin == 512*MiB, "a discrete GPU learned a margin");
+}
 int main() {
     try {
         serial_equivalence(); holds_and_pending(); races_and_reclaim(); process_reserves_and_rollback();
         interval_isolation_and_close(); close_waits_for_reclaimer();
-        result_errors_and_tracked_allocations(); unified_device_held();
-        std::cout << "host arbiter: serial equations, holds, atomic tickets, reclaim, interval, close and unified device gates passed\n";
+        result_errors_and_tracked_allocations(); unified_device_held(); reclaim_order(); margin_learning();
+        std::cout << "host arbiter: serial equations, holds, atomic tickets, reclaim order, margin learning, interval, close and unified device gates passed\n";
     } catch (const std::exception & error) { std::cerr << error.what() << '\n'; return 1; }
 }

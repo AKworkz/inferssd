@@ -3315,9 +3315,9 @@ static void muse_expert_norm_test(fixture_inputs & inputs, int threads, int dept
 }
 
 #if defined(__linux__)
-// Linux only (the native ledger has test-ssd-host-budget): the host-memory ledger (kimi-host-ledger.h) with injected
-// /proc and cgroup files, a fake GPU tier and a fake RAM cache: which term binds where, the make_room order, and the
-// refault-driven file reserve.
+// Linux only (the native ledger has test-ssd-host-budget): the host-memory ledger (ledger.h) with injected /proc and
+// cgroup files: which term binds where, the open prefill's pages, the watermark boost and the refault-driven file
+// reserve. The arbiter's reclaim order and margin learning are test-ssd-host-arbiter's.
 static void host_ledger_tests(fixture_inputs & inputs) {
     constexpr uint64_t MiB = 1ull << 20, GiB = 1ull << 30;
     scoped_fixture_input margin_env(inputs, "cache_reserve_bytes", "536870912");
@@ -3354,65 +3354,30 @@ static void host_ledger_tests(fixture_inputs & inputs) {
         inputs.configure(ledger, unified);
         return ledger;
     };
-    std::vector<std::string> calls;
-    uint64_t tier_bytes = 0;
-    bool tier_live = false;
-    kimi_host_ledger::actions actions;
-    actions.collect_deferred = [&] { calls.push_back("collect"); };
-    actions.reclaim_tier = [&](uint64_t bytes) {
-        calls.push_back("tier"); tier_bytes = bytes;
-        if (tier_live) { return false; }
-        available += 512 * MiB; // one block of the tier, outside the cgroup
-        return true;
-    };
-    actions.reclaim_cache = [&](uint64_t) {
-        calls.push_back("cache");
-        if (!current) { return false; }
-        current -= 512 * MiB; available += 512 * MiB; // RAM cache slots are cgroup memory
-        return true;
-    };
-
-    // A discrete GPU: the cgroup term binds; the tier is never asked, the RAM cache gives back.
+    // A discrete GPU: the cgroup term binds.
     available = 100 * GiB; current = 7 * GiB + 768 * MiB;
     auto discrete = make(false);
     require(discrete.cgroup == scope && discrete.reserve == 512 * MiB && discrete.margin == 512 * MiB &&
             discrete.explicit_reserve == 0 && discrete.floor() == 512 * MiB && !discrete.reclaimable_file,
             "discrete ledger configuration");
-    require(discrete.dram_bytes(1 * MiB, 2 * MiB) == 1 * MiB, "discrete: device memory counted against the DRAM");
     auto room = discrete.measure(256 * MiB);
-    require(room.cgroup == kimi_host_ledger::room_pressure && room.cgroup_shortage == 512 * MiB && room.system &&
+    require(room.cgroup == ssd::host::room_pressure && room.cgroup_shortage == 512 * MiB && room.system &&
             !room.system_shortage && room.surplus() == 0, "discrete: the cgroup term did not bind");
-    room = discrete.make_room(256 * MiB, actions);
-    require(room.fits() && calls == std::vector<std::string>{ "cache" }, "discrete: make_room did not reclaim only the RAM cache");
     require(!discrete.update_file_reserve() && discrete.file_reserve == 0, "discrete: a file reserve appeared");
     current = 1 * GiB;
     room = discrete.measure(0);
     require(room.fits() && room.surplus() == 8 * GiB - 1 * GiB - 512 * MiB, "discrete: surplus is not the cgroup's");
 
-    // Unified memory: the GPU tier is invisible to the cgroup, so the system term binds. make_room first collects
-    // the deferred uploads, then asks the tier for room for the allocation; the RAM cache keeps its slots.
-    calls.clear();
+    // Unified memory: the GPU tier is invisible to the cgroup, so the system term binds.
     limit = 100 * GiB; current = 1 * GiB; file_pages = 300 * MiB; refaults = 10;
     available = 2 * GiB + 256 * MiB;
     auto uma = make(true);
     require(uma.update_file_reserve() && uma.file_reserve == 300 * MiB && uma.floor() == 812 * MiB,
             "unified: the file reserve was not measured");
-    require(uma.dram_bytes(1 * MiB, 2 * MiB) == 3 * MiB, "unified: device memory not counted against the DRAM");
     const uint64_t checkpoint = 1930 * MiB;
     room = uma.measure(checkpoint);
-    require(room.cgroup == kimi_host_ledger::room_ok && room.system_shortage == 812 * MiB + checkpoint - available,
+    require(room.cgroup == ssd::host::room_ok && room.system_shortage == 812 * MiB + checkpoint - available,
             "unified: the system term did not bind");
-    room = uma.make_room(checkpoint, actions);
-    require(room.fits() && calls == std::vector<std::string>({ "collect", "tier" }) && tier_bytes == checkpoint,
-            "unified: make_room did not drain deferred uploads and then reclaim the tier");
-    require(uma.granted == checkpoint, "unified: the grant was not recorded");
-
-    // A live layer: the tier refuses without blocking, the RAM cache cannot cover the rest, the answer is no.
-    calls.clear(); tier_live = true; available = 2 * GiB; current = 0;
-    room = uma.make_room(checkpoint, actions);
-    require(!room.fits() && room.system_shortage && calls == std::vector<std::string>({ "collect", "tier", "cache" }),
-            "unified: a refused tier reclaim was not reported");
-    tier_live = false;
 
     // The file reserve only grows: one page per refault since the last measurement.
     refaults = 110; file_pages = 100 * MiB;
@@ -3425,45 +3390,8 @@ static void host_ledger_tests(fixture_inputs & inputs) {
     require(!room.system && room.fits(), "an unreadable MemAvailable bound");
     meminfo = true; limit = 0; available = 100 * GiB;
     room = uma.measure(checkpoint);
-    require(room.cgroup == kimi_host_ledger::room_unreadable && room.system && room.fits(),
+    require(room.cgroup == ssd::host::room_unreadable && room.system && room.fits(),
             "an unbounded cgroup was not unreadable");
-
-    // The margin learns untracked growth within a decode token (unified memory) and never shrinks. An interval begins
-    // after a boundary resized the caches and ends at the next boundary before it resizes anything.
-    {
-        meminfo = true; limit = 100 * GiB; available = 50 * GiB;
-        auto learner = make(true);
-        uint64_t untracked = 0;
-        require(!learner.end_interval(true, 10 * GiB, untracked) && untracked == 0, "an interval ended that never began");
-        learner.begin_interval(10 * GiB);
-        available -= 1 * GiB; // the OOM reclaimer is the reverse; here the tier grew a block: tracked
-        require(!learner.end_interval(true, 11 * GiB, untracked) && untracked == 0, "tracked growth counted as untracked");
-        learner.begin_interval(11 * GiB);
-        available -= 300 * MiB; // untracked, below the margin
-        require(!learner.end_interval(true, 11 * GiB, untracked) && untracked == 300 * MiB && learner.margin == 512 * MiB,
-                "growth below the margin raised it");
-        learner.begin_interval(11 * GiB);
-        available -= 900 * MiB; // untracked, beyond the margin: the margin becomes it
-        require(learner.end_interval(true, 11 * GiB, untracked) && untracked == 900 * MiB && learner.margin == 900 * MiB &&
-                learner.floor() == 900 * MiB && learner.reserve == 512 * MiB, "untracked growth did not raise the margin alone");
-        // The boundary gives 3 GiB of tier blocks back and MemAvailable lags the free: outside every interval.
-        learner.begin_interval(8 * GiB);
-        available += 3 * GiB; // caught up within the token
-        require(!learner.end_interval(true, 8 * GiB, untracked) && untracked == 0, "a boundary shrink counted as untracked");
-        learner.begin_interval(8 * GiB);
-        available -= 600 * MiB;
-        require(!learner.end_interval(true, 8 * GiB, untracked) && learner.margin == 900 * MiB, "the margin shrank or moved");
-        learner.begin_interval(8 * GiB);
-        available -= 2 * GiB; learner.granted += 2 * GiB; // a checkpoint the ledger granted
-        require(!learner.end_interval(true, 8 * GiB, untracked) && untracked == 0, "a grant counted as untracked");
-        learner.begin_interval(8 * GiB);
-        available -= 5 * GiB; // a prefill came between: nothing is learned
-        require(!learner.end_interval(false, 8 * GiB, untracked) && learner.margin == 900 * MiB, "a non-consecutive boundary learned");
-        auto fixed = make(false);
-        fixed.begin_interval(0);
-        available -= 5 * GiB;
-        require(!fixed.end_interval(true, 0, untracked) && fixed.margin == 512 * MiB, "a discrete GPU learned a margin");
-    }
 
     // The cgroup term keeps the cgroup reserve; CACHE_RECLAIMABLE_FILE (read by every ledger) counts file pages as its
     // headroom.
@@ -3472,7 +3400,7 @@ static void host_ledger_tests(fixture_inputs & inputs) {
         limit = 8 * GiB; current = 6 * GiB; available = 100 * GiB; file_pages = 0;
         auto u = make(true);
         room = u.measure(1 * GiB);
-        require(u.margin == 4 * GiB && u.reserve == 512 * MiB && room.cgroup == kimi_host_ledger::room_ok && room.fits(),
+        require(u.margin == 4 * GiB && u.reserve == 512 * MiB && room.cgroup == ssd::host::room_ok && room.fits(),
                 "unified: the cgroup term held the floor's margin");
         current = 7 * GiB + 512 * MiB; file_pages = 2 * GiB;
         require(!make(false).measure(1 * GiB).fits(), "file pages counted as cgroup headroom without the switch");
@@ -3534,15 +3462,8 @@ static void host_ledger_tests(fixture_inputs & inputs) {
             auto d = make(false);
             d.prefill_pages = 1 * GiB;
             room = d.measure(256 * MiB);
-            require(room.cgroup == kimi_host_ledger::room_unreadable && room.system_shortage == 256 * MiB,
+            require(room.cgroup == ssd::host::room_unreadable && room.system_shortage == 256 * MiB,
                     "prefill pages: MemAvailable did not hold them beside the floor");
-            calls.clear();
-            limit = 100 * GiB; current = 1 * GiB; file_pages = 0; refaults = 10; available = 1 * GiB;
-            auto u = make(true);
-            u.prefill_pages = 1 * GiB;
-            room = u.make_room(256 * MiB, actions);
-            require(calls.size() >= 2 && calls[1] == "tier" && tier_bytes == 256 * MiB + 1 * GiB,
-                    "prefill pages: the tier was not asked to keep them free beside the allocation");
             limit = 8 * GiB; available = 100 * GiB; current = 0; file_pages = 0; refaults = 0;
         }
     }
@@ -3587,8 +3508,8 @@ static void host_ledger_tests(fixture_inputs & inputs) {
         hugetlb.replace(hugetlb.find("HugePages_Total:       0"), 24, "HugePages_Total:      64");
         require(kimi_memory_boost::headroom(hugetlb, zones(0, 0), "15000\n", page) == 0, "a hugetlbfs pool kept memory back");
 
-        // The ledger on unified memory: an allocation outside the caches (make_room) and the margin's intervals read
-        // MemAvailable at the full boost; the RAM cache's guard (measure) reads it as it is; a discrete GPU ignores it.
+        // The ledger on unified memory: at the full boost for what an allocation outside the caches takes (the
+        // arbiter's take and its margin's intervals), as it is for the RAM cache's guard; a discrete GPU ignores it.
         uint64_t dma_boost = 0, normal_boost = 0;
         const uint64_t full = (112570 + 20799) * page;
         auto boosted = [&](bool unified) {
@@ -3620,21 +3541,6 @@ static void host_ledger_tests(fixture_inputs & inputs) {
         room = u.measure(checkpoint, true);
         require(!room.fits() && room.boost_headroom == full && room.system_shortage == full - 64 * MiB,
                 "boost: an allocation outside the caches did not count the boost");
-        calls.clear();
-        room = u.make_room(checkpoint, actions); // the tier gives back 512 MiB blocks until the boost cannot reach the floor
-        require(room.fits() && calls == std::vector<std::string>({ "collect", "tier" }) && available >= 812 * MiB + checkpoint + full,
-                "boost: make_room did not make room for the boost");
-        // The boost the kernel raises within a decode token is not untracked growth: MemAvailable falls by what the
-        // headroom shrinks.
-        normal_boost = 0; dma_boost = 0; available = 50 * GiB;
-        auto learner = boosted(true);
-        uint64_t untracked = 0;
-        learner.begin_interval(10 * GiB);
-        normal_boost = 111957; available -= (111957 + 20799) * page; // the reclaimable half's share as well
-        require(!learner.end_interval(true, 10 * GiB, untracked) && untracked == 0, "boost: a raised boost counted as growth");
-        learner.begin_interval(10 * GiB);
-        normal_boost = 0; available += (111957 + 20799) * page; available -= 700 * MiB; // kswapd dropped it; 700 MiB taken
-        require(learner.end_interval(true, 10 * GiB, untracked) && untracked == 700 * MiB, "boost: growth behind a dropped boost");
         // A discrete GPU: no headroom anywhere.
         auto d = boosted(false);
         require(d.memory_available_at_full_boost(at_full, headroom) && headroom == 0 && at_full == available &&
@@ -3642,17 +3548,6 @@ static void host_ledger_tests(fixture_inputs & inputs) {
         current = 0; file_pages = 0; refaults = 0;
     }
 
-    // Explicit reserves: GGML_KIMI_HOST_RESERVE_MIB everywhere; GGML_CUDA_MEMORY_RESERVE_MIB and the tier's former
-    // headroom (the same margin) only where the GPU shares the DRAM.
-    {
-        scoped_fixture_input host(inputs, "host_reserve_mib", "1024");
-        scoped_fixture_input cuda(inputs, "device_reserve_mib", "256");
-        scoped_fixture_input headroom(inputs, "host_headroom_mib", "4096");
-        const auto d = make(false);
-        const auto u = make(true);
-        require(d.explicit_reserve == 1 * GiB && d.margin == 512 * MiB && d.reserve == 512 * MiB, "discrete reserves");
-        require(u.explicit_reserve == 1 * GiB + 256 * MiB && u.margin == 4 * GiB && u.reserve == 512 * MiB, "unified reserves");
-    }
     std::printf("HOST_LEDGER_OK\n");
 }
 

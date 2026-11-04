@@ -155,7 +155,7 @@ struct sink_vram {
         if (deferred_upload) {
             if (!async_upload || use_locations) { throw std::runtime_error("VRAM_DEFERRED_UPLOAD requires ASYNC_UPLOAD=1 and no CACHE_LOCATIONS"); }
             deferred_api = configuration.gpu.deferred;
-            if (!deferred_api || deferred_api->version != 2 || deferred_api->size != sizeof(*deferred_api) ||
+            if (!deferred_api || deferred_api->version != 3 || deferred_api->size != sizeof(*deferred_api) ||
                     !deferred_api->admit || !deferred_api->collect || !deferred_api->wait) {
                 throw std::runtime_error("GPU tier deferred-upload ABI missing or incompatible; no fallback");
             }
@@ -245,7 +245,7 @@ struct sink_vram {
         if (deferred_upload) {
             // Anything but the next decode token of this epoch may release the arena or the RAM cache.
             const bool next = decode && this->decode && have_token && epoch == this->epoch && token == this->token + 1;
-            collect_deferred(cache, next ? -2 : -1);
+            collect_deferred(cache, next ? KIMI_VRAM_COLLECT_NONE : KIMI_VRAM_COLLECT_ALL);
         }
         char error[512] = {};
         const int result = api->begin(context, epoch, token, decode, error, sizeof(error));
@@ -300,7 +300,7 @@ struct sink_vram {
         }
         if (deferred_upload && decode) {
             // The RAM cache refuses a layer's prepare while that layer's entries are leased.
-            collect_deferred(cache, cache.allocation == sink_cache::global ? -1 : layer);
+            collect_deferred(cache, cache.allocation == sink_cache::global ? KIMI_VRAM_COLLECT_ALL : layer);
         }
         upload_queued.assign(source.size(), 0);
         requests.resize(source.size()); slots.assign(source.size(), -1);
@@ -429,7 +429,7 @@ struct sink_vram {
         if (deferred_upload) { retain_deferred(cache, source); }
         release_ram_batch(cache);
         drop_ready(cache,source);
-        if (deferred_upload) { collect_deferred(cache, -2); }
+        if (deferred_upload) { collect_deferred(cache, KIMI_VRAM_COLLECT_NONE); }
     }
     // The layer's grouped prefill on the tier: every format the tier has a lane for (it initializes the format on a cold
     // prefill, its decode arena deferred to the first decode token).

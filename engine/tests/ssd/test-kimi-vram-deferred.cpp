@@ -97,8 +97,13 @@ int main() {
     lifecycle_prepare(t,&a, 1,slots);
     require(slots[0] == slot_a, "published upload did not serve a hit");
     {
+        char error[256] = {}; int c = 1;
+        require(deferred_collect(&t, KIMI_VRAM_COLLECT_IF_IDLE, collected, aborted, 4, &c, error, sizeof(error)) == 0 && c == 0 && t.table,
+                "a reclaimer's collect inside a layer did not leave the layer alone");
+    }
+    {
         char error[256] = {}; int c = 0;
-        require(deferred_collect(&t, -2, collected, aborted, 4, &c, error, sizeof(error)) != 0, "collect accepted inside a layer");
+        require(deferred_collect(&t, KIMI_VRAM_COLLECT_NONE, collected, aborted, 4, &c, error, sizeof(error)) != 0, "collect accepted inside a layer");
         require(!t.table && !t.arena, "refused collect did not release the tier");
     }
 
@@ -127,7 +132,7 @@ int main() {
     open_gate();
     {
         char error[256] = {}; int c = 0;
-        require(deferred_collect(&t, -1, collected, aborted, 4, &c, error, sizeof(error)) != 0 &&
+        require(deferred_collect(&t, KIMI_VRAM_COLLECT_ALL, collected, aborted, 4, &c, error, sizeof(error)) != 0 &&
                 std::strstr(error, "injected deferred VRAM upload error"), "deferred upload failure was hidden");
         require(!t.arena && t.blocks.empty() && !t.table && t.deferred.empty(), "upload failure left deferred work or the arena");
     }

@@ -342,13 +342,14 @@ struct tier {
     }
     // Room on unified memory for `bytes` of host memory about to be allocated outside the tier (the host-memory
     // ledger asks; 0 at a decode token boundary restores the tier's own margin after the floor or the demand grew).
-    // Gives the last blocks back while the free memory is below bytes plus the low watermark, keeping one block;
+    // Gives the last blocks back while the free memory is below bytes plus the low watermark, keeping one block, and
+    // mem_info reads 0 at or under the floor, so a request of nothing still asks for a byte above it;
     // deferred uploads do not stop it (reclaim_last_block). False when a layer is live or not enough could go.
     bool reclaim_host(size_t bytes,const char * reason){
         if(!unified || !elastic_active || !table)return false;
         std::lock_guard<std::mutex> lock(lifecycle_mutex);
         if(poisoned)return false;
-        const size_t low=watermark_low_mib<<20,need=bytes>SIZE_MAX-low?SIZE_MAX:bytes+low;
+        const size_t low=watermark_low_mib<<20,need=bytes>SIZE_MAX-low?SIZE_MAX:std::max<size_t>(bytes+low,1);
         size_t free_bytes=0,total=0;cuda_check(cudaSetDevice(device));mem_info(&free_bytes,&total);
         if(free_bytes>=need)return true;
         if(busy()){
@@ -2467,16 +2468,19 @@ struct tier {
             break;
         }
     }
+    // wait_layer: a layer to wait for, or KIMI_VRAM_COLLECT_ALL, _NONE or _IF_IDLE (kimi_vram_deferred_api).
     void collect(int32_t wait_layer,kimi_vram_request * out,int32_t * aborted,int capacity,int * count){
-        if(!count || capacity<0 || (capacity && (!out || !aborted)) || wait_layer<-2)throw std::runtime_error("invalid deferred VRAM collect");
+        if(!count || capacity<0 || (capacity && (!out || !aborted)) || wait_layer<KIMI_VRAM_COLLECT_IF_IDLE)throw std::runtime_error("invalid deferred VRAM collect");
         *count=0;
         if(!deferred_upload)throw std::runtime_error("deferred VRAM upload is off in the tier (GGML_KIMI_CPU_SINK_VRAM_DEFERRED_UPLOAD)");
-        if((table && (table->in_flight || table->lease_generation)) || live_ready_generation)
+        if((table && (table->in_flight || table->lease_generation)) || live_ready_generation){
+            if(wait_layer==KIMI_VRAM_COLLECT_IF_IDLE)return;
             throw std::runtime_error("deferred VRAM collect inside a layer or a residency lease");
+        }
         std::unique_lock<std::mutex> lock(mutex);
         const auto copying=[&]{return std::any_of(deferred.begin(),deferred.end(),[&](const deferred_job & d){
-            return !d.completed && (wait_layer==-1 || d.key.layer==wait_layer);});};
-        if(wait_layer!=-2 && copying()){
+            return !d.completed && (wait_layer==KIMI_VRAM_COLLECT_ALL || d.key.layer==wait_layer);});};
+        if((wait_layer>=0 || wait_layer==KIMI_VRAM_COLLECT_ALL) && copying()){
             ++deferred_layer_waits;const auto t=clock_type::now();
             cv.wait(lock,[&]{return !copying();});
             deferred_wait_us+=micros(t);
@@ -2750,7 +2754,7 @@ extern "C" const kimi_vram_location_api * kimi_vram_location_get_api(){
     static const kimi_vram_location_api api={1,sizeof(kimi_vram_location_api),&view,location_configure};return &api;
 }
 extern "C" const kimi_vram_deferred_api * kimi_vram_deferred_get_api(){
-    static const kimi_vram_deferred_api api={2,sizeof(kimi_vram_deferred_api),deferred_admit,deferred_collect,deferred_wait};return &api;
+    static const kimi_vram_deferred_api api={3,sizeof(kimi_vram_deferred_api),deferred_admit,deferred_collect,deferred_wait};return &api;
 }
 extern "C" const kimi_vram_elastic_api * kimi_vram_elastic_get_api(){
     static const kimi_vram_elastic_api api={3,sizeof(kimi_vram_elastic_api),elastic_phase_complete,elastic_reserve_accumulate,elastic_reserve};return &api;

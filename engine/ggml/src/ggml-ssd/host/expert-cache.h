@@ -441,8 +441,8 @@ struct expert_cache {
             }
         }
     }
-    // Room for the cache's own admission: both ledger terms, and only under a readable finite cgroup. full_boost: the
-    // system term at the kernel's full watermark boost, as the ledger's make_room measures it (kimi_host_ledger::measure).
+    // Room for the cache's own admission: both terms (room.h), and only under a readable finite envelope. full_boost:
+    // the system term at the kernel's full watermark boost, as the arbiter's take and make_room measure it.
     room_state check_room(uint64_t extra, uint64_t * shortage, uint64_t * surplus = nullptr, bool full_boost = false) const {
         if (shortage) { *shortage = 0; }
         if (surplus) { *surplus = 0; }

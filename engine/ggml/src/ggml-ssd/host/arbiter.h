@@ -2,6 +2,7 @@
 #pragma once
 
 #include "../settings/result.h"
+#include "room.h"
 
 #include <cstdint>
 #include <functional>
@@ -10,20 +11,9 @@
 
 namespace ssd { namespace host {
 
-enum room_state { room_ok, room_pressure, room_unreadable };
 // Tracked bytes also appear in held_bytes() at interval boundaries. External
 // allocations (compute/checkpoints) appear only in the separate grant counter.
 enum class allocation_class { external, tracked };
-struct room {
-    room_state cgroup = room_unreadable;
-    uint64_t cgroup_shortage = 0, cgroup_surplus = 0;
-    bool system = false;
-    uint64_t available = 0, floor = 0, system_shortage = 0, system_surplus = 0, boost_headroom = 0;
-    [[nodiscard]] bool fits() const noexcept { return !cgroup_shortage && !system_shortage; }
-    [[nodiscard]] uint64_t shortage() const noexcept;
-    [[nodiscard]] uint64_t surplus() const noexcept;
-};
-
 struct client_config {
     bool unified = false;
     uint64_t reserve_bytes = 512ull << 20;
@@ -115,6 +105,7 @@ class process_arbiter : public std::enable_shared_from_this<process_arbiter> {
     struct impl;
     std::unique_ptr<impl> impl_;
     status init_status_ = status::ok;
+    std::string init_error_; // what the reader threw at construction, if it said
 };
 
 class context_client {
@@ -150,6 +141,17 @@ class context_client {
                            requester who = requester::outside, bool require_finite_cgroup = false,
                            allocation_class classification = allocation_class::external) noexcept;
     [[nodiscard]] result<bool> update_file_reserve() noexcept;
+    // The margin learns growth nobody accounts (unified memory), one decode token at a time. `held` is the bytes the
+    // engine knows it holds in this DRAM (GPU tier blocks, committed RAM cache slots). An interval begins after a
+    // decode token boundary has resized the caches and ends at the next boundary before it resizes anything, so the
+    // boundaries' own resizes (and a MemAvailable that lags them) fall outside every interval, while a block the OOM
+    // reclaimer gives a ggml allocation inside a token pairs with that allocation. Within the interval, a drop in
+    // MemAvailable beyond what `held` and this context's committed grants explain was taken by something untracked:
+    // CUDA graphs instantiated for a new shape, pool and driver allocations. When one interval's untracked drop
+    // exceeds the margin, the margin becomes it; it never shrinks. An interval another client's admission or a
+    // ticket still open overlaps learns nothing. MemAvailable is read at the full watermark boost, so that a boost the
+    // kernel raises or drops within the token is not growth. consecutive=false (a prefill or a skipped token came
+    // between) discards the open interval; end_interval is true when the margin grew.
     [[nodiscard]] result<void> begin_interval(uint64_t held) noexcept;
     [[nodiscard]] result<bool> end_interval(bool consecutive, uint64_t held, uint64_t & untracked) noexcept;
     // Call on known external frees/replacements: invalidate this actor and

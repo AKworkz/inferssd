@@ -206,6 +206,20 @@ int main() {
                 "reclaim_host did not refuse inside a live layer");
         t.finish(out.data(), 256);
     }
+    // At or under the floor free memory reads 0: a request of nothing, the tier's own at a token boundary, still gives back.
+    {
+        tier t(40 * stride, inputs.tier_policy(), nullptr, test_cpu_kernels());
+        const auto k = key(3, 2);
+        int slot = -1;
+        t.begin(53, 1, true); lifecycle_prepare(t,&k, 1,&slot); t.finish(out.data(), 256);
+        require(t.blocks.size() == 3, "reclaim_host floor fixture has no three blocks");
+        t.unified = true;
+        t.host_floor = SIZE_MAX / 2;
+        t.watermark_low_mib = 0;
+        t.reclaim_host(0, "test");
+        require(t.blocks.size() == 1 && t.host_reclaims == 1 && !t.poisoned, "reclaim_host(0) under the floor gave nothing back");
+        t.host_floor = 0;
+    }
     // auto sizes an elastic tier only, and has no base to shrink to at a prefill: it gives back on demand.
     {
         inputs.set("tier.elastic", "0");

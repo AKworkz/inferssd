@@ -65,7 +65,7 @@ const ssd::gpu::provider_v1 * stand_in_provider() {
     static const kimi_vram_elastic_api elastic = { 3, sizeof(kimi_vram_elastic_api),
         [](void *, int, char *, size_t) { return 0; }, [](void *, int, char *, size_t) { return 0; },
         [](void *, const kimi_vram_request *, const kimi_vram_expert_format *, char *, size_t) { return 0; } };
-    static const kimi_vram_deferred_api deferred = { 2, sizeof(kimi_vram_deferred_api),
+    static const kimi_vram_deferred_api deferred = { 3, sizeof(kimi_vram_deferred_api),
         [](void *, const kimi_vram_request *, const void *, const void *, const void *, int * queued, char * e, size_t n) {
             *queued = 0; return refuse(nullptr, e, n); },
         [](void *, int32_t, kimi_vram_request *, int32_t *, int, int * count, char *, size_t) { *count = 0; return 0; },

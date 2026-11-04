@@ -271,11 +271,15 @@ struct fixture_inputs {
         }
         return sink_ptr(sink, threads - 1);
     }
-    // The Linux ledger finds its cgroup and derives the margin and device reserve here; the native ledger
-    // (macOS, Windows) has its envelope from the OS and no such terms.
+    // The Linux ledger finds its cgroup here and takes the margin and the device reserve as the executor's host
+    // client sets them (cpu-sink.cpp, sink_host_configuration); the native ledger (macOS, Windows) has its envelope
+    // from the OS and no such terms.
     template<class Ledger> auto configure_terms(Ledger & ledger, bool unified, int) const
-            -> decltype(ledger.configure(unified, 0u, 0u), void()) {
-        ledger.configure(unified, uint32_t(integer("host_headroom_mib", 512)), uint32_t(integer("device_reserve_mib", 0)));
+            -> decltype(ledger.locate(), void()) {
+        ledger.locate();
+        ledger.unified = unified;
+        ledger.margin = uint64_t(integer("host_headroom_mib", 512)) << 20;
+        ledger.explicit_reserve = unified ? uint64_t(integer("device_reserve_mib", 0)) << 20 : 0;
     }
     template<class Ledger> void configure_terms(Ledger & ledger, bool unified, long) const { ledger.unified = unified; }
     template<class Ledger> void configure(Ledger & ledger, bool unified) const {
@@ -284,7 +288,7 @@ struct fixture_inputs {
         if (ledger.reserve < (512ull << 20)) { throw std::runtime_error("fixture reserve below safe floor"); }
         ledger.margin = std::max(ledger.margin, ledger.reserve);
         ledger.reclaimable_file = boolean("cache_reclaimable_file", false);
-        ledger.explicit_reserve = Ledger::add(ledger.explicit_reserve, integer("host_reserve_mib", 0) << 20);
+        ledger.explicit_reserve = ssd::host::add(ledger.explicit_reserve, integer("host_reserve_mib", 0) << 20);
     }
 };
 
