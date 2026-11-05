@@ -135,7 +135,10 @@ def _unpinned(characteristics: Characteristics) -> list[ComputeRow]:
 def _measured_counts(
     characteristics: Characteristics, model: ModelFacts, allowed: Sequence[int], notes: list[str]
 ) -> Threads:
-    """Without affinity: the measured thread counts that run the dominant format fastest."""
+    """Without affinity: the measured thread counts that run the dominant format fastest.
+
+    As where threads are pinned, each pool leaves a CPU to the sink's I/O thread.
+    """
     name = model.dominant_format.upper()
     rows = [
         row
@@ -158,26 +161,23 @@ def _measured_counts(
         for point in row["points"]
         if point["tokens"] == tokens and point.get("flops", 0) > 0
     ]
+    most = max(1, min(MAX_THREADS, len(allowed) - 1))
     fallback = len(_performance(characteristics) & set(allowed)) or len(allowed)
-    fallback = min(fallback, MAX_THREADS)
     # The fastest rate wins; between equal rates, fewer threads.
     decode = max(one, key=lambda item: (item[0], -item[1]))[1] if one else fallback
     batch = max(many, key=lambda item: (item[0], -item[1]))[1] if many else fallback
+    left = f", at most {most} so that a CPU stays with the I/O thread"
     if one:
-        notes.append(
-            f"threads: decode {decode}, the measured count with the most {name} weight bytes/s "
-            "at one token"
-        )
+        why = f"the measured count with the most {name} weight bytes/s at one token"
     else:
-        notes.append(f"threads: decode {decode}, the performance cluster ({name} not measured)")
+        why = f"the performance cluster ({name} not measured)"
+    notes.append(f"threads: decode {min(decode, most)}, {why}{left if decode > most else ''}")
     if many:
-        notes.append(
-            f"threads: batch {batch}, the measured count with the most {name} FLOP/s "
-            f"at {tokens} tokens"
-        )
+        why = f"the measured count with the most {name} FLOP/s at {tokens} tokens"
     else:
-        notes.append(f"threads: batch {batch}, the performance cluster ({name} not measured)")
-    return Threads(min(decode, MAX_THREADS), min(batch, MAX_THREADS), ())
+        why = f"the performance cluster ({name} not measured)"
+    notes.append(f"threads: batch {min(batch, most)}, {why}{left if batch > most else ''}")
+    return Threads(min(decode, most), min(batch, most), ())
 
 
 def pinned_rate(

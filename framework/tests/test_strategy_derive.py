@@ -320,8 +320,13 @@ def test_macos_measured_thread_counts_and_budget(models):
     s = derive(
         c, models["dsv"], runtime(range(10), budget=12 << 30), "darwin", model_drive_key=drive(c)
     )
-    # 10 threads stream MXFP4 weights fastest and compute it fastest at 512 tokens.
-    assert s.threads == Threads(10, 10, ())
+    # 10 threads stream MXFP4 weights fastest and compute it fastest at 512 tokens; both pools
+    # leave a CPU to the I/O thread.
+    assert s.threads == Threads(9, 9, ())
+    assert (
+        "threads: decode 9, the measured count with the most MXFP4 weight bytes/s at one token, "
+        "at most 9 so that a CPU stays with the I/O thread"
+    ) in s.notes
     assert s.settings["cpu.io_cpus"].value_text == '""'
     assert s.settings["host.budget_mib"].value_text == "12288"
     # A quarter of the machine's memory stays out of the RAM cache.

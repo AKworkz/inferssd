@@ -75,10 +75,10 @@ Each launch then combines the file with the model's GGUF header and with what
 it reads at that moment (the CPUs it may use, the usable GPUs and their free
 memory, the available memory) to choose:
 
-- the decode and prefill thread counts and, where the CPUs allow it, which
-  CPUs the decode threads use: the performance cluster alone, one thread
-  pinned to each CPU, when one token streams the model's weight format faster
-  there than on every CPU;
+- the decode and prefill thread counts, each leaving a CPU to the sink's I/O
+  thread, and, where the CPUs allow it, which CPUs the decode threads use: the
+  performance cluster alone, one thread pinned to each CPU, when one token
+  streams the model's weight format faster there than on every CPU;
 - the starting estimates the engine uses to place experts between the CPU and
   the GPU (it refines them as it runs);
 - `vram.budget = 0` when the engine has CUDA and no CUDA GPU is usable, and on
