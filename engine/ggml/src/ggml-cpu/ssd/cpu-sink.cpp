@@ -1508,9 +1508,10 @@ struct kimi_cpu_sink {
 
     // A participant of the open call (ith 1..nth-1) computes its share of every phase the run's thread publishes,
     // until the call closes. One that joins late takes up the phase in progress: no phase it is active in can finish
-    // without it. After a phase it polls for the next for poll_us, then parks; it waits for the open, and for the
-    // close after the run's last phase, as at a node boundary (sink_node_spin_us). A wakeup without work counts into
-    // the participant's next phase profile.
+    // without it. Once joined, and after a phase, it polls for the next for poll_us, then parks: one that parked at
+    // once would hold the call's first phase, or the close of a call that runs none, for its wakeup. It waits for the
+    // open, and for the close after the run's last phase, as at a node boundary (sink_node_spin_us). A wakeup without
+    // work counts into the participant's next phase profile.
     void join_call(int ith, int nth) {
         // A ggml node starts on every thread at once and its coordinator opens the call at entry. The previous call
         // closed only after this thread joined it, and ggml's barrier after that node released no thread before this
@@ -1527,7 +1528,7 @@ struct kimi_cpu_sink {
         const uint32_t call = now.call();
         uint32_t seen = call_generation;
         if (joined.fetch_add(1) + 1 == uint32_t(nth - 1)) { coordinator.notify(); }
-        int poll_next = 0;
+        int poll_next = poll_us;
         uint64_t idle_wakeups = 0;
         for (;;) {
             now.word = phase.load();
