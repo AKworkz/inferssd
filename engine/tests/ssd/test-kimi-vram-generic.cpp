@@ -40,12 +40,14 @@ void set_switch(fixture_inputs & inputs, const char * name, bool enabled) {
     inputs.set(name, enabled ? "1" : "0");
 }
 
+// layer1_down: layer 1's down type where it differs from layer 2's (Muse Q4_K_S), declared to the tier at load.
 void run_shape(fixture_inputs & inputs, int latent, int hidden, int experts, mode selected, size_t & checks,
         double & worst_rel, double & worst_abs,
-        ggml_type up_type, ggml_type down_type) {
+        ggml_type up_type, ggml_type down_type, ggml_type layer1_down = GGML_TYPE_COUNT) {
     fixture f;
     f.type = up_type;
     f.down_type = down_type;
+    if (layer1_down != GGML_TYPE_COUNT) { f.layer_down_types[1] = layer1_down; }
     f.latent = latent;
     f.hidden = hidden;
     f.experts = experts;
@@ -77,6 +79,15 @@ void run_shape(fixture_inputs & inputs, int latent, int hidden, int experts, mod
     const uint64_t ram_bytes = selected.production ? 2 * unit : 0;
     configure_cache(cpu.get(), ram_bytes, {1, 2}, experts);
     configure_cache(mixed.get(), ram_bytes, {1, 2}, experts);
+    if (layer1_down != GGML_TYPE_COUNT) {
+        // the load step with every routed layer's tensors: the sink declares each layer's types to the tier
+        tensors first(f, 1), second(f, 2);
+        const ggml_tensor * layers[] = { first.role[0], first.role[1], first.role[2], second.role[0], second.role[1], second.role[2] };
+        for (kimi_cpu_sink * sink : { cpu.get(), mixed.get() }) {
+            char error[512] = {};
+            require(kimi_cpu_sink_vram_reserve(sink, layers, 2, 4, error, sizeof(error)), std::string("reserve: ") + error);
+        }
+    }
     uint64_t cpu_reads = 0;
     uint64_t mixed_reads = 0;
     const kimi_cpu_sink_activation activation = {
@@ -128,8 +139,8 @@ void run_shape(fixture_inputs & inputs, int latent, int hidden, int experts, mod
     }
     require(mixed_reads < cpu_reads, "generic VRAM tier served no resident expert hits");
     ++checks;
-    std::printf("GENERIC_VRAM_SHAPE_PASS mode=%s types=%s/%s latent=%d hidden=%d cpu_reads=%llu mixed_reads=%llu worst_rel_l2=%.6g worst_abs=%.6g\n",
-        selected.name, ggml_type_name(up_type), ggml_type_name(down_type), latent, hidden, (unsigned long long) cpu_reads,
+    std::printf("GENERIC_VRAM_SHAPE_PASS mode=%s types=%s/%s layer1_down=%s latent=%d hidden=%d cpu_reads=%llu mixed_reads=%llu worst_rel_l2=%.6g worst_abs=%.6g\n",
+        selected.name, ggml_type_name(up_type), ggml_type_name(down_type), ggml_type_name(f.down_of(1)), latent, hidden, (unsigned long long) cpu_reads,
         (unsigned long long) mixed_reads, worst_rel, worst_abs);
 }
 
@@ -153,6 +164,8 @@ int main() {
         double worst_abs = 0.0;
         run_shape(inputs, 512, 256, 8, {true, "production-generic"}, checks, worst_rel, worst_abs, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K);
         run_shape(inputs, 512, 256, 8, {true, "production-generic"}, checks, worst_rel, worst_abs, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0);
+        run_shape(inputs, 512, 256, 8, {true, "production-mixed-layers"}, checks, worst_rel, worst_abs, GGML_TYPE_Q4_K,
+            GGML_TYPE_Q5_K, GGML_TYPE_Q4_K);
         run_host_jobs(inputs, GGML_TYPE_Q8_0, checks);
         std::printf("REAL_GPU_GENERIC_TIER_PASS checks=%zu worst_rel_l2=%.6g worst_abs=%.6g\n",
             checks, worst_rel, worst_abs);

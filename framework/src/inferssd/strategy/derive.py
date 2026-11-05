@@ -579,7 +579,10 @@ def derive(
         choices["place.costs"] = costs
 
     one_pass = False
-    mixed = [role for role in model.roles if len(role.formats) > 1]
+    # The CUDA tier keeps experts of several formats, but MXFP4 has an engine of its own that
+    # serves only a model whose experts are all MXFP4.
+    formats = sorted({name for role in model.roles for name, _ in role.formats})
+    mxfp4_mixed = "MXFP4" in formats and len(formats) > 1
     # The CUDA tier's budget, where the engine has the tier. A GPU lane (Vulkan, Metal) takes
     # the default.
     if "CUDA" in engine_gpu_backends(runtime.gpu_backends, characteristics):
@@ -594,12 +597,10 @@ def derive(
             extra = f", although the machine has {len(listed)}" if listed else ""
             choices["vram.budget"] = ("0", "no CUDA GPU is usable now" + extra)
             notes.append("vram.budget: 0, no CUDA GPU is usable now" + extra)
-        elif mixed:
-            # The VRAM tier and its prefill lane compute one expert format a role.
-            why = "the GPU tier computes one expert format a role, and this model's " + "; ".join(
-                f"{role.name} experts are "
-                + ", ".join(f"{name} in {n} layers" for name, n in role.formats)
-                for role in mixed
+        elif mxfp4_mixed:
+            why = (
+                "the GPU tier computes MXFP4 experts only in a model whose experts are all MXFP4, "
+                "and this model's are " + ", ".join(formats)
             )
             choices["vram.budget"] = ("0", why)
             notes.append("vram.budget: 0, " + why)

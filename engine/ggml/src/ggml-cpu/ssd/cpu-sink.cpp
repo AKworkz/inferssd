@@ -1187,12 +1187,10 @@ struct kimi_cpu_sink {
     // layer, then the reads of its first k ranks. A run without reads of its own opens the drive's idle window here,
     // with a hint or without one.
     void prefetch_schedule(const ggml_tensor * up, bool demand_reads) {
-        int layer = -1, consumed = 0;
+        const int layer = ssd::host::routed_layer(up);
         const int nhint = prefetch.hint_n;
         prefetch.hint_n = 0;
-        if (std::sscanf(up->name, "blk.%d.ffn_up_exps.weight%n", &layer, &consumed) != 1 || !consumed || up->name[consumed]) {
-            return;
-        }
+        if (layer < 0) { return; }
         const auto policy = ssd::place::plan_prefetch(layer, prefetch.hint_layer, nhint, prefetch.topk, demand_reads);
         if (!policy.hinted) {
             // no hint for the next layer (the last MoE layer's run): nothing to read, but a run without reads of its
@@ -1564,16 +1562,48 @@ struct kimi_cpu_sink {
     // GPU tier's (sink_vram::reserve), with the floor and the RAM cache's demand published first, as the first decode
     // layer publishes them before the tier sizes itself there; the RAM cache there only lands the prefetch and follows
     // at the first decode token, from the demand the tier left. Elsewhere, unified memory without a GPU tier included,
-    // the RAM cache's (reserve_cache), when the cache can give room back (partial reclaim or elastic).
-    void reserve_tier(const ggml_tensor * up, const ggml_tensor * gate, const ggml_tensor * down, int experts_used) {
+    // the RAM cache's (reserve_cache), when the cache can give room back (partial reclaim or elastic). experts: up, gate
+    // and down of n routed layers; the largest expert gives both their geometry. With a GPU tier each layer's types
+    // are kept first (record_expert_types).
+    void reserve_tier(const ggml_tensor * const * experts, int n, int experts_used) {
+        if (vram.context) { record_expert_types(experts, n); }
+        const auto bytes = [&](int i) { return experts[3 * i]->nb[2] + experts[3 * i + 1]->nb[2] + experts[3 * i + 2]->nb[2]; };
+        int largest = 0;
+        for (int i = 1; i < n; ++i) { if (bytes(i) > bytes(largest)) { largest = i; } }
+        const ggml_tensor * up = experts[3 * largest], * gate = experts[3 * largest + 1], * down = experts[3 * largest + 2];
         if (!cache.ledger.state().unified || !vram.context) { reserve_cache(up, gate, down, experts_used); }
         if (!vram.context || cache.layers.empty()) { return; }
         refresh_floor("reserve");
         if (!cache.arena) { vram.set_host_demand(cache.pending_bytes(size_t(up->nb[2] + gate->nb[2] + down->nb[2]))); }
-        std::vector<int32_t> layer_ids;
-        layer_ids.reserve(cache.layers.size());
-        for (const auto & l : cache.layers) { layer_ids.push_back(l.id); }
-        vram.reserve(up, gate, down, layer_ids);
+        vram.reserve(up, gate, down, sink_vram::layer_list(cache));
+    }
+    // Every routed layer's expert types, kept with the cache's layers: the GPU tier is declared them with each layer it
+    // is given (sink_vram::layer_list) once every configured layer has its. The tier keeps all of them in slots of one
+    // geometry, so the layers must share latent, hidden and the expert count. A refusal keeps nothing.
+    void record_expert_types(const ggml_tensor * const * experts, int n) {
+        struct typed { size_t index; int32_t up, down; };
+        std::vector<typed> found;
+        const ggml_tensor * first = experts[0];
+        for (int i = 0; i < n; ++i) {
+            const ggml_tensor * up = experts[3 * i], * gate = experts[3 * i + 1], * down = experts[3 * i + 2];
+            const int layer = ssd::host::routed_layer(up);
+            if (layer < 0) {
+                throw std::runtime_error(std::string("expert reserve requires canonical routed layer tensors, not ") + up->name);
+            }
+            if (up->type != gate->type) { throw std::runtime_error("CPU sink requires up and gate experts of one type"); }
+            if (up->ne[0] != first->ne[0] || up->ne[1] != first->ne[1] || up->ne[2] != first->ne[2] ||
+                    gate->ne[0] != up->ne[0] || gate->ne[1] != up->ne[1] || gate->ne[2] != up->ne[2] ||
+                    down->ne[0] != up->ne[1] || down->ne[1] != up->ne[0] || down->ne[2] != up->ne[2]) {
+                throw std::runtime_error("routed layer " + std::to_string(layer) + " has another expert geometry than " +
+                    first->name + ": the GPU tier needs the same latent, hidden and expert count in every routed layer");
+            }
+            const auto at = std::find_if(cache.layers.begin(), cache.layers.end(), [&](const sink_cache::layer & l) { return l.id == layer; });
+            if (at == cache.layers.end()) {
+                throw std::runtime_error("expert reserve: layer " + std::to_string(layer) + " is not a configured routed layer");
+            }
+            found.push_back({ size_t(at - cache.layers.begin()), int32_t(up->type), int32_t(down->type) });
+        }
+        for (const auto & f : found) { cache.layers[f.index].up_type = f.up; cache.layers[f.index].down_type = f.down; }
     }
     // The RAM cache's arena and pages at load (sink_cache::reserve_at_load), each role as a decode request reserves
     // it (its bytes and a page prefix, in whole pages), after the read ring the first decode charges before the cache
@@ -1980,10 +2010,7 @@ struct kimi_cpu_sink {
         ++trace_call;
         trace_decode = decode;
         if (!decode) { trace_has_token = false; }
-        trace_layer = -1;
-        int consumed = 0, layer = -1;
-        if (up && std::sscanf(up->name, "blk.%d.ffn_up_exps.weight%n", &layer, &consumed) == 1 &&
-                consumed && !up->name[consumed]) { trace_layer = layer; }
+        trace_layer = ssd::host::routed_layer(up);
         if (profile_enabled) {
             caller_cpu_start = sink_thread_cpu_us();
             // between phases: no participant writes its profile
@@ -2486,17 +2513,14 @@ struct kimi_cpu_sink {
             const bool provider_path = cache_compute_active && locations.version;
             if (provider_path) { vram.hits = 0; }
             else {
-                std::vector<int32_t> vram_layers;
-                if (vram.context) {
-                    vram_layers.reserve(cache.layers.size());
-                    for (const auto & l : cache.layers) { vram_layers.push_back(l.id); }
-                }
                 // The tier may size itself in this call (its first decode layer) while the RAM cache has not mapped
                 // its slots yet: tell it first what the cache will commit, which on unified memory is the same DRAM.
                 if (vram.context && !cache.arena) {
                     vram.set_host_demand(cache.pending_bytes(max_bytes[0] + max_bytes[1] + max_bytes[2]));
                 }
-                vram.prepare(requests, up, down, latent, hidden, vram_layers, cache, post_exp_norm != nullptr);
+                if (vram.context) {
+                    vram.prepare(requests, up, down, latent, hidden, sink_vram::layer_list(cache), cache, post_exp_norm != nullptr);
+                } else { vram.hits = 0; }
             }
             // Auto sizing reads memory.current. After GPU prefill, the CPU
             // read ring may still be absent or only virtually allocated. Its
@@ -2930,11 +2954,8 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
             owner->io_cv.notify_all();
             return 1;
         };
-        std::vector<int32_t> vram_layers;
-        vram_layers.reserve(sink->cache.layers.size());
-        for (const auto & layer : sink->cache.layers) { vram_layers.push_back(layer.id); }
         batch->gpu_experts = sink->vram.prepare_prefill(sink->requests, up, down, sink->latent, sink->hidden,
-            vram_layers, batch->ntokens, batch->activation.post_exp_norm != nullptr);
+            sink_vram::layer_list(sink->cache), batch->ntokens, batch->activation.post_exp_norm != nullptr);
         // the batched lanes stream their SSD transients through the ring (MXFP4's hand engine, the batched engine)
         streaming_ssd = sink->vram.prefill_batched;
         route_bytes = double(sink->vram.prefill_lane.route_bytes);
@@ -3447,13 +3468,16 @@ extern "C" bool kimi_cpu_sink_vram_reserve_accumulator(
     catch (const std::exception & e) { sink_error(error, error_size, e.what()); return false; }
 }
 
-extern "C" bool kimi_cpu_sink_vram_reserve(struct kimi_cpu_sink * sink, const struct ggml_tensor * up,
-        const struct ggml_tensor * gate, const struct ggml_tensor * down, int experts_used, char * error, size_t error_size) {
+extern "C" bool kimi_cpu_sink_vram_reserve(struct kimi_cpu_sink * sink, const struct ggml_tensor * const * experts,
+        int n_layers, int experts_used, char * error, size_t error_size) {
     sink_error(error, error_size, "");
-    if (!sink || !up || !gate || !down) { sink_error(error, error_size, "null CPU sink or expert tensor"); return false; }
+    if (!sink || !experts || n_layers < 1 ||
+            std::any_of(experts, experts + 3 * n_layers, [](const ggml_tensor * t) { return !t; })) {
+        sink_error(error, error_size, "null CPU sink or expert tensor"); return false;
+    }
     std::lock_guard<sink_run_mutex> serial(sink->run_mutex); sink->prefetch_drain();
     try {
-        sink->reserve_tier(up, gate, down, experts_used);
+        sink->reserve_tier(experts, n_layers, experts_used);
         return true;
     }
     catch (const std::exception & e) { sink_error(error, error_size, e.what()); return false; }
@@ -3580,9 +3604,8 @@ extern "C" bool kimi_cpu_sink_run_activation(
         if (sink->poisoned) { throw std::runtime_error("CPU sink ring is poisoned after an I/O failure"); }
         {
             // with the ids checked: an in-flight prefetch of an expert this run uses becomes a hit it waits for
-            int layer = -1, consumed = 0;
-            if (up && std::sscanf(up->name, "blk.%d.ffn_up_exps.weight%n", &layer, &consumed) == 1 && consumed &&
-                    !up->name[consumed]) {
+            const int layer = ssd::host::routed_layer(up);
+            if (layer >= 0) {
                 sink->prefetch_drain(layer, ids, nslots);
                 sink->mrc.observe(layer, ids, nslots);
             } else {

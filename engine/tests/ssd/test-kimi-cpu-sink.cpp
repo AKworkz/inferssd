@@ -128,6 +128,8 @@ using key = std::pair<std::string, int32_t>;
 struct fixture {
     int latent = 256, hidden = 256, experts = 20, fd = -1;
     ggml_type type = GGML_TYPE_Q3_K, down_type = GGML_TYPE_Q3_K; // up/gate and down payload types
+    std::map<int, ggml_type> layer_down_types; // a layer's down type where it is not down_type (as Muse Q4_K_S's)
+    ggml_type down_of(int layer) const { const auto it = layer_down_types.find(layer); return it == layer_down_types.end() ? down_type : it->second; }
     std::string path;
     bool remove_on_destroy = false;
     std::map<key, entry> entries;
@@ -181,7 +183,7 @@ static void make_synthetic(fixture & f, uint32_t seed = 20260908) {
         for (int role = 0; role < 3; ++role) {
             const int cols = role == 2 ? f.hidden : f.latent;
             const int rows = role == 2 ? f.latent : f.hidden;
-            const ggml_type type = role == 2 ? f.down_type : f.type;
+            const ggml_type type = role == 2 ? f.down_of(layer) : f.type;
             const size_t bytes = ggml_row_size(type, cols) * rows;
             const std::vector<float> importance(
                 ggml_quantize_requires_imatrix(type) ? size_t(cols) : 0, 1.0f);
@@ -227,7 +229,7 @@ struct tensors {
     tensors(const fixture & f, int layer) {
         ctx = ggml_init({ ggml_tensor_overhead() * 4, nullptr, true }); require(ctx, "metadata context failed");
         for (int r = 0; r < 3; ++r) {
-            role[r] = ggml_new_tensor_3d(ctx, r == 2 ? f.down_type : f.type, r == 2 ? f.hidden : f.latent,
+            role[r] = ggml_new_tensor_3d(ctx, r == 2 ? f.down_of(layer) : f.type, r == 2 ? f.hidden : f.latent,
                                        r == 2 ? f.latent : f.hidden, f.experts);
             ggml_set_name(role[r], tensor_name(layer, r).c_str());
             require(role[r]->data == nullptr, "sink metadata unexpectedly has payload");
@@ -254,7 +256,7 @@ static std::vector<float> reference(const fixture & f, int layer, const std::vec
         if (ids[slot] < 0) { continue; }
         ggml_tensor * matrices[3];
         for (int role = 0; role < 3; ++role) {
-            matrices[role] = ggml_new_tensor_2d(ctx, role == 2 ? f.down_type : f.type, role == 2 ? f.hidden : f.latent, role == 2 ? f.latent : f.hidden);
+            matrices[role] = ggml_new_tensor_2d(ctx, role == 2 ? f.down_of(layer) : f.type, role == 2 ? f.hidden : f.latent, role == 2 ? f.latent : f.hidden);
             parameters.push_back({ matrices[role], &f.entries.at({ tensor_name(layer, role), ids[slot] }) });
         }
         ggml_tensor * u = ggml_mul_mat(ctx, matrices[0], x);
@@ -2524,7 +2526,7 @@ static void cache_load_tests(fixture_inputs & inputs, int threads, int depth) {
         tensors meta(f, 1);
         char error[512] = {};
         stderr_capture log;
-        require(kimi_cpu_sink_vram_reserve(sink, meta.role[0], meta.role[1], meta.role[2], 6, error, sizeof(error)), error);
+        require(kimi_cpu_sink_vram_reserve(sink, meta.role, 1, 6, error, sizeof(error)), error);
         std::istringstream lines(log.read());
         for (std::string line; std::getline(lines, line);) {
             if (line.rfind("[kimi_cpu_sink_cache] reason=load ", 0) == 0) { *receipt = line; }
@@ -2690,7 +2692,7 @@ static void cache_load_tests(fixture_inputs & inputs, int threads, int depth) {
             tensors meta(big, 1);
             char error[512] = {};
             stderr_capture log;
-            const bool ok = kimi_cpu_sink_vram_reserve(g.get(), meta.role[0], meta.role[1], meta.role[2], 6, error,
+            const bool ok = kimi_cpu_sink_vram_reserve(g.get(), meta.role, 1, 6, error,
                 sizeof(error));
             { std::lock_guard<std::mutex> lock(h.mutex); h.before_meminfo = nullptr; }
             require(ok, error);
@@ -2759,7 +2761,7 @@ static void cache_load_tests(fixture_inputs & inputs, int threads, int depth) {
         {
             tensors meta(big, 1);
             char error[512] = {};
-            require(kimi_cpu_sink_vram_reserve(h.get(), meta.role[0], meta.role[1], meta.role[2], 6, error, sizeof(error)),
+            require(kimi_cpu_sink_vram_reserve(h.get(), meta.role, 1, 6, error, sizeof(error)),
                 error);
         }
         require(cache_snapshot(h.get()).committed_bytes == 6 * slot, "prefill room: the load step did not commit 6 slots");
@@ -2827,7 +2829,7 @@ static void cache_load_tests(fixture_inputs & inputs, int threads, int depth) {
             char error[512] = {};
             stderr_capture log;
             require(kimi_cpu_sink_cache_prefill_room(g.get(), 3 * cost, 0, 0), "load hold: the hold was refused");
-            const bool ok = kimi_cpu_sink_vram_reserve(g.get(), meta.role[0], meta.role[1], meta.role[2], 6, error,
+            const bool ok = kimi_cpu_sink_vram_reserve(g.get(), meta.role, 1, 6, error,
                 sizeof(error));
             std::istringstream lines(log.read());
             for (std::string l; std::getline(lines, l);) {
@@ -2887,7 +2889,7 @@ static void cache_load_tests(fixture_inputs & inputs, int threads, int depth) {
         const uint64_t before = resident();
         {
             stderr_capture log;
-            require(kimi_cpu_sink_vram_reserve(r.get(), meta.role[0], meta.role[1], meta.role[2], 6, error, sizeof(error)), error);
+            require(kimi_cpu_sink_vram_reserve(r.get(), meta.role, 1, 6, error, sizeof(error)), error);
             std::istringstream lines(log.read());
             for (std::string line; std::getline(lines, line);) {
                 if (line.rfind("[kimi_cpu_sink_cache] reason=load ", 0) == 0) { loaded = line; }
@@ -2980,7 +2982,7 @@ static void work_buffer_reclaim_tests(fixture_inputs & inputs, int threads, int 
         tensors meta(f, 1);
         char error[512] = {};
         stderr_capture log;
-        const bool ok = kimi_cpu_sink_vram_reserve(sink.get(), meta.role[0], meta.role[1], meta.role[2], int(ids.size()),
+        const bool ok = kimi_cpu_sink_vram_reserve(sink.get(), meta.role, 1, int(ids.size()),
             error, sizeof(error));
         std::istringstream lines(log.read());
         for (std::string l; std::getline(lines, l);) {

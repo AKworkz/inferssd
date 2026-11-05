@@ -98,7 +98,7 @@ public:
             first_layer(first), last_layer(last), experts(experts_per_layer) {
         if (!std::isfinite(minimum) || minimum < 0 || minimum > 4 || (!decay && minimum != 0)) { throw std::runtime_error("VRAM minimum selection count"); }
         if (!std::isfinite(half) || half < 1 || half > 64 || (!decay && half != 2)) { throw std::runtime_error("VRAM decay half-life"); }
-        if (first < 0 || last < first || last > 1023 || experts_per_layer < 1 || experts_per_layer > 65536) { throw std::runtime_error("VRAM layer/expert geometry"); }
+        if (first < 0 || last < first || last >= KIMI_VRAM_MAX_LAYERS || experts_per_layer < 1 || experts_per_layer > 65536) { throw std::runtime_error("VRAM layer/expert geometry"); }
         if (priority.empty() || capacity > priority.size()*size_t(experts)) { throw std::runtime_error("VRAM cache capacity"); }
         pool_layers = priority;
         for(int id:priority)if(id<first_layer || id>last_layer)throw std::runtime_error("VRAM layer priority range");

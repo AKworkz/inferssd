@@ -19,6 +19,8 @@ struct kimi_vram_request {
     int32_t layer, expert;
     float weight;
 };
+// Layer IDs the tier takes: 0 .. KIMI_VRAM_MAX_LAYERS - 1, more than any model has; its slot table indexes that range.
+#define KIMI_VRAM_MAX_LAYERS 1024
 #ifdef __cplusplus
 // A role's payload as the RAM cache and the VRAM tier know it: the file behind the expert-pack resolver's
 // descriptor (from ssd::platform::identity), the role's logical offset in it (where the resolver says its bytes
@@ -88,8 +90,9 @@ struct kimi_vram_residency_api {
 // prepare/launch entries remain the Kimi-K3 Q3_K/SiTU path. For any other expert
 // format the CPU owner calls prepare (with the tensor geometry) instead of ABI 2
 // prepare and launch (with the activation) instead of ABI 2 launch; admit,
-// finish, cancel, begin and the residency ABI are shared. The format, including
-// the layer list, must stay the same for the lifetime of a context.
+// finish, cancel, begin and the residency ABI are shared. The declaration (the
+// geometry, the layer list and each layer's types) must stay the same for the
+// lifetime of a context; weight_type and down_type are the call's layer's.
 enum kimi_vram_activation_kind {
     KIMI_VRAM_ACTIVATION_SITU         = 0, // same values as kimi_cpu_sink_activation_kind
     KIMI_VRAM_ACTIVATION_SWIGLU_CLAMP = 1,
@@ -101,14 +104,19 @@ struct kimi_vram_activation {
 };
 struct kimi_vram_expert_format {
     int32_t latent, hidden;   // up/gate columns and rows
-    int32_t weight_type;      // ggml_type of up and gate
-    int32_t down_type;        // ggml_type of down
+    int32_t weight_type;      // ggml_type of up and gate of the call's layer
+    int32_t down_type;        // ggml_type of down of the call's layer
     int32_t n_experts;        // routed experts per layer (tensor ne[2])
     int32_t n_layers;         // entries in layers
     const int32_t * layers;   // model layer IDs, allocation priority order
+    // Format API 2, prefill API 8, elastic API 4: each listed layer's up/gate and down types, entry for entry with
+    // layers, or both null when every layer has weight_type and down_type. Every layer has latent, hidden and
+    // n_experts.
+    const int32_t * layer_weight_types;
+    const int32_t * layer_down_types;
 };
 struct kimi_vram_format_api {
-    uint32_t version, size;   // 1
+    uint32_t version, size;   // 2
     int (*prepare)(void * context, const struct kimi_vram_request * requests, int count,
                    const struct kimi_vram_expert_format * format, int * slots,
                    char * error, size_t error_size);
@@ -222,11 +230,12 @@ struct kimi_vram_prefill_launch {
 // transient from page-locked memory (the read ring registered through the host API) is a DMA copy that overlaps
 // the computation of another. Version 7 adds the lane (which engine a format's passes run on, for any format the
 // decode engine serves), the launch options (the per-expert post norm, in place) and the in-place chains' stats.
+// Version 8 takes the per-layer types of kimi_vram_expert_format; the lane is the prepared layer's.
 // Cold seeds start with zero decode heat and are therefore the
 // first victims unless decode reuses them; the path never evicts an existing
 // decode resident.
 struct kimi_vram_prefill_api {
-    uint32_t version, size;   // 7
+    uint32_t version, size;   // 8
     // requests contains the distinct expert union for one layer. slots receives
     // -1 for CPU work or an opaque resident slot for GPU work. The tier must
     // already hold the same explicit format from an earlier decode phase.
@@ -291,7 +300,7 @@ struct kimi_vram_deferred_api {
 // reserve; phase_complete(true) runs only after the decode graph is reserved
 // and grows best-effort into currently free device memory.
 struct kimi_vram_elastic_api {
-    uint32_t version, size;   // 3
+    uint32_t version, size;   // 4 (kimi_vram_expert_format with per-layer types)
     int (*phase_complete)(void * context, int decode, char * error, size_t error_size);
     // Reserve the actual grouped-prefill accumulator before starting streamed I/O.
     int (*reserve_accumulate)(void * context, int tokens, char * error, size_t error_size);

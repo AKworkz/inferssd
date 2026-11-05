@@ -454,15 +454,16 @@ llama_context::llama_context(
 
         // The expert caches' storage once the worst-case graph is reserved (the GPU tier's on unified memory, the RAM
         // cache's elsewhere when it can give room back; the sink decides): its page population then leaves every
-        // request's path. Any routed layer gives the experts' format.
+        // request's path. Every routed layer, for each layer's expert format (a model may quantize layers differently).
         if (cpu_sink_runtime && (cpu_sink_runtime->vram_budget || cpu_sink_runtime->cache_budget) && backend_cpu) {
+            std::vector<const ggml_tensor *> experts;
             for (const auto & layer : model.layers) {
                 if (layer.ffn_up_exps && layer.ffn_gate_exps && layer.ffn_down_exps) {
-                    cpu_sink_runtime->reserve_tier(ggml_backend_dev_backend_reg(ggml_backend_get_device(backend_cpu)),
-                        layer.ffn_up_exps, layer.ffn_gate_exps, layer.ffn_down_exps, int(model.hparams.n_expert_used));
-                    break;
+                    experts.insert(experts.end(), { layer.ffn_up_exps, layer.ffn_gate_exps, layer.ffn_down_exps });
                 }
             }
+            cpu_sink_runtime->reserve_tier(ggml_backend_dev_backend_reg(ggml_backend_get_device(backend_cpu)),
+                experts, int(model.hparams.n_expert_used));
         }
 
         if (!cparams.flash_attn) {

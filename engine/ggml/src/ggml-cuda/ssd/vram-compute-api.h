@@ -53,8 +53,11 @@ struct vram_group_layer_stats {
                                 // whatever the stream waited for between them: the copies they were ready after)
 };
 struct vram_group_compute_api {
-    uint32_t version, size;   // 2
-    void * (*create)(int device, int latent, int hidden, int weight_type, int down_type, char * error, size_t error_size);
+    uint32_t version, size;   // 3
+    // An engine for `formats` expert formats of one geometry: format f has up and gate of weight_types[f] and down of
+    // down_types[f]. A reserve covers every one of them; each layer names its format at begin_layer.
+    void * (*create)(int device, int latent, int hidden, int formats, const int32_t * weight_types,
+                     const int32_t * down_types, char * error, size_t error_size);
     void (*destroy)(void *);
     // Buffers for passes of up to `rows` input rows and `routes` routes a layer (device and page-locked host memory,
     // the products' own reservations). Grows only; release frees all of it. A pass reserves once, before its first
@@ -65,10 +68,10 @@ struct vram_group_compute_api {
     // Page-locked rows [reserved rows][latent] that the caller fills with the layer's input rows before begin_layer.
     // Valid until a reserve that grows, or release.
     float * (*input_rows)(void *);
-    // A layer of `rows` input rows and `groups` experts: group g's routes are routes[first[g] .. first[g + 1]). Queues
-    // the uploads and the zeroing; copies every argument before it returns.
-    int (*begin_layer)(void *, int rows, const struct vram_group_route * routes, const int32_t * first, int groups,
-                       const struct vram_group_activation * activation, char * error, size_t error_size);
+    // A layer of format `format` (an index of create's), `rows` input rows and `groups` experts: group g's routes are
+    // routes[first[g] .. first[g + 1]). Queues the uploads and the zeroing; copies every argument before it returns.
+    int (*begin_layer)(void *, int format, int rows, const struct vram_group_route * routes, const int32_t * first,
+                       int groups, const struct vram_group_activation * activation, char * error, size_t error_size);
     // Queues group g's chain with these weights. The chain waits for `ready` (a weights upload, or null) on the device;
     // *done (optional) receives an event that completes when the chain no longer reads the weights, valid until the
     // next begin_layer.

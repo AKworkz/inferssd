@@ -27,6 +27,15 @@
 #include <vector>
 
 namespace ssd { namespace host {
+// The layer ID of a routed layer's up experts ("blk.N.ffn_up_exps.weight"), or -1 for any other tensor.
+inline int routed_layer(const ggml_tensor * up) {
+    int layer = -1, consumed = 0;
+    if (!up || std::sscanf(up->name, "blk.%d.ffn_up_exps.weight%n", &layer, &consumed) != 1 || !consumed ||
+            up->name[consumed] || layer < 0) {
+        return -1;
+    }
+    return layer;
+}
 struct expert_cache_options {
     context_client * host = nullptr;
     client_config budget;
@@ -122,6 +131,8 @@ struct expert_cache {
     };
     struct layer {
         int32_t id;
+        // its experts' ggml types (up and gate, down), recorded at load from every routed layer's tensors; -1 before
+        int32_t up_type = -1, down_type = -1;
         size_t begin = 0, count = 0;
         uint64_t token = 0;
         bool seen = false;
@@ -710,9 +721,8 @@ struct expert_cache {
     void prepare(std::vector<expert_request> & requests, const ggml_tensor * const * tensors,
                  const size_t * bytes, kimi_cpu_sink_stats & current) {
         if (!active || paused || !stats.budget_bytes) { return; }
-        int id = -1, consumed = 0;
-        if (std::sscanf(tensors[0]->name, "blk.%d.ffn_up_exps.weight%n", &id, &consumed) != 1 ||
-            !consumed || tensors[0]->name[consumed]) { return; }
+        const int id = routed_layer(tensors[0]);
+        if (id < 0) { return; }
         char name[GGML_MAX_NAME];
         std::snprintf(name, sizeof(name), "blk.%d.ffn_gate_exps.weight", id);
         if (std::strcmp(name, tensors[1]->name)) { return; }
@@ -1091,9 +1101,8 @@ struct expert_cache {
             const ggml_tensor * up, const ggml_tensor * gate, const ggml_tensor * down,
             kimi_cpu_sink_stats & current) {
         if (!prefill_read || !arena || !stride || !stats.valid_bytes || requests.empty()) { return; }
-        int layer_id = -1, consumed = 0;
-        if (std::sscanf(up->name, "blk.%d.ffn_up_exps.weight%n", &layer_id, &consumed) != 1 ||
-                !consumed || up->name[consumed]) { return; }
+        const int layer_id = routed_layer(up);
+        if (layer_id < 0) { return; }
         char name[GGML_MAX_NAME];
         std::snprintf(name, sizeof(name), "blk.%d.ffn_gate_exps.weight", layer_id);
         if (std::strcmp(name, gate->name)) { return; }

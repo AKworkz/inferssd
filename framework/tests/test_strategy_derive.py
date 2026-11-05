@@ -9,7 +9,17 @@ import math
 from pathlib import Path
 
 import pytest
-from test_strategy_inputs import Q3_K, Q4_K, Q5_K, Q8_0, deepseek_like, moe, muse_like, write_gguf
+from test_strategy_inputs import (
+    MXFP4,
+    Q3_K,
+    Q4_K,
+    Q5_K,
+    Q8_0,
+    deepseek_like,
+    moe,
+    muse_like,
+    write_gguf,
+)
 
 from inferssd.configuration.settings import parse, render, schema
 from inferssd.launch.typed import threadpools
@@ -500,7 +510,7 @@ def test_dense_only_shapes_do_not_reach_the_cpu_line(models, tmp_path):
     assert line is not None and "latent 4096 hidden 1024" in why
 
 
-def test_experts_mixing_formats_across_layers_keep_the_gpu_tier_off(tmp_path):
+def test_experts_mixing_formats_across_layers_use_the_gpu_tier(tmp_path):
     """Like a Q4_K_S Muse: Q5_K down experts in the first layers, Q4_K after them."""
     down = [Q5_K] * 2 + [Q4_K] * 6
     tensors, kv = moe(
@@ -518,10 +528,28 @@ def test_experts_mixing_formats_across_layers_keep_the_gpu_tier_off(tmp_path):
     c = machine(X86)
     gpu = GPUState(X86_GPU, 30 << 30, 0)
     s = derive(c, mixed, runtime(range(61), [gpu]), "linux", model_drive_key=drive(c))
+    assert "vram.budget" not in s.settings
+    assert s.one_pass and "prefill.cpu_max_tokens" in s.settings
+
+
+def test_mxfp4_experts_mixed_with_another_format_keep_the_gpu_tier_off(tmp_path):
+    tensors, kv = moe(
+        "muse-spark",
+        layers=8,
+        experts=16,
+        used=4,
+        latent=4096,
+        hidden=1024,
+        gate=MXFP4,
+        up=MXFP4,
+        down=[MXFP4] * 6 + [Q8_0] * 2,
+    )
+    mixed = model_facts(str(write_gguf(tmp_path / "mxfp4.gguf", tensors, kv)))
+    c = machine(X86)
+    gpu = GPUState(X86_GPU, 30 << 30, 0)
+    s = derive(c, mixed, runtime(range(61), [gpu]), "linux", model_drive_key=drive(c))
     assert s.settings["vram.budget"].value_text == "0"
     assert s.settings["vram.budget"].reason == (
-        "the GPU tier computes one expert format a role, and this model's down experts are "
-        "Q4_K in 6 layers, Q5_K in 2 layers"
+        "the GPU tier computes MXFP4 experts only in a model whose experts are all MXFP4, "
+        "and this model's are MXFP4, Q8_0"
     )
-    # The graph still prefills long passes.
-    assert s.one_pass and "prefill.cpu_max_tokens" in s.settings

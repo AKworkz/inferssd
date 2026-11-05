@@ -288,17 +288,17 @@ struct llama_kimi_cpu_sink_runtime {
     // instead, with a GPU tier or without one, when it can give room back to the first prefill's ledger requests
     // (CACHE_PARTIAL_RECLAIM or CACHE_ELASTIC; the sink decides). The sink exists from here on, so the first request's
     // prefill goes through cache_begin and make_room as every later one does; a cache that cannot give room back is
-    // still sized at the first decode token. A failure leaves both to the first decode.
-    void reserve_tier(ggml_backend_reg_t registry, const ggml_tensor * up, const ggml_tensor * gate,
-            const ggml_tensor * down, int experts_used) {
+    // still sized at the first decode token. A failure leaves both to the first decode. experts: up, gate and down of
+    // every routed layer, whose expert types the sink keeps for the GPU tier.
+    void reserve_tier(ggml_backend_reg_t registry, const std::vector<const ggml_tensor *> & experts, int experts_used) {
         std::lock_guard<std::mutex> lock(mutex);
-        if ((!vram_budget && !cache_budget) || !registry) { return; }
+        if ((!vram_budget && !cache_budget) || !registry || experts.size() < 3) { return; }
         initialize(registry);
         const auto reserve = cpu_api->vram_reserve;
         // the load-time graph's pages, held from here to the first decode token: the load step leaves their room
         if (prefill_pages && cache_prefill_room) { cache_prefill_room(sink, &settings, &services, prefill_pages, 0, 0); }
         char error[512] = {};
-        if (reserve && !reserve(sink, up, gate, down, experts_used, error, sizeof(error))) {
+        if (reserve && !reserve(sink, experts.data(), int(experts.size() / 3), experts_used, error, sizeof(error))) {
             std::fprintf(stderr, "[kimi_vram_elastic] event=reserve status=fail error=%s\n", error);
         }
     }

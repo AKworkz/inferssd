@@ -71,6 +71,26 @@ struct sink_vram {
     // them. Read at the first layer on the tier after each begin, once ggml has placed the graph's threads.
     ssd::platform::cpu_list thread_cpus, coordinator_cpus;
     bool placement_due = true;
+    // The routed layers as the tier is given them (kimi_vram_expert_format): their IDs in the cache's priority order
+    // and, once every one has the expert types recorded at load (record_expert_types), each one's types; without them
+    // a call's types stand for every layer.
+    struct layer_list {
+        std::vector<int32_t> ids, up_types, down_types;
+        explicit layer_list(const sink_cache & cache) {
+            bool typed = true;
+            ids.reserve(cache.layers.size());
+            for (const auto & l : cache.layers) { ids.push_back(l.id); typed = typed && l.up_type >= 0 && l.down_type >= 0; }
+            for (const auto & l : cache.layers) {
+                if (!typed) { break; }
+                up_types.push_back(l.up_type); down_types.push_back(l.down_type);
+            }
+        }
+        // the declaration with the call's layer's tensors
+        kimi_vram_expert_format format(const ggml_tensor * up, const ggml_tensor * down, int latent, int hidden) const {
+            return { latent, hidden, int32_t(up->type), int32_t(down->type), int32_t(up->ne[2]), int32_t(ids.size()),
+                ids.data(), up_types.empty() ? nullptr : up_types.data(), down_types.empty() ? nullptr : down_types.data() };
+        }
+    };
 
     void initialize(bool ready_first, const sink_configuration & configuration) {
         const bool use_locations = !configuration.production && configuration.policy.vram_locations;
@@ -127,13 +147,13 @@ struct sink_vram {
         }
         if (configuration.gpu.format) {
             format = configuration.gpu.format;
-            if (!format || format->version != 1 || format->size != sizeof(*format) || !format->prepare || !format->launch) {
+            if (!format || format->version != 2 || format->size != sizeof(*format) || !format->prepare || !format->launch) {
                 throw std::runtime_error("GPU tier explicit-format ABI mismatch");
             }
         }
         if (prefill_enabled) {
             prefill_api = configuration.gpu.prefill;
-            if (!prefill_api || prefill_api->version != 7 || prefill_api->size != sizeof(*prefill_api) ||
+            if (!prefill_api || prefill_api->version != 8 || prefill_api->size != sizeof(*prefill_api) ||
                     !prefill_api->prepare || !prefill_api->transient_available || !prefill_api->launch ||
                     !prefill_api->finish || !prefill_api->cancel || !prefill_api->cold_admission_active ||
                     !prefill_api->admit_cold || !prefill_api->lane) {
@@ -143,7 +163,7 @@ struct sink_vram {
         }
         if (configuration.gpu.elastic) {
             elastic = configuration.gpu.elastic;
-            if (!elastic || elastic->version != 3 || elastic->size != sizeof(*elastic) ||
+            if (!elastic || elastic->version != 4 || elastic->size != sizeof(*elastic) ||
                     !elastic->phase_complete || !elastic->reserve_accumulate || !elastic->reserve) {
                 throw std::runtime_error("GPU tier elastic lifecycle ABI mismatch");
             }
@@ -266,17 +286,18 @@ struct sink_vram {
         char error[512] = {};
         check(elastic->reserve_accumulate(context, tokens, error, sizeof(error)), error);
     }
-    // At load (unified memory): the tier's storage before any request, for experts of this geometry. The role
-    // bytes are the tensors' per-expert strides, as the decode requests carry them; the key is not needed.
-    void reserve(const ggml_tensor * up, const ggml_tensor * gate, const ggml_tensor * down,
-                 const std::vector<int32_t> & layer_ids) {
-        if (!context || !elastic || (!format && !prefill_only) || layer_ids.empty()) { return; }
+    // At load (unified memory): the tier's storage before any request, for experts of this geometry, given with one
+    // layer's tensors (the request's layer). The role bytes are the tensors' per-expert strides, as the decode
+    // requests carry them; the key is not needed.
+    void reserve(const ggml_tensor * up, const ggml_tensor * gate, const ggml_tensor * down, const layer_list & layers) {
+        if (!context || !elastic || (!format && !prefill_only) || layers.ids.empty()) { return; }
+        const int layer = ssd::host::routed_layer(up);
+        if (layer < 0) { throw std::runtime_error("GPU tier reserve requires a canonical routed layer"); }
         kimi_vram_request r = {};
-        r.layer = layer_ids.front(); r.weight = 1.0f;
+        r.layer = layer; r.weight = 1.0f;
         const ggml_tensor * tensors[] = { up, gate, down };
         for (int role = 0; role < 3; ++role) { r.role[role].bytes = tensors[role]->nb[2]; }
-        const kimi_vram_expert_format f = { int32_t(up->ne[0]), int32_t(up->ne[1]), int32_t(up->type),
-            int32_t(down->type), int32_t(up->ne[2]), int32_t(layer_ids.size()), layer_ids.data() };
+        const kimi_vram_expert_format f = layers.format(up, down, int32_t(up->ne[0]), int32_t(up->ne[1]));
         char error[512] = {};
         check(elastic->reserve(context, &r, &f, error, sizeof(error)), error);
     }
@@ -288,15 +309,12 @@ struct sink_vram {
     }
     // Expert geometry is supplied through the explicit-format extension.
     void prepare(std::vector<sink_request> & source, const ggml_tensor * up, const ggml_tensor * down,
-                 int latent, int hidden, const std::vector<int32_t> & layer_ids, sink_cache & cache, bool unweighted = false) {
+                 int latent, int hidden, const layer_list & layers, sink_cache & cache, bool unweighted = false) {
         hits = 0;
         if (!context || prefill_only) { return; }
         place_threads();
-        int layer = -1, consumed = 0;
-        const char * tensor_name = up->name;
-        if (std::sscanf(tensor_name, "blk.%d.ffn_up_exps.weight%n", &layer, &consumed) != 1 ||
-                !consumed || tensor_name[consumed] || source.size() > 16 ||
-                (layer < 0 || layer > 1023)) {
+        const int layer = ssd::host::routed_layer(up);
+        if (layer < 0 || layer >= KIMI_VRAM_MAX_LAYERS || source.size() > 16) {
             throw std::runtime_error("GPU tier requires a canonical routed layer and <=16 slots");
         }
         if (!format) {
@@ -322,8 +340,7 @@ struct sink_vram {
             // MXFP4's engine takes the input quantized, the generic one (every other format the CUDA
             // backend has a matrix-vector kernel for; it refuses the rest) takes it as f32
             const bool mxfp4 = up->type == GGML_TYPE_MXFP4 && down->type == GGML_TYPE_MXFP4;
-            const kimi_vram_expert_format f = { latent, hidden, int32_t(up->type), int32_t(down->type),
-                int32_t(up->ne[2]), int32_t(layer_ids.size()), layer_ids.data() };
+            const kimi_vram_expert_format f = layers.format(up, down, latent, hidden);
             result = format->prepare(context, requests.data(), int(requests.size()), &f, slots.data(), error, sizeof(error));
             format_f32_input = !mxfp4;
         }
@@ -440,7 +457,7 @@ struct sink_vram {
     // A pass the format's engine cannot take (a per-expert post norm on MXFP4's
     // hand engine) stays the CPU's.
     int prepare_prefill(std::vector<sink_request> & source, const ggml_tensor * up, const ggml_tensor * down,
-            int latent, int hidden, const std::vector<int32_t> & layer_ids, int ntokens, bool post_norm) {
+            int latent, int hidden, const layer_list & layers, int ntokens, bool post_norm) {
         hits = 0;
         prefill_plan.valid = false;
         learning.cpu_fit = {};
@@ -448,15 +465,12 @@ struct sink_vram {
         prefill_batched = prefill_in_place = false;
         if (!context || !prefill_enabled || source.empty()) { return 0; }
         place_threads();
-        int layer = -1, consumed = 0;
-        const char * tensor_name = up->name;
-        if (std::sscanf(tensor_name, "blk.%d.ffn_up_exps.weight%n", &layer, &consumed) != 1 ||
-                !consumed || tensor_name[consumed] || layer < 0 || layer > 1023 ||
-                source.size() > static_cast<size_t>(up->ne[2])) {
+        const int layer = ssd::host::routed_layer(up);
+        if (layer < 0 || layer >= KIMI_VRAM_MAX_LAYERS || source.size() > static_cast<size_t>(up->ne[2])) {
             throw std::runtime_error("GPU grouped prefill requires a canonical routed layer and a distinct expert union");
         }
         prefill_latent = latent;
-        if (!learning.window) { learning.window = std::max<size_t>(1, layer_ids.size()); }
+        if (!learning.window) { learning.window = std::max<size_t>(1, layers.ids.size()); }
         requests.resize(source.size()); slots.assign(source.size(), -1);
         for (size_t i = 0; i < source.size(); ++i) {
             auto & r = requests[i]; r.layer = layer; r.expert = source[i].id; r.weight = 1.0f;
@@ -466,8 +480,7 @@ struct sink_vram {
                                 k.mtime_s, k.mtime_ns, k.ctime_s, k.ctime_ns, k.inode_hi };
             }
         }
-        const kimi_vram_expert_format f = { latent, hidden, int32_t(up->type), int32_t(down->type),
-            int32_t(up->ne[2]), int32_t(layer_ids.size()), layer_ids.data() };
+        const kimi_vram_expert_format f = layers.format(up, down, latent, hidden);
         char error[512] = {};
         check(prefill_api->prepare(context, requests.data(), int(requests.size()), &f,
                 slots.data(), error, sizeof(error)), error);

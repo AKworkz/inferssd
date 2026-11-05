@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // The GPU lane against the chain computed by hand: weights where the device cannot read them (copied), weights in
 // registered host memory (in place), and a failed read, which must end the pass with an error and every other credit back.
+// Then layers of different formats in one pass, each declared: a larger one after a smaller one, a supported one after
+// one the device cannot run.
 #include "ggml-backend.h"
 #include "ggml-quants.h"
 #include "gpu/provider.h"
@@ -62,6 +64,26 @@ double multiply(const float * weights, int rows, int columns, const float * x, s
         out[size_t(r)] = float(sum);
     }
     return 0;
+}
+
+// A pass's rows by hand, SwiGLU experts of these matrices.
+std::vector<float> swiglu_rows(const std::vector<std::vector<float>> & up, const std::vector<std::vector<float>> & gate,
+        const std::vector<std::vector<float>> & down, const std::vector<float> & input, const std::vector<int32_t> & routes,
+        const std::vector<float> & route_weights) {
+    std::vector<float> rows(size_t(tokens) * latent, 0.0f), u, g, d, h(hidden);
+    for (int token = 0; token < tokens; ++token) {
+        const float * x = input.data() + size_t(token) * latent;
+        for (int slot = 0; slot < nslots; ++slot) {
+            const size_t route = size_t(token) * nslots + slot;
+            if (routes[route] < 0) { continue; }
+            multiply(up[routes[route]].data(), hidden, latent, x, u);
+            multiply(gate[routes[route]].data(), hidden, latent, x, g);
+            for (int i = 0; i < hidden; ++i) { h[i] = g[i] / (1.0f + std::exp(-g[i])) * u[i]; }
+            multiply(down[routes[route]].data(), latent, hidden, h.data(), d);
+            for (int i = 0; i < latent; ++i) { rows[size_t(token) * latent + i] += d[i] * route_weights[route]; }
+        }
+    }
+    return rows;
 }
 } // namespace
 
@@ -254,6 +276,91 @@ int main() {
     if (provider->elastic->phase_complete(lane, 1, error, sizeof(error))) { fail(error); }
     if (provider->prefill->transient_available(lane)) { fail("decode gave the memory back: no expert may move"); }
     provider->api->destroy(lane);
+
+    // Layers of three formats in a pass, declared per layer (kimi_vram_expert_format): layer 0 of a type this device
+    // does not multiply, layer 1 with a Q4_0 down, layer 2 with the larger Q8_0 one (the experts above). As the sink does,
+    // each layer's pass memory is reserved before the layer is prepared, the previous layer's format still the prepared
+    // one: a layer the device runs right after one it does not has the lane, and the larger layer after the smaller
+    // fits the memory reserved then.
+    {
+        // a weight type the device refuses to multiply, by its own answer
+        ggml_type refused = GGML_TYPE_COUNT;
+        for (ggml_type type : { GGML_TYPE_I32, GGML_TYPE_I16, GGML_TYPE_I8, GGML_TYPE_I64, GGML_TYPE_F64 }) {
+            ggml_init_params params{ ggml_tensor_overhead() * 4, nullptr, true };
+            ggml_context * ctx = ggml_init(params);
+            ggml_tensor * product = ggml_mul_mat(ctx, ggml_new_tensor_2d(ctx, type, latent, hidden),
+                ggml_new_tensor_2d(ctx, GGML_TYPE_F32, latent, 2));
+            const bool runs = ggml_backend_dev_supports_op(device, product);
+            ggml_free(ctx);
+            if (!runs) { refused = type; break; }
+        }
+        if (refused == GGML_TYPE_COUNT) { std::printf("the device multiplies every integer weight type: layer 0 runs too\n"); }
+        const ggml_type unrun = refused == GGML_TYPE_COUNT ? GGML_TYPE_Q8_0 : refused;
+        const size_t small_down = ggml_row_size(GGML_TYPE_Q4_0, hidden) * latent, small_bytes = 2 * up_bytes + small_down;
+        memory small(experts * small_bytes);
+        std::vector<std::vector<float>> small_down_rows(experts);
+        for (int e = 0; e < experts; ++e) {
+            char * base = small.at(size_t(e) * small_bytes);
+            std::memcpy(base, weights.at(size_t(e) * expert_bytes), 2 * up_bytes); // the same up and gate
+            const auto values = normal(size_t(latent) * hidden, 400 + e);
+            ggml_quantize_chunk(GGML_TYPE_Q4_0, values.data(), base + 2 * up_bytes, 0, latent, hidden, nullptr);
+            small_down_rows[e].resize(values.size());
+            for (int row = 0; row < latent; ++row) {
+                dequantize_row_q4_0(reinterpret_cast<const block_q4_0 *>(base + 2 * up_bytes + size_t(row) * ggml_row_size(GGML_TYPE_Q4_0, hidden)),
+                    small_down_rows[e].data() + size_t(row) * hidden, hidden);
+            }
+        }
+        const auto small_expected = swiglu_rows(up, gate, small_down_rows, input, routes, route_weights);
+        void * mixed = provider->settings->create(nullptr, &services, error, sizeof(error));
+        if (!mixed) { fail(error); }
+        const int32_t layer_ids[] = { 0, 1, 2 };
+        const int32_t up_types[] = { unrun, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0 };
+        const int32_t down_types[] = { unrun, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0 };
+        options = { { KIMI_VRAM_ACTIVATION_SWIGLU, 0.0f, 0.0f, 0.0f }, nullptr, 0.0f, 1 };
+        // the sink's order for one layer: the pass reserved, the layer prepared, its lane read; true: the lane takes it
+        const auto prepare_layer = [&](int layer) {
+            const kimi_vram_expert_format declared = { latent, hidden, up_types[layer], down_types[layer], experts, 3,
+                layer_ids, up_types, down_types };
+            if (provider->elastic->reserve_accumulate(mixed, tokens, error, sizeof(error))) { fail(error); }
+            if (provider->prefill->prepare(mixed, requests.data(), experts, &declared, slots.data(), error, sizeof(error))) { fail(error); }
+            kimi_vram_prefill_lane layer_lane = {};
+            provider->prefill->lane(mixed, &layer_lane);
+            const bool taken = layer_lane.engine == KIMI_VRAM_PREFILL_ENGINE_BATCHED;
+            if (taken != (provider->prefill->transient_available(mixed) != 0)) {
+                fail("a layer's lane and its pass memory disagree");
+            }
+            return taken;
+        };
+        const auto run_layer = [&](const memory & set, size_t set_bytes, std::vector<float> & output) {
+            std::vector<kimi_vram_prefill_transient> transient(experts);
+            for (int e = 0; e < experts; ++e) {
+                const char * base = set.at(size_t(e) * set_bytes);
+                transient[e] = { e, KIMI_VRAM_PREFILL_TRANSIENT_RAM, { base, base + up_bytes, base + 2 * up_bytes }, nullptr, nullptr };
+            }
+            output.assign(size_t(tokens) * latent, 0.0f);
+            kimi_vram_prefill_stats layer_stats = {};
+            if (provider->prefill->launch(mixed, input.data(), size_t(latent) * sizeof(float), routes.data(), route_weights.data(),
+                    nslots, tokens, transient.data(), experts, &options, error, sizeof(error))) { fail(error); }
+            if (provider->prefill->finish(mixed, output.data(), latent, &layer_stats, error, sizeof(error))) { fail(error); }
+            if (layer_stats.ssd_transient_experts != experts) { fail("an expert of a layer was not computed"); }
+        };
+        // An earlier layer taught the lane the declared formats, as the sink's first layer does: the first layer's pass
+        // is reserved before any format is known, and stays on the CPU.
+        {
+            const kimi_vram_expert_format first = { latent, hidden, up_types[1], down_types[1], experts, 3, layer_ids,
+                up_types, down_types };
+            if (provider->prefill->prepare(mixed, requests.data(), experts, &first, slots.data(), error, sizeof(error))) { fail(error); }
+        }
+        if (prepare_layer(0) != (refused == GGML_TYPE_COUNT)) { fail("the lane took a layer of a type the device refuses"); }
+        if (!prepare_layer(1)) { fail("the layer after one the device cannot run did not get the lane"); }
+        run_layer(small, small_bytes, output);
+        compare_with(output, small_expected, "layer of the smaller format");
+        if (!prepare_layer(2)) { fail("the layer of the larger format did not get the lane"); }
+        run_layer(weights, expert_bytes, output);
+        compare_with(output, expected, "layer of the larger format after the smaller");
+        if (provider->elastic->phase_complete(mixed, 1, error, sizeof(error))) { fail(error); }
+        provider->api->destroy(mixed);
+    }
     std::printf("GRAPH_LANE_PASS\n");
     return 0;
 }

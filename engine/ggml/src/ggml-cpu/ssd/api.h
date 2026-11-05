@@ -11,7 +11,7 @@
 // borrow it only while that backend stays loaded, just as for its other procs.
 namespace ssd { namespace cpu {
 struct api_v2 {
-    uint32_t version;
+    uint32_t version;   // 3: vram_reserve takes every routed layer's tensors
     size_t size;
     decltype(&kimi_cpu_sink_source_size) source_size;
     decltype(&create_configured) create;
@@ -43,7 +43,7 @@ using get_api_v2 = const api_v2 * (*)();
 
 // Check the prefix before accessing members from a possibly different build.
 inline bool valid(const api_v2 * api) noexcept {
-    return api && api->version == 2 && api->size == sizeof(api_v2) &&
+    return api && api->version == 3 && api->size == sizeof(api_v2) &&
         api->runtime_services_size == sizeof(runtime_services) &&
         api->source_size &&
         api->create &&

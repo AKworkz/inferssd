@@ -90,9 +90,15 @@ struct lane {
     ggml_backend_buffer_t work_buffer = nullptr;
     char * work_base = nullptr;
     int latent = 0, hidden = 0;
-    ggml_type up_type = GGML_TYPE_COUNT, down_type = GGML_TYPE_COUNT;
+    ggml_type up_type = GGML_TYPE_COUNT, down_type = GGML_TYPE_COUNT;  // the prepared layer's
     bool format_known = false, usable = false;
+    // Every format the layers declare (kimi_vram_expert_format), with the device's answer. A pass's working memory
+    // holds copies of the largest expert of those it runs, whichever layer comes next.
+    struct known_format { ggml_type up, down; bool usable; };
+    std::vector<known_format> formats;
+    size_t largest_expert = 0;
     bool pass_ready = false;  // this pass's working memory is there (reserve_pass): else every expert stays on the CPU
+    int pass_tokens = 0;      // the tokens it was reserved for
     // One pass, from launch to finish.
     std::thread worker;
     std::vector<lane_expert> experts;
@@ -125,13 +131,13 @@ struct lane {
         work_bytes = 0; work_base = nullptr;
         pass_ready = false;
     }
-    size_t expert_bytes() const {
-        return 2 * ggml_row_size(up_type, latent) * hidden + ggml_row_size(down_type, hidden) * latent;
+    size_t expert_bytes(ggml_type up, ggml_type down) const {
+        return 2 * ggml_row_size(up, latent) * hidden + ggml_row_size(down, hidden) * latent;
     }
     size_t row_bytes() const { return (size_t(2) * latent + size_t(4) * hidden) * sizeof(float); }
     size_t work_needed(int rows) const {
         const size_t padding = batch_experts * tensors_per_expert * std::max<size_t>(tensor_alignment, 64);
-        const size_t bytes = size_t(rows) * row_bytes() + batch_experts * expert_bytes() + padding;
+        const size_t bytes = size_t(rows) * row_bytes() + batch_experts * largest_expert + padding;
         return (bytes + work_alignment - 1) & ~(work_alignment - 1);
     }
     void reserve_work(int rows) {
@@ -150,15 +156,17 @@ struct lane {
         work_bytes = needed;
         work_base = static_cast<char *>(ggml_backend_buffer_get_base(work_buffer));
     }
-    // Before a pass's reads, the one point where the host budget can make room: no layer holds a lease. The lane is
-    // optional, so a refusal leaves this pass to the CPU and fails nothing.
+    // Before a pass's reads, the one point where the host budget can make room: no layer holds a lease. Sized for every
+    // format the device runs (the layer about to be prepared may be any of them). The lane is optional, so a refusal
+    // leaves this pass to the CPU and fails nothing.
     void reserve_pass(int tokens) {
         drain();
         pass_ready = false;
-        if (!format_known || !usable) { return; }
+        if (!format_known || !largest_expert) { return; }
         try {
             reserve_work(tokens);
             pass_ready = true;
+            pass_tokens = tokens;
         } catch (const std::exception & e) {
             std::fprintf(stderr, "[graph_lane] this pass stays on the CPU: %s\n", e.what());
         }
@@ -166,25 +174,43 @@ struct lane {
     char * host_of(const ggml_tensor * tensor) const {
         return static_cast<char *>(work) + (static_cast<const char *>(tensor->data) - work_base);
     }
-    // Whether the device can run this format at all, from its own answer about the chain's operations.
+    // The declared formats, each learned once, and the prepared layer's: whether the device runs it.
     void learn_format(const kimi_vram_expert_format & f) {
-        if (format_known && f.latent == latent && f.hidden == hidden && f.weight_type == int(up_type) && f.down_type == int(down_type)) { return; }
-        latent = f.latent; hidden = f.hidden; up_type = ggml_type(f.weight_type); down_type = ggml_type(f.down_type);
+        if (!format_known || f.latent != latent || f.hidden != hidden) { formats.clear(); largest_expert = 0; }
+        latent = f.latent; hidden = f.hidden;
         format_known = true;
+        const bool listed = f.layer_weight_types && f.layer_down_types && f.layers;
+        for (int i = 0; listed && i < f.n_layers; ++i) { learn(ggml_type(f.layer_weight_types[i]), ggml_type(f.layer_down_types[i])); }
+        const known_format now = learn(ggml_type(f.weight_type), ggml_type(f.down_type));
+        up_type = now.up; down_type = now.down; usable = now.usable;
+    }
+    // Whether the device can run a format at all, from its own answer about the chain's operations.
+    known_format learn(ggml_type up_type_, ggml_type down_type_) {
+        for (const auto & known : formats) {
+            if (known.up == up_type_ && known.down == down_type_) { return known; }
+        }
+        known_format known = { up_type_, down_type_, false };
+        const auto whole = [&](ggml_type type, int columns) {
+            return int(type) >= 0 && int(type) < int(GGML_TYPE_COUNT) && ggml_blck_size(type) > 0 && columns % ggml_blck_size(type) == 0;
+        };
         ggml_init_params params{ggml_tensor_overhead() * tensors_per_expert, nullptr, true};
-        ggml_context * ctx = ggml_init(params);
-        if (!ctx) { usable = false; return; }
-        ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, latent, 2);
-        ggml_tensor * up = ggml_new_tensor_2d(ctx, up_type, latent, hidden);
-        ggml_tensor * down = ggml_new_tensor_2d(ctx, down_type, hidden, latent);
-        ggml_tensor * u = ggml_mul_mat(ctx, up, x);
-        ggml_tensor * d = ggml_mul_mat(ctx, down, u);
-        // The products and what every activation can be made of (activate).
-        ggml_tensor * plain[] = { u, d, ggml_mul(ctx, u, u), ggml_silu(ctx, u), ggml_clamp(ctx, u, -1.0f, 1.0f),
-            ggml_scale(ctx, u, 2.0f), ggml_tanh(ctx, u), ggml_sigmoid(ctx, u) };
-        usable = true;
-        for (ggml_tensor * op : plain) { usable = usable && ggml_backend_dev_supports_op(device, op); }
-        ggml_free(ctx);
+        ggml_context * ctx = whole(up_type_, latent) && whole(down_type_, hidden) ? ggml_init(params) : nullptr;
+        if (ctx) {
+            ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, latent, 2);
+            ggml_tensor * up = ggml_new_tensor_2d(ctx, up_type_, latent, hidden);
+            ggml_tensor * down = ggml_new_tensor_2d(ctx, down_type_, hidden, latent);
+            ggml_tensor * u = ggml_mul_mat(ctx, up, x);
+            ggml_tensor * d = ggml_mul_mat(ctx, down, u);
+            // The products and what every activation can be made of (activate).
+            ggml_tensor * plain[] = { u, d, ggml_mul(ctx, u, u), ggml_silu(ctx, u), ggml_clamp(ctx, u, -1.0f, 1.0f),
+                ggml_scale(ctx, u, 2.0f), ggml_tanh(ctx, u), ggml_sigmoid(ctx, u) };
+            known.usable = true;
+            for (ggml_tensor * op : plain) { known.usable = known.usable && ggml_backend_dev_supports_op(device, op); }
+            ggml_free(ctx);
+        }
+        formats.push_back(known);
+        if (known.usable) { largest_expert = std::max(largest_expert, expert_bytes(up_type_, down_type_)); }
+        return known;
     }
     // The fused operation where the device has it, else the same math from plain operations.
     ggml_tensor * activate(ggml_context * ctx, ggml_tensor * gate, ggml_tensor * up) const {
@@ -477,7 +503,11 @@ int prefill_prepare(void * context, const kimi_vram_request *, int count, const 
     self(context)->learn_format(*format);
     return 0;
 }
-int prefill_transient_available(void * context) { return self(context)->usable && self(context)->pass_ready; }
+// The prepared layer's format runs here and its experts fit the pass's working memory; else the layer stays on the CPU.
+int prefill_transient_available(void * context) {
+    const auto & l = *self(context);
+    return l.usable && l.pass_ready && l.work_bytes >= l.work_needed(l.pass_tokens);
+}
 int prefill_launch(void * context, const void * input, size_t stride, const int32_t * route_request, const float * weights, int nslots, int ntokens,
         const kimi_vram_prefill_transient * transient, int count, const kimi_vram_prefill_launch * options, char * error, size_t error_size) {
     return self(context)->launch(input, stride, route_request, weights, nslots, ntokens, transient, count, options, error, error_size);
@@ -498,7 +528,7 @@ void prefill_lane_info(void * context, kimi_vram_prefill_lane * out) {
     out->in_place = 1;
     out->post_norm = 1;
 }
-const kimi_vram_prefill_api prefill_table = { 7, sizeof(kimi_vram_prefill_api), prefill_prepare, prefill_transient_available, prefill_launch,
+const kimi_vram_prefill_api prefill_table = { 8, sizeof(kimi_vram_prefill_api), prefill_prepare, prefill_transient_available, prefill_launch,
     prefill_finish, tier_cancel, prefill_cold_active, prefill_admit_cold, prefill_lane_info };
 
 int elastic_phase_complete(void * context, int decode, char *, size_t) {
@@ -513,7 +543,7 @@ int elastic_reserve(void * context, const kimi_vram_request *, const kimi_vram_e
     self(context)->learn_format(*format);
     return 0;
 }
-const kimi_vram_elastic_api elastic_table = { 3, sizeof(kimi_vram_elastic_api), elastic_phase_complete, elastic_reserve_accumulate, elastic_reserve };
+const kimi_vram_elastic_api elastic_table = { 4, sizeof(kimi_vram_elastic_api), elastic_phase_complete, elastic_reserve_accumulate, elastic_reserve };
 
 int host_available(void *) { return 0; }
 int host_launch(void *, const kimi_vram_host_job *, int, int * accepted, char *, size_t) { *accepted = 0; return 0; }

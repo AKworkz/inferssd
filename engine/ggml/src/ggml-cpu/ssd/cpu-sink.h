@@ -96,16 +96,18 @@ GGML_BACKEND_API bool kimi_cpu_sink_vram_phase_complete(
 // Reserve the GPU batch accumulator for this actual ubatch before streamed I/O begins.
 GGML_BACKEND_API bool kimi_cpu_sink_vram_reserve_accumulator(
         struct kimi_cpu_sink * sink, int tokens, char * error, size_t error_size);
-// At load, after the context reserved its worst-case graph: on unified memory the GPU tier takes its storage for
-// these routed experts (one layer's tensors give the format) and grows into what the host-memory ledger leaves,
-// after the RAM cache's demand; elsewhere (with a GPU tier or without) a RAM cache kept across requests that can give
-// room back (CACHE_PARTIAL_RECLAIM or CACHE_ELASTIC) takes its geometry from the tensors' strides, its arena and the
+// At load, after the context reserved its worst-case graph, with the routed layers' expert tensors (`experts`: up,
+// gate and down of each of n_layers layers): with a GPU tier, the sink keeps each layer's expert types, which it
+// declares to the tier with every layer it gives it, once it has them for every configured layer; the layers must
+// share latent, hidden and the expert count. Then on unified memory the GPU tier takes its storage for these routed
+// experts (slots of the largest) and grows into what the host-memory ledger leaves, after the RAM cache's demand;
+// elsewhere (with a GPU tier or without) a RAM cache kept across requests that can give room back
+// (CACHE_PARTIAL_RECLAIM or CACHE_ELASTIC) takes its geometry from the largest layer's strides, its arena and the
 // pages of the slots the ledger admits now. A cache that cannot give room back takes nothing here: it is sized at
 // the first decode token, after the first prefill's ledger requests, which an arena made now would refuse.
 // experts_used: the model's routed experts a token.
-GGML_BACKEND_API bool kimi_cpu_sink_vram_reserve(struct kimi_cpu_sink * sink, const struct ggml_tensor * up,
-        const struct ggml_tensor * gate, const struct ggml_tensor * down, int experts_used, char * error,
-        size_t error_size);
+GGML_BACKEND_API bool kimi_cpu_sink_vram_reserve(struct kimi_cpu_sink * sink, const struct ggml_tensor * const * experts,
+        int n_layers, int experts_used, char * error, size_t error_size);
 GGML_BACKEND_API void kimi_cpu_sink_cache_get_stats(
         struct kimi_cpu_sink * sink, struct kimi_cpu_sink_cache_stats * stats);
 // Room in host memory for other memory about to be allocated, decided by the host-memory ledger
