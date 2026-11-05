@@ -383,8 +383,8 @@ struct sink_slot {
 
 // Diagnostic only. All times use the scheduler's CLOCK_MONOTONIC microseconds.
 // An I/O completion is when this process observes the CQE, not a device timestamp.
-// The I/O thread and each worker write disjoint fields; print only after io_done
-// and the compute barriers. No extra synchronization is added to the data path.
+// The I/O (its thread, or a run that reads for itself) and each worker write disjoint fields; print only after
+// io_done and the compute barriers. No extra synchronization is added to the data path.
 struct alignas(64) sink_timeline_worker {
     uint64_t begin = 0, end = 0;
     double cpu_us = 0;
@@ -658,6 +658,14 @@ struct kimi_cpu_sink {
     std::thread io_thread;
     bool io_stop = false, io_job = false, io_done = true, io_cancel = false, poisoned = false;
     std::string io_error;
+    // A run's reads: the next of io_requests to queue, those submitted and not completed, whether one failed or the
+    // run was cancelled (none is queued after that), and when they started. The I/O thread works them through
+    // (io_execute), or a decode run that reads for itself (io_by_run, until they are over: io_poll). The ring has one
+    // owner at a time.
+    size_t io_next = 0;
+    unsigned io_inflight = 0;
+    bool io_failed = false, io_by_run = false;
+    sink_clock::time_point io_start;
     kimi_cpu_sink_stats current = {};
 
     const bool ready_first;
@@ -977,8 +985,8 @@ struct kimi_cpu_sink {
         else if (job.done == 3) { job.state = 1; }
         else if (job.running == 0 && job.queued == 0) { job.state = 2; }
     }
-    // The I/O thread calls this when a run's own reads are done, a decode run without any when it schedules: the
-    // drive's idle window starts, and the reads of the next layer may begin.
+    // When a run's own reads are done (io_end), or when a decode run without any schedules: the drive's idle window
+    // starts, and the reads of the next layer may begin.
     void prefetch_open_gate() {
         {
             std::lock_guard<std::mutex> lock(prefetch.mutex);
@@ -1567,7 +1575,8 @@ struct kimi_cpu_sink {
     }
 
     // The decode participants for this run's threads: all of them, or the first ones that fit the fastest cluster,
-    // one of whose CPUs stays with the I/O thread; cpu.decode_participants fixes the count. With strict placement
+    // one of whose CPUs stays with the threads that read beside them (the prefetch's readers, and the I/O thread
+    // outside a decode run that reads for itself); cpu.decode_participants fixes the count. With strict placement
     // ggml thread i runs on the i-th CPU of its mask.
     void decode_threads_setup() {
         const int fixed = configuration.policy.decode_participants;
@@ -2032,7 +2041,7 @@ struct kimi_cpu_sink {
             if (!io_done) {
                 io_cancel = true;
                 io_cv.notify_all();
-                io_cv.wait(lock, [&] { return io_done; });
+                io_wait(lock, [&] { return io_done; });
             }
         }
         wait_workers();
@@ -2239,158 +2248,245 @@ struct kimi_cpu_sink {
             io_cv.wait(lock, [&] { return io_stop || io_job; });
             if (io_stop) { return; }
             io_job = false;
+            io_start = sink_clock::now();
             lock.unlock();
-            const auto start = sink_clock::now();
             const double cpu_start = profile_enabled ? sink_thread_cpu_us() : 0.0;
             try {
                 io_execute();
             } catch (const std::exception & e) {
-                // A broken ring cannot be reused. If it cannot even drain, end
-                // the process rather than return user buffers still owned by I/O.
-                try {
-                    sink_io_value(ring.drain(this, [](void * userdata, const sink_completion & cqe) {
-                        static_cast<kimi_cpu_sink *>(userdata)->account_read_bytes(cqe);
-                    }));
-                } catch (const std::exception & drain_error) {
-                    std::fprintf(stderr, "[kimi_cpu_sink] cannot drain I/O after %s: %s; aborting\n",
-                                 e.what(), drain_error.what());
-                    std::abort();
-                }
-                ring.close_ring();
-                std::lock_guard<std::mutex> error_lock(io_mutex);
-                poisoned = true;
-                io_error = e.what();
-                ++current.read_errors;
+                io_break(e);
             }
             lock.lock();
-            current.io_us = elapsed_us(start);
             if (profile_enabled) { current.io_cpu_us = sink_thread_cpu_us() - cpu_start; }
-            if (timeline_active) { timeline_call[4] = ggml_time_us(); }
-            io_done = true;
-            prefetch_open_gate();
-            io_cv.notify_all();
+            io_end();
         }
     }
 
+    // A broken ring cannot be reused. If it cannot even drain, end the process rather than return user buffers
+    // still owned by I/O.
+    void io_break(const std::exception & e) {
+        try {
+            sink_io_value(ring.drain(this, [](void * userdata, const sink_completion & cqe) {
+                static_cast<kimi_cpu_sink *>(userdata)->account_read_bytes(cqe);
+            }));
+        } catch (const std::exception & drain_error) {
+            std::fprintf(stderr, "[kimi_cpu_sink] cannot drain I/O after %s: %s; aborting\n",
+                         e.what(), drain_error.what());
+            std::abort();
+        }
+        ring.close_ring();
+        io_inflight = 0;
+        io_failed = true;
+        std::lock_guard<std::mutex> error_lock(io_mutex);
+        poisoned = true;
+        io_error = e.what();
+        ++current.read_errors;
+    }
+
+    // io_mutex held: the run's reads are over, and the drive's idle window opens for the next layer's prefetch.
+    void io_end() {
+        current.io_us = elapsed_us(io_start);
+        if (timeline_active) { timeline_call[4] = ggml_time_us(); }
+        io_done = true;
+        io_by_run = false;
+        prefetch_open_gate();
+        io_cv.notify_all();
+    }
+
     void io_execute() {
-        size_t next = 0;
-        unsigned inflight = 0;
-        bool failed = false;
-        while (next < io_requests.size() || inflight) {
-            const size_t batch_begin = next;
-            unsigned queued = 0;
-            {
-                std::lock_guard<std::mutex> lock(io_mutex);
-                failed = failed || io_cancel;
-                auto queue_role = [&](size_t ordinal, unsigned role) {
-                    const size_t index = ordinal % slots.size();
-                    auto & request = requests[io_requests[ordinal]];
-                    const bool cache_fill = request.cache_admit >= 0;
-                    const bool external_target = cache_fill ||
-                        (request.vram_ssd_transient && !request.vram_ssd_streaming);
-                    const bool fixed = ring.read_fixed() && !external_target;
-                    sink_io_value(ring.queue({request.role[role].fd_direct, request.role[role].offset, request.role[role].nbytes},
-                        request.read_target[role], 3 * index + role, fixed));
-                    ++queued;
-                    ++current.read_requests;
-                    if (cache_fill) { ++current.cache_fill_read_requests; }
-                    else { ++current.ring_read_requests; }
-                    if (fixed) { ++current.fixed_read_requests; }
-                };
-                while (!failed && next < io_requests.size()) {
-                    const size_t index = next % slots.size();
-                    sink_slot & slot = slots[index];
-                    if (slot.state != sink_slot::empty) { break; }
-                    slot.state = sink_slot::reading;
-                    slot.remaining = 3;
-                    slot.ready_roles = 0;
-                    slot.request = io_requests[next];
-                    if (timeline_active) { timeline[slot.request].io[0] = ggml_time_us(); }
-                    auto & request = requests[slot.request];
-                    if (cache_compute_active) { request.events[0] = ggml_time_us(); }
-                    if (!role_major) { for (unsigned role = 0; role < 3; ++role) { queue_role(next, role); } }
-                    ++next;
-                }
-                if (role_major) {
-                    // Keep one submit for the whole batch, but put every
-                    // expert's up/gate before any down so early-up-gate can
-                    // overlap the CPU work with the streamed down reads.
-                    for (size_t j = batch_begin; j < next; ++j) {
-                        queue_role(j, 0);
-                        queue_role(j, 1);
-                    }
-                    for (size_t j = batch_begin; j < next; ++j) { queue_role(j, 2); }
-                }
-            }
-            if (queued) {
-                const uint64_t submit_begin = timeline_active || cache_compute_active ? ggml_time_us() : 0;
-                sink_io_value(ring.submit(queued)); inflight += queued;
-                if (cache_compute_active) {
-                    const uint64_t end = ggml_time_us();
-                    for (size_t j = batch_begin; j < next; ++j) {
-                        requests[io_requests[j]].events[1] = submit_begin;
-                        requests[io_requests[j]].events[2] = end;
-                    }
-                }
-                if (timeline_active) {
-                    const uint64_t submit_end = ggml_time_us();
-                    for (size_t j = batch_begin; j < next; ++j) {
-                        auto & t = timeline[io_requests[j]];
-                        t.io[1] = submit_begin; t.io[2] = submit_end;
-                    }
-                }
-            }
-            sink_completion cqe;
-            bool consumed = false;
-            while (sink_io_value(ring.pop(cqe))) {
-                consumed = true;
-                if (!inflight || cqe.user_data >= 3 * slots.size()) {
-                    throw std::runtime_error("invalid CPU sink CQE");
-                }
-                --inflight;
-                const size_t index = cqe.user_data / 3;
-                const unsigned role = static_cast<unsigned>(cqe.user_data % 3);
-                std::lock_guard<std::mutex> lock(io_mutex);
-                sink_slot & slot = slots[index];
-                if (timeline_active) { timeline[slot.request].io[3 + role] = ggml_time_us(); }
-                if (cache_compute_active) { requests[slot.request].events[3 + role] = ggml_time_us(); }
-                const auto & range = requests[slot.request].role[role];
-                const size_t expected = range.nbytes;
-                const size_t required = range.payload_nbytes ? range.data_offset + range.payload_nbytes : expected;
-                account_read_bytes(cqe);
-                // A final GGUF payload may end before the rounded physical
-                // read does. Accept only a complete logical payload, never a
-                // truncated weight, and preserve the actual CQE byte count.
-                if (cqe.res < 0 || size_t(cqe.res) < required || size_t(cqe.res) > expected) {
-                    ++current.read_errors;
-                    failed = true;
-                    if (io_error.empty()) {
-                        io_error = "direct expert read failed/short: result=" + std::to_string(cqe.res) +
-                                   " expected=" + std::to_string(expected);
-                    }
-                } else {
-                    slot.ready_roles |= 1u << role;
-                }
-                if (!--slot.remaining) {
-                    slot.state = sink_slot::ready;
-                    if (cache_compute_active && slot.ready_roles == 7u) { requests[slot.request].ready_us = ggml_time_us(); }
-                }
-                io_cv.notify_all();
-            }
-            if (failed && !inflight) { return; }
-            if (inflight && !consumed) {
+        io_next = 0;
+        io_inflight = 0;
+        io_failed = false;
+        while (io_next < io_requests.size() || io_inflight) {
+            io_issue();
+            const bool consumed = io_reap();
+            if (io_failed && !io_inflight) { return; }
+            if (io_inflight && !consumed) {
                 const auto wait_start = profile_enabled ? sink_clock::now() : sink_clock::time_point();
                 sink_io_value(ring.wait());
                 if (profile_enabled) { current.io_wait_us += elapsed_us(wait_start); }
-            } else if (!inflight && next < io_requests.size()) {
+            } else if (!io_inflight && io_next < io_requests.size()) {
                 // Always timed: the drive is idle here, and the prefill cost model takes the drive rate
                 // from the read bytes over the I/O time without these waits.
                 const auto wait_start = sink_clock::now();
                 std::unique_lock<std::mutex> lock(io_mutex);
-                io_cv.wait(lock, [&] { return io_cancel || slots[next % slots.size()].state == sink_slot::empty; });
+                io_cv.wait(lock, [&] { return io_cancel || slots[io_next % slots.size()].state == sink_slot::empty; });
                 current.io_credit_wait_us += elapsed_us(wait_start);
             }
         }
+    }
+
+    // Queues the run's next reads, as many as the free ring slots take, and submits them.
+    void io_issue() {
+        const size_t batch_begin = io_next;
+        unsigned queued = 0;
+        {
+            std::lock_guard<std::mutex> lock(io_mutex);
+            io_failed = io_failed || io_cancel;
+            auto queue_role = [&](size_t ordinal, unsigned role) {
+                const size_t index = ordinal % slots.size();
+                auto & request = requests[io_requests[ordinal]];
+                const bool cache_fill = request.cache_admit >= 0;
+                const bool external_target = cache_fill ||
+                    (request.vram_ssd_transient && !request.vram_ssd_streaming);
+                const bool fixed = ring.read_fixed() && !external_target;
+                sink_io_value(ring.queue({request.role[role].fd_direct, request.role[role].offset, request.role[role].nbytes},
+                    request.read_target[role], 3 * index + role, fixed));
+                ++queued;
+                ++current.read_requests;
+                if (cache_fill) { ++current.cache_fill_read_requests; }
+                else { ++current.ring_read_requests; }
+                if (fixed) { ++current.fixed_read_requests; }
+            };
+            while (!io_failed && io_next < io_requests.size()) {
+                const size_t index = io_next % slots.size();
+                sink_slot & slot = slots[index];
+                if (slot.state != sink_slot::empty) { break; }
+                slot.state = sink_slot::reading;
+                slot.remaining = 3;
+                slot.ready_roles = 0;
+                slot.request = io_requests[io_next];
+                if (timeline_active) { timeline[slot.request].io[0] = ggml_time_us(); }
+                auto & request = requests[slot.request];
+                if (cache_compute_active) { request.events[0] = ggml_time_us(); }
+                if (!role_major) { for (unsigned role = 0; role < 3; ++role) { queue_role(io_next, role); } }
+                ++io_next;
+            }
+            if (role_major) {
+                // Keep one submit for the whole batch, but put every
+                // expert's up/gate before any down so early-up-gate can
+                // overlap the CPU work with the streamed down reads.
+                for (size_t j = batch_begin; j < io_next; ++j) {
+                    queue_role(j, 0);
+                    queue_role(j, 1);
+                }
+                for (size_t j = batch_begin; j < io_next; ++j) { queue_role(j, 2); }
+            }
+        }
+        if (!queued) { return; }
+        const uint64_t submit_begin = timeline_active || cache_compute_active ? ggml_time_us() : 0;
+        sink_io_value(ring.submit(queued)); io_inflight += queued;
+        if (cache_compute_active) {
+            const uint64_t end = ggml_time_us();
+            for (size_t j = batch_begin; j < io_next; ++j) {
+                requests[io_requests[j]].events[1] = submit_begin;
+                requests[io_requests[j]].events[2] = end;
+            }
+        }
+        if (timeline_active) {
+            const uint64_t submit_end = ggml_time_us();
+            for (size_t j = batch_begin; j < io_next; ++j) {
+                auto & t = timeline[io_requests[j]];
+                t.io[1] = submit_begin; t.io[2] = submit_end;
+            }
+        }
+    }
+
+    // Takes every completion the ring has; false when it had none.
+    bool io_reap() {
+        sink_completion cqe;
+        bool consumed = false;
+        while (sink_io_value(ring.pop(cqe))) {
+            consumed = true;
+            if (!io_inflight || cqe.user_data >= 3 * slots.size()) {
+                throw std::runtime_error("invalid CPU sink CQE");
+            }
+            --io_inflight;
+            const size_t index = cqe.user_data / 3;
+            const unsigned role = static_cast<unsigned>(cqe.user_data % 3);
+            std::lock_guard<std::mutex> lock(io_mutex);
+            sink_slot & slot = slots[index];
+            if (timeline_active) { timeline[slot.request].io[3 + role] = ggml_time_us(); }
+            if (cache_compute_active) { requests[slot.request].events[3 + role] = ggml_time_us(); }
+            const auto & range = requests[slot.request].role[role];
+            const size_t expected = range.nbytes;
+            const size_t required = range.payload_nbytes ? range.data_offset + range.payload_nbytes : expected;
+            account_read_bytes(cqe);
+            // A final GGUF payload may end before the rounded physical
+            // read does. Accept only a complete logical payload, never a
+            // truncated weight, and preserve the actual CQE byte count.
+            if (cqe.res < 0 || size_t(cqe.res) < required || size_t(cqe.res) > expected) {
+                ++current.read_errors;
+                io_failed = true;
+                if (io_error.empty()) {
+                    io_error = "direct expert read failed/short: result=" + std::to_string(cqe.res) +
+                               " expected=" + std::to_string(expected);
+                }
+            } else {
+                slot.ready_roles |= 1u << role;
+            }
+            if (!--slot.remaining) {
+                slot.state = sink_slot::ready;
+                if (cache_compute_active && slot.ready_roles == 7u) { requests[slot.request].ready_us = ggml_time_us(); }
+            }
+            io_cv.notify_all();
+        }
+        return consumed;
+    }
+
+    // A decode run's reads go out as soon as prepare has given them targets, before the input's quantization and
+    // the GPU's launch. On the nonblocking schedule the run reads for itself: its coordinator submits them and takes
+    // their completions while it waits for them (io_poll), so none waits for a thread to wake, and no thread sleeps
+    // while they are in flight. The other schedules hand them to the I/O thread.
+    void io_begin_decode() {
+        {
+            std::lock_guard<std::mutex> lock(io_mutex);
+            io_error.clear();
+            io_cancel = false;
+            if (timeline_active) { timeline_call[3] = ggml_time_us(); }
+            if (io_requests.empty()) { return; }
+            io_done = false;
+            io_by_run = nonblocking_down_sched;
+            if (!io_by_run) { io_job = true; }
+        }
+        if (!io_by_run) { io_cv.notify_one(); return; }
+        io_next = 0;
+        io_inflight = 0;
+        io_failed = false;
+        io_start = sink_clock::now();
+        io_step();
+    }
+
+    // A run that reads for itself: queues what the free ring slots take and takes the completions the ring has;
+    // its reads are over once none is left to queue or in flight. True when a completion came.
+    bool io_step() {
+        bool consumed = false;
+        try {
+            io_issue();
+            consumed = io_reap();
+        } catch (const std::exception & e) {
+            io_break(e);
+        }
+        if (!io_inflight && (io_failed || io_next == io_requests.size())) {
+            std::lock_guard<std::mutex> lock(io_mutex);
+            io_end();
+        }
+        return consumed;
+    }
+
+    // The coordinator of a run that reads for itself, between its looks for work: one step of its reads, and when
+    // no completion came, a yield of its CPU, to a thread that shares it (the GPU tier's) or straight back to it.
+    // True when a completion came.
+    bool io_poll() {
+        const bool consumed = io_by_run && io_step();
+        if (!consumed) { std::this_thread::yield(); }
+        return consumed;
+    }
+
+    // io_mutex held (lock): polls until ready(), taking the run's own reads meanwhile.
+    template <class Ready> void io_poll_until(std::unique_lock<std::mutex> & lock, Ready ready) {
+        while (!ready()) {
+            lock.unlock();
+            io_poll();
+            lock.lock();
+        }
+    }
+
+    // io_mutex held (lock): waits until ready(), polling when the run reads for itself, else until the I/O thread
+    // notifies.
+    template <class Ready> void io_wait(std::unique_lock<std::mutex> & lock, Ready ready) {
+        if (io_by_run) { io_poll_until(lock, ready); }
+        else { io_cv.wait(lock, ready); }
     }
 
     template<class T> void resize_scratch(std::vector<T> & values, size_t count) {
@@ -2716,7 +2812,9 @@ struct kimi_cpu_sink {
                     }
                     if (!batch.empty()) { work = down_work; }
                 };
-                io_cv.wait(lock, [&] {
+                // The coordinator does not sleep here: the reads it waits for, its own or a prefetch's, take
+                // milliseconds.
+                io_poll_until(lock, [&] {
                     if (!io_error.empty()) { return true; }
                     choose();
                     if (work != no_work || prefetch_hit_failed()) { return true; }
@@ -2867,7 +2965,6 @@ struct kimi_cpu_sink {
                 ++down_ordinal;
                 ++finished;
             }
-            io_cv.notify_one();
         }
     }
 
@@ -3683,6 +3780,8 @@ extern "C" bool kimi_cpu_sink_run_activation(
             sink->timeline_call[1] = ggml_time_us();
         }
         sink->output = output;
+        sink->plan.start = sink_clock::now();
+        sink->io_begin_decode();
         auto compute_start = sink_clock::now();
         double quant_cpu_start = sink->profile_enabled ? sink_thread_cpu_us() : 0.0;
         sink->quantize_input(input, sink->quant_input.data(), sink->latent);
@@ -3692,15 +3791,6 @@ extern "C" bool kimi_cpu_sink_run_activation(
         sink->current.compute_us += sink->current.input_quantize_us;
         sink->vram.launch(input, size_t(sink->latent) * sizeof(float), *activation);
         if (sink->timeline_active) { sink->timeline_call[2] = ggml_time_us(); }
-        sink->plan.start = sink_clock::now();
-        {
-            std::lock_guard<std::mutex> lock(sink->io_mutex);
-            sink->io_error.clear();
-            sink->io_cancel = false;
-            if (sink->timeline_active) { sink->timeline_call[3] = ggml_time_us(); }
-            if (!sink->io_requests.empty()) { sink->io_done = false; sink->io_job = true; }
-        }
-        sink->io_cv.notify_one();
         sink->prefetch_schedule(up, !sink->io_requests.empty());
         // The plan reads nothing the reads change (its landing times start at plan.start): planned once they run.
         sink->plan_decode_layer();
@@ -3801,7 +3891,7 @@ extern "C" bool kimi_cpu_sink_run_activation(
         {
             const auto wait_start = sink_clock::now();
             std::unique_lock<std::mutex> lock(sink->io_mutex);
-            sink->io_cv.wait(lock, [&] { return sink->io_done; });
+            sink->io_wait(lock, [&] { return sink->io_done; });
             sink->current.wait_io_us += elapsed_us(wait_start);
             if (!sink->io_error.empty()) { throw std::runtime_error(sink->io_error); }
         }

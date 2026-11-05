@@ -24,12 +24,15 @@ public:
         // count is zero until decode requests it, and it stays out of the earned statistics, which price decode's
         // own admissions. The first decode request makes it an ordinary entry, admitted at that request's count.
         bool seed = false;
+        // keyed: the key names an expert (an admission or a seed set it, and no reset since); see find
+        bool keyed = false;
     };
     struct layer {
         size_t begin = 0, count = 0;
         uint64_t observed = 0;
         std::vector<double> counts; // one entry per routed expert of the layer
         std::vector<uint16_t> held; // per routed expert: the slots that hold it (see holds)
+        std::vector<std::vector<uint32_t>> keyed; // per routed expert: the keyed slots with its key, ascending
         mutable uint64_t score_step = 0;
         mutable double score_factor = 1;
     };
@@ -103,7 +106,9 @@ public:
         pool_layers = priority;
         for(int id:priority)if(id<first_layer || id>last_layer)throw std::runtime_error("VRAM layer priority range");
         layers.resize(*std::max_element(priority.begin(),priority.end())+1);
-        for(auto & l:layers){l.counts.assign(size_t(experts),0.0);l.held.assign(size_t(experts),0);}
+        for(auto & l:layers){
+            l.counts.assign(size_t(experts),0.0);l.held.assign(size_t(experts),0);l.keyed.assign(size_t(experts),{});
+        }
         std::vector<bool> seen(layers.size());
         size_t assigned=0;
         for(size_t i=0;i<priority.size();++i) {
@@ -161,16 +166,40 @@ public:
     // decode phase completes the prefill (phase_complete), Q2's cold-prefill admission right after its own copy. The
     // next-layer prefetch asks before it reads an expert into RAM. (layer, expert) stands for the key: one model's
     // experts have one source each. Every change of a slot's key, valid, uploading or seed goes through change(),
-    // which keeps the count.
+    // which keeps the count and the index of keyed slots (find).
     bool holds(int layer,int expert) const {
         return layer>=0 && size_t(layer)<layers.size() && expert>=0 && size_t(expert)<layers[layer].held.size() &&
             layers[layer].held[size_t(expert)]>0;
     }
     static bool held_by(const entry & e) { return e.valid || (e.uploading && !e.seed); }
     template<class F> void change(entry & e,F && update) {
+        const uint32_t slot=uint32_t(&e-slots.data());
+        const bool was=e.keyed;const int32_t layer=e.key.layer,expert=e.key.expert;
         if(held_by(e))--layers[e.key.layer].held[size_t(e.key.expert)];
         update(e);
         if(held_by(e))++layers[e.key.layer].held[size_t(e.key.expert)];
+        const bool same_expert=layer==e.key.layer && expert==e.key.expert;
+        if(was==e.keyed && (!was || same_expert))return; // the index has the slot where it was
+        if(was){
+            auto & v=layers[size_t(layer)].keyed[size_t(expert)];const auto it=std::find(v.begin(),v.end(),slot);
+            if(it==v.end())throw std::runtime_error("VRAM slot index lost a slot");
+            v.erase(it);
+        }
+        if(e.keyed){
+            auto & v=layers[size_t(e.key.layer)].keyed[size_t(e.key.expert)];
+            v.insert(std::upper_bound(v.begin(),v.end(),slot),slot);
+        }
+    }
+    // The first slot of the request's layer range whose key is the request's and for which take(slot) holds, or -1;
+    // the slots it looks at are the keyed ones with the request's expert, in slot order. A slot without a key keeps
+    // the default one, which no request's sources match.
+    template<class P> int find(const kimi_vram_request & request,P && take) const {
+        const auto & l=layers[size_t(request.layer)];
+        for(const uint32_t i:l.keyed[size_t(request.expert)]){
+            const auto & e=slots[i];
+            if(i>=l.begin && i<l.begin+l.count && take(e) && same(e.key,request))return int(i);
+        }
+        return -1;
     }
     // The native consumer cancelled: no payload is valid any more; heat stays.
     void invalidate() {
@@ -179,7 +208,11 @@ public:
     void clear() {
         if(in_flight || lease_generation || native_pinned()) { throw std::runtime_error("clear with live VRAM slots"); }
         for(auto & e:slots)e={};
-        for(auto & l:layers){std::fill(l.counts.begin(),l.counts.end(),0.0);std::fill(l.held.begin(),l.held.end(),0);l.observed=l.score_step=0;l.score_factor=1;}
+        for(auto & l:layers){
+            std::fill(l.counts.begin(),l.counts.end(),0.0);std::fill(l.held.begin(),l.held.end(),0);
+            for(auto & v:l.keyed)v.clear();
+            l.observed=l.score_step=0;l.score_factor=1;
+        }
         hits.clear();admissions.clear();requests.clear();step=clock=origin=0;
     }
     void next_token() { if(in_flight || lease_generation || native_pinned())throw std::runtime_error("token with live VRAM slots");++step; }
@@ -217,15 +250,14 @@ public:
         // that appears after a miss in the original router order. A seed's
         // first hit stands where an admission's miss would: from it on the
         // entry earns, and is accounted, as one admitted at this count.
-        for(size_t j=0;j<n;++j)for(size_t i=l.begin;i<l.begin+l.count;++i) {
+        for(size_t j=0;j<n;++j) {
             if(!(demand_mask&(1u<<j)))continue;
-            auto & e=slots[i];
-            if(e.valid && same(e.key,requests[j])){
-                e.locked=true;e.touched=++clock;hits[j]=int(i);
-                if(e.seed){e.seed=false;e.admit_count=count_decay?mature(l.counts[requests[j].expert]):1;e.hits_since_admit=0;}
-                else ++e.hits_since_admit;
-                break;
-            }
+            const int i=find(requests[j],[](const entry & e){return e.valid;});
+            if(i<0)continue;
+            auto & e=slots[size_t(i)];
+            e.locked=true;e.touched=++clock;hits[j]=i;
+            if(e.seed){e.seed=false;e.admit_count=count_decay?mature(l.counts[requests[j].expert]):1;e.hits_since_admit=0;}
+            else ++e.hits_since_admit;
         }
         std::vector<size_t> order;
         for(size_t i=0;i<n;++i)if((demand_mask&(1u<<i))&&hits[i]<0)order.push_back(i);
@@ -235,7 +267,7 @@ public:
         for(size_t j:order) {
             const double count=l.counts[requests[j].expert];
             if(count_decay && admission_hits<0 && count<minimum_count)continue;
-            if(std::any_of(slots.begin()+l.begin,slots.begin()+l.begin+l.count,[&](const entry & e){return (e.locked || e.native_refs || e.uploading) && same(e.key,requests[j]);}))continue;
+            if(find(requests[j],[](const entry & e){return e.locked || e.native_refs || e.uploading;})>=0)continue;
             int victim=-1;
             for(size_t i=l.begin;i<l.begin+l.count;++i) {
                 const auto & e=slots[i];if(e.locked || e.native_refs || e.uploading)continue;
@@ -251,7 +283,7 @@ public:
                 for(int s=0;s<earned_steps;++s){earned_hits[s]*=0.999;earned_weight[s]*=0.999;}
                 const int s=earned_step(e.admit_count);earned_hits[s]+=e.hits_since_admit;earned_weight[s]+=1;++earned_samples;
             }
-            change(e,[&](entry & x){evictions+=x.valid;x.valid=false;x.seed=false;x.locked=true;x.key=requests[j];x.touched=++clock;});
+            change(e,[&](entry & x){evictions+=x.valid;x.valid=false;x.seed=false;x.locked=true;x.key=requests[j];x.keyed=true;x.touched=++clock;});
             admissions[j]=victim;
             e.admit_count=count_decay?mature(count):1;e.hits_since_admit=0;
         }
@@ -285,15 +317,12 @@ public:
                 size_t(request.layer)>=layers.size() || request.expert<0 || request.expert>=experts) {
             throw std::runtime_error("invalid cold-prefill VRAM reservation phase");
         }
+        if(find(request,[](const entry & e){return e.valid || e.uploading;})>=0)return -1;
         const auto & l=layers[request.layer];
-        for(size_t i=l.begin;i<l.begin+l.count;++i) {
-            const auto & e=slots[i];
-            if((e.valid || e.uploading) && same(e.key,request))return -1;
-        }
         for(size_t i=l.begin;i<l.begin+l.count;++i) {
             auto & e=slots[i];
             if(e.valid || e.locked || e.native_refs || e.uploading)continue;
-            change(e,[&](entry & x){x.key=request;x.touched=++clock;x.uploading=true;x.seed=true;x.admit_count=0;x.hits_since_admit=0;});
+            change(e,[&](entry & x){x.key=request;x.keyed=true;x.touched=++clock;x.uploading=true;x.seed=true;x.admit_count=0;x.hits_since_admit=0;});
             return int(i);
         }
         return -1;
@@ -328,9 +357,11 @@ public:
         if(e.uploading && !e.valid && same(e.key,request))change(e,[](entry & x){x={};});
     }
     void cancel_cold_prefill(size_t slot,const kimi_vram_request & request) { cancel_upload(slot,request); }
+    // Only prepare locks a slot in flight: its hits and its admissions.
     void finish() {
         if(!in_flight)throw std::runtime_error("VRAM finish without prepare");
-        for(auto & e:slots)e.locked=false;
+        for(int s:hits)if(s>=0)slots[size_t(s)].locked=false;
+        for(int s:admissions)if(s>=0)slots[size_t(s)].locked=false;
         in_flight=false;
     }
     uint64_t acquire_ready(const kimi_vram_request * input, size_t n, int * ready) {
@@ -350,14 +381,10 @@ public:
             throw std::runtime_error("invalid VRAM grouped-prefill lease phase");
         }
         for (size_t j = 0; j < n; ++j) {
-            found[j] = -1;
             if (input[j].layer < first_layer || size_t(input[j].layer) >= layers.size() || input[j].expert < 0 || input[j].expert >= experts)
                 throw std::runtime_error("invalid VRAM residency key");
-            const auto & l = layers[input[j].layer];
-            for (size_t i = l.begin; i < l.begin + l.count; ++i) {
-                auto & e = slots[i];
-                if (e.valid && same(e.key, input[j])) { e.locked = true; found[j] = int(i); break; }
-            }
+            found[j] = find(input[j], [](const entry & e) { return e.valid; });
+            if (found[j] >= 0) { slots[size_t(found[j])].locked = true; }
         }
         return lease_generation = ++next_generation;
     }
