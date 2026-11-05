@@ -57,7 +57,6 @@ def test_typed_artifact_chain(record, tmp_path):
         default_threads=old_host["cpu_count"],
         ss_available=True,
         port_busy=old_host["port_busy"],
-        has_uring=old_host["uring"],
         cgroup_v2=record["cgroup_v2"],
         memory_kib=[old_host["mem_total_kib"], old_host["mem_available_kib"]],
         euid=record["uid"],

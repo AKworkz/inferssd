@@ -18,7 +18,7 @@
 - [Native observations](architecture/native-observations.md): the routes, layer costs and prefill summaries a run's native events carry.
 - [Runtime telemetry](telemetry.md): the versioned JSONL writer and reader.
 - [Typed reader configuration](ssd-reader-configuration.md): reader settings, ownership and fixtures.
-- Architecture decisions: [owned runtime](adr/0001-owned-runtime.md), [I/O boundaries](adr/0002-io-boundaries.md), [resource admission](adr/0003-resource-admission.md) and [configuration and evidence](adr/0004-configuration-and-evidence.md).
+- Architecture decisions: [owned runtime](adr/0001-owned-runtime.md), [I/O boundaries](adr/0002-io-boundaries.md) (superseded by [one read ring per OS](adr/0005-one-read-ring.md)), [resource admission](adr/0003-resource-admission.md) and [configuration and evidence](adr/0004-configuration-and-evidence.md).
 
 ## Benchmarks and testing
 

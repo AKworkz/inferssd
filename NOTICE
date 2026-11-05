@@ -116,5 +116,5 @@ note acknowledges its origin and does not relicense it.
 External runtime dependencies
 -----------------------------
 
-liburing is not vendored. Binary distributions must comply with its selected
-license (the MIT option is available) and the NVIDIA CUDA runtime terms.
+Binary distributions built with CUDA must comply with the NVIDIA CUDA runtime
+terms.

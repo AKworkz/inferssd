@@ -41,7 +41,6 @@ def test_a_settings_file_is_read_as_utf8_whatever_the_locale(tmp_path):
     "name,value",
     [
         ("gpu_available", "false"),
-        ("has_uring", "false"),
         ("ss_available", 0),
         ("euid", "0"),
         ("euid", False),

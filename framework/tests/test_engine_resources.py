@@ -138,10 +138,6 @@ class Host:
         self.events.append(("which", name))
         return True
 
-    def contains(self, path, needle):
-        self.events.append(("contains", path))
-        return path == "first"
-
     def exists(self, path):
         self.events.append(("exists", path))
         return path == "/fixture"
@@ -185,8 +181,6 @@ def test_host_is_lazy_and_short_circuits_original_facts():
         python="fixture-python",
     )
     assert host.events == []
-    assert adapter(Fact("has_uring", ("first", "never"))).value is True
-    assert host.events == [("contains", "first")]
     assert adapter(Fact("memory_kib")).value == (4000, 2000)
     host.replies["nproc"] = Command(0, "8\n")
     assert adapter(Fact("default_threads")).value == "8"

@@ -6,7 +6,6 @@
   "default_threads": "8",
   "ss_available": true,
   "port_busy": "",
-  "has_uring": true,
   "cgroup_v2": true,
   "memory_kib": [
     16777216,

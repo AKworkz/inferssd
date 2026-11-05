@@ -65,7 +65,6 @@ def test_native_refusal_matches_original_shell_boundary(case):
 
 REFUSALS = [
     ("port-busy", {}, "Port 18181 is already in use", "port_busy"),
-    ("dense-no-uring", {}, "DENSE_HOMES", "has_uring"),
     ("busy", {}, "The GPU already runs", "gpu_processes"),
     ("base", {"cgroup_v2": False}, "cgroup v2 is required", "cgroup_v2"),
     ("insufficient-memory", {}, "Only ", "memory_kib"),

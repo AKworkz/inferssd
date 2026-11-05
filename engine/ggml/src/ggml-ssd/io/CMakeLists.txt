@@ -24,8 +24,3 @@ target_include_directories(ggml-ssd-pool-ring PUBLIC "${CMAKE_CURRENT_SOURCE_DIR
 set_target_properties(ggml-ssd-pool-ring PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(ggml-ssd-pool-ring PUBLIC ggml-ssd-platform)
 target_link_libraries(ggml-ssd INTERFACE ggml-ssd-pool-ring)
-
-# The io_uring object transport is POSIX code; Windows reads through win-ring.
-if (UNIX)
-    include("${CMAKE_CURRENT_SOURCE_DIR}/object-uring.cmake")
-endif()

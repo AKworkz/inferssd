@@ -15,7 +15,7 @@ main() (
 Install InferSSD from source for Apple Silicon macOS or Linux x86_64/ARM64.
 Requires Git, Python >=3.9 with venv and a C/C++ compiler.
 macOS requires the Xcode Command Line Tools; the engine runs on the Apple GPU.
-Linux requires liburing development headers, and systemd/cgroup v2 at runtime.
+Linux requires systemd and cgroup v2 at runtime.
 The engine is built for the machine's GPUs: with an NVIDIA GPU it uses CUDA and
 needs the CUDA toolkit; with an AMD or Intel GPU it uses Vulkan when the Vulkan
 SDK (glslc) is installed; otherwise it runs on the CPU.
@@ -45,11 +45,7 @@ EOF
     python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || die 'Python >=3.9 is required.'
     case "$(uname -s):$(uname -m)" in
         Darwin:arm64) system=darwin ;;
-        Linux:x86_64|Linux:aarch64|Linux:arm64)
-            system=linux
-            printf '#include <liburing.h>\n' | cc -E - >/dev/null 2>&1 ||
-                die 'Install liburing development headers (e.g. liburing-dev).'
-            ;;
+        Linux:x86_64|Linux:aarch64|Linux:arm64) system=linux ;;
         *) die 'Supported platforms: Apple Silicon macOS and Linux x86_64/ARM64.' ;;
     esac
     install_home=${INFERSSD_HOME:-"$HOME/.local/share/inferssd"}

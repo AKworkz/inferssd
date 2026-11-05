@@ -83,7 +83,7 @@ curl -fsSL https://github.com/wici-ai/inferssd/releases/latest/download/install.
 
 InferSSD currently installs from source, so the engine is compiled for your machine's CPU and GPU; prebuilt packages are not available yet. Building takes about 2 to 12 minutes, depending on the machine.
 
-The installer works in a private environment and uses no `sudo`. It needs Git, Python 3.9 or later, and a C/C++ compiler. macOS also needs the Xcode Command Line Tools; Linux also needs the CUDA toolkit, `liburing` headers, and systemd with cgroup v2. Follow the printed PATH instruction if it shows one.
+The installer works in a private environment and uses no `sudo`. It needs Git, Python 3.9 or later, and a C/C++ compiler. macOS also needs the Xcode Command Line Tools; Linux also needs systemd with cgroup v2, and the CUDA toolkit on a machine with an NVIDIA GPU. Follow the printed PATH instruction if it shows one.
 
 Then start a model:
 

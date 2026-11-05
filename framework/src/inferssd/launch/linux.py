@@ -550,21 +550,6 @@ def _resolve(s: LinuxState) -> None:
             s.put(name, s.env[name], "override", "environment")
     if s.value("ss_available") and s.text("port_busy", port):
         s.refuse(f"Port {port} is already in use")
-    uring = bool(s.value("has_uring", binary_dir + "/libggml-cuda.so", server))
-    if graph and not uring:
-        s.emit(
-            (
-                "warning: the CUDA backend does not call liburing: the GPU prefill "
-                "route reads every expert with synchronous preads\n"
-            ),
-            "stderr",
-        )
-    if int(dense["dense_drive"]) > 0 and not uring:
-        s.refuse(
-            f"DENSE_HOMES puts {dense['dense_drive']} weights on the drive, but "
-            f"the CUDA backend does not call liburing: build it with liburing "
-            f"(tools/adaptive/build.sh)"
-        )
     if homes:
         s.emit(
             f"[ssd_setting] component=launcher name=DENSE_HOMES value={homes} "

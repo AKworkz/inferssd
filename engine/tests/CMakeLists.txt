@@ -122,8 +122,6 @@ target_link_libraries(test-moe-common-dynamic-tier PRIVATE Threads::Threads)
 add_test(NAME moe_common_dynamic_tier COMMAND test-moe-common-dynamic-tier)
 set_property(TEST moe_common_dynamic_tier PROPERTY LABELS main)
 
-add_executable(test-moe-common-io-submit ssd/test-moe-common-io-submit.cpp)
-add_test(NAME moe_common_io_submit COMMAND test-moe-common-io-submit)
 
 add_executable(test-moe-pack-copy-plan ssd/test-moe-pack-copy-plan.cpp)
 add_test(NAME moe_pack_copy_plan COMMAND test-moe-pack-copy-plan)
@@ -614,7 +612,6 @@ if (TARGET ggml-cpu)
         endforeach()
     endforeach()
 endif()
-set_property(TEST moe_common_io_submit PROPERTY LABELS main)
 
 add_executable(test-moe-common-cross-role ssd/test-moe-common-cross-role.cpp)
 add_test(NAME moe_common_cross_role COMMAND test-moe-common-cross-role)

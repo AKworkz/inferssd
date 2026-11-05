@@ -53,7 +53,7 @@ The runtime extends the bundled llama.cpp snapshot. Its integration points are l
 | Layer | Directory | Owns |
 | --- | --- | --- |
 | Core | `engine/ggml/src/ggml-ssd/store` | Immutable per-context source indexes and explicit pack/alias parsing |
-| Core | `engine/ggml/src/ggml-ssd/io` | Independent syscall and liburing readers; portable pread |
+| Core | `engine/ggml/src/ggml-ssd/io` | One read ring per OS (io_uring through system calls, IoRing, reader threads), an instance per reader; portable pread |
 | Core | `engine/ggml/src/ggml-ssd/host` | Process host arbiter, per-context leases, expert cache and page accounting |
 | Core | `engine/ggml/src/ggml-ssd/place` | Shared placement cost evaluation, learning state and prefetch decisions |
 | Core | `engine/ggml/src/ggml-ssd/stream` | Expert ranges, dense lookahead, seed ordering and copy observations |

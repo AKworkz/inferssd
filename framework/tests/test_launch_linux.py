@@ -71,8 +71,6 @@ def replay(record, run):
             value = str(host["cpu_count"])
         elif name == "port_busy":
             value = host["port_busy"]
-        elif name == "has_uring":
-            value = host["uring"]
         elif name == "cgroup_v2":
             value = record["cgroup_v2"]
         elif name == "memory_kib":
@@ -119,7 +117,9 @@ def external_order(calls):
         elif program == "ss":
             ordered.append("port_busy")
         elif program == "grep" and arguments[0] == "-qs":
-            ordered.append("has_uring")
+            # The reference asked whether the CUDA backend calls liburing. The port does not:
+            # that backend reads through the engine's own io_uring ring, with no liburing.
+            continue
         elif program == "awk" and "/proc/meminfo" in arguments:
             ordered.append("memory_kib")
         elif program == "systemctl":
@@ -139,7 +139,6 @@ def test_host_and_artifact_requests_keep_reference_order(record):
         "gpu_memory",
         "gpu_processes",
         "port_busy",
-        "has_uring",
         "memory_kib",
         "user_manager",
         "memory_controller",

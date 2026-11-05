@@ -210,7 +210,6 @@ class RecordedArtifacts:
         boolean = {
             "gpu_available",
             "ss_available",
-            "has_uring",
             "systemd",
             "cgroup_v2",
             "user_manager",

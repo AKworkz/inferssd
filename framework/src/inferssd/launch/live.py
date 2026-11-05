@@ -38,7 +38,6 @@ class Host(Protocol):
     def readable(self, path: str) -> bool: ...
     def which(self, name: str) -> bool: ...
     def text(self, path: str) -> str: ...
-    def contains(self, path: str, needle: bytes) -> bool: ...
     def uid(self) -> int: ...
     def suffix(self) -> str: ...
     def system(self) -> str: ...
@@ -65,19 +64,6 @@ class NativeHost:
     def text(self, path: str) -> str:
         return Path(path).read_text(encoding="utf-8", errors="replace")
 
-    def contains(self, path: str, needle: bytes) -> bool:
-        try:
-            with open(path, "rb") as stream:
-                tail = b""
-                while chunk := stream.read(1 << 20):
-                    data = tail + chunk
-                    if needle in data:
-                        return True
-                    tail = data[-len(needle) :]
-        except OSError:
-            return False
-        return False
-
     def uid(self) -> int:
         return os.geteuid()
 
@@ -95,7 +81,7 @@ class NativeHost:
 
 
 HOST_FACTS = frozenset(
-    "gpu_available ss_available has_uring systemd cgroup_v2 user_manager memory_controller euid "
+    "gpu_available ss_available systemd cgroup_v2 user_manager memory_controller euid "
     "memory_kib filesystem gpu_memory gpu_processes port_busy scope_suffix "
     "platform_system platform_machine default_threads physical_memory disk_free "
     "runtime_facts model_drive_key engine_gpu_backends".split()
@@ -159,8 +145,6 @@ class LiveArtifacts:
             )
         if name == "port_busy":
             return self.output(["ss", "-Hltn", "sport = :" + args[0]], check=False)
-        if name == "has_uring":
-            return any(host.contains(path, b"io_uring_queue_init") for path in args)
         if name == "systemd":
             # The same test as sd_booted(): systemd is running as the init system.
             return host.exists("/run/systemd/system")

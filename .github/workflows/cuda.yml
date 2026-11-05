@@ -43,7 +43,7 @@ jobs:
           - arch: 120a
             image: nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:cd530dd9b42a4866c2480b21cad7db0ff7b9c5b48c36455e7284328922963367
     steps:
-      - run: apt-get update && apt-get install -y cmake ninja-build git liburing-dev libssl-dev
+      - run: apt-get update && apt-get install -y cmake ninja-build git libssl-dev
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
