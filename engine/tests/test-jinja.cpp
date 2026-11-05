@@ -27,6 +27,7 @@ static void test_literals(testing & t);
 static void test_comments(testing & t);
 static void test_macros(testing & t);
 static void test_namespace(testing & t);
+static void test_unpacking(testing & t);
 static void test_tests(testing & t);
 static void test_string_methods(testing & t);
 static void test_array_methods(testing & t);
@@ -65,6 +66,7 @@ int main(int argc, char *argv[]) {
     t.test("comments", test_comments);
     t.test("macros", test_macros);
     t.test("namespace", test_namespace);
+    t.test("unpacking", test_unpacking);
     t.test("tests", test_tests);
     t.test("string methods", test_string_methods);
     t.test("array methods", test_array_methods);
@@ -984,6 +986,31 @@ static void test_namespace(testing & t) {
         "{% set ns = namespace(count=0) %}{% for i in range(3) %}{% set ns.count = ns.count + 1 %}{% endfor %}{{ ns.count }}",
         json::object(),
         "3"
+    );
+}
+
+static void test_unpacking(testing & t) {
+    test_template(t, "dict from a mapping and keyword arguments",
+        "{% set d = dict({'a': 1, 'b': 2}, b=3, c=4) %}{{ d.a }}{{ d.b }}{{ d.c }}",
+        json::object(),
+        "134"
+    );
+    test_template(t, "mapping unpacked into keyword arguments",
+        "{% set d = dict({'a': 1}, **{'b': 2}) %}{{ d.a }}{{ d.b }}",
+        json::object(),
+        "12"
+    );
+    // As DeepSeek-V4.1's template copies a function without its namespace
+    test_template(t, "mapping rebuilt entry by entry",
+        "{% set ns = namespace(d={}) %}{% for k, v in f.items() if k != 'namespace' %}"
+        "{% set ns.d = dict(ns.d, **{k: v}) %}{% endfor %}{{ ns.d | length }}{{ ns.d.name }}",
+        {{"f", {{"name", "lookup"}, {"namespace", "tools"}, {"description", "d"}}}},
+        "2lookup"
+    );
+    test_template(t, "list unpacked into positional arguments",
+        "{{ range(*[1, 4]) | join(',') }}",
+        json::object(),
+        "1,2,3"
     );
 }
 

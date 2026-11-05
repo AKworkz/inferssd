@@ -9,18 +9,6 @@
 #include <vector>
 
 namespace inferssd { namespace chat {
-void prepare_muse_sources(std::string & default_template_src, std::string & template_tool_use_src) {
-    // Muse defaults effort to none. Guard membership before the older Jinja
-    // evaluator sees it, including capability detection before parser selection.
-    for (auto * source : { &default_template_src, &template_tool_use_src }) {
-        if (source->find("to=commentary") != std::string::npos && source->find("<|eom|>") != std::string::npos) {
-            string_replace_all(*source, "reasoning_effort in reasoning_effort_map",
-                               "(reasoning_effort is not none and reasoning_effort in reasoning_effort_map)");
-        }
-    }
-
-}
-
 void configure_muse_caps(common_chat_template * default_template, common_chat_template * tool_use_template) {
     for (auto * tmpl : { default_template, tool_use_template }) {
         if (tmpl && tmpl->source().find("to=commentary") != std::string::npos &&
@@ -232,11 +220,8 @@ common_chat_params muse(const common_chat_template &          tmpl,
     const auto foreach_parameter = shared.parameters;
     common_chat_params data;
 
-    json context = json::object();
-    if (!inputs.extra_context.is_object() || !inputs.extra_context.contains("disable_reasoning")) {
-        context["disable_reasoning"] = !inputs.enable_thinking;
-    }
-    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, context, &data.prompt_input_spans);
+    // Muse always thinks: its template has no switch to turn thinking off, only reasoning_effort.
+    data.prompt            = common_chat_template_direct_apply_impl(tmpl, inputs, std::nullopt, std::nullopt, std::nullopt, &data.prompt_input_spans);
     data.generation_prompt = "<|start|>assistant";
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
@@ -253,19 +238,6 @@ common_chat_params muse(const common_chat_template &          tmpl,
     auto has_tools = inputs.tools.is_array() && !inputs.tools.empty();
     // Constrained grammar whenever tools are offered.
     auto include_grammar = has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
-
-    const bool disable_reasoning = inputs.extra_context.is_object() && inputs.extra_context.contains("disable_reasoning")
-        ? inputs.extra_context.at("disable_reasoning").get<bool>() : !inputs.enable_thinking;
-    if (disable_reasoning && !include_grammar) {
-        // The template only removes "self" from its recipient instructions.
-        // Prefill the final-answer header so a text-only non-thinking request
-        // cannot spend its entire generation budget choosing the self channel.
-        const std::string final_header = " to=user<|message|>";
-        if (inputs.add_generation_prompt && string_ends_with(data.prompt, data.generation_prompt)) {
-            data.prompt += final_header;
-        }
-        data.generation_prompt += final_header;
-    }
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
         auto start = p.rule("start", p.literal("<|start|>assistant"));

@@ -47,11 +47,19 @@ const T * cast_stmt(const statement_ptr & ptr) {
 // not thread-safe
 void enable_debug(bool enable);
 
+// Follows one string through a render and records what the template compares it with: the other side of
+// == and !=, and the keys or items of what it is tested `in`. A template's own values for a variable show up here.
+struct comparison_probe {
+    std::string watched;
+    std::vector<std::string> compared; // in the order the template compares them, repeats removed
+};
+
 struct context {
     std::shared_ptr<std::string> src; // for debugging; use shared_ptr to avoid copying on scope creation
     std::time_t current_time; // for functions that need current time
 
     bool is_get_stats = false; // whether to collect stats
+    std::shared_ptr<comparison_probe> probe; // set only while probing a template
 
     // src is optional, used for error reporting
     context(std::string src = "") : src(std::make_shared<std::string>(std::move(src))) {
@@ -75,6 +83,7 @@ struct context {
         }
         current_time = parent.current_time;
         is_get_stats = parent.is_get_stats;
+        probe = parent.probe;
         src = parent.src;
     }
 
@@ -539,6 +548,15 @@ struct spread_expression : public expression {
         chk_type<expression>(this->argument);
     }
     std::string type() const override { return "SpreadExpression"; }
+};
+
+// f(**mapping): the mapping's entries become keyword arguments
+struct keyword_spread_expression : public expression {
+    statement_ptr argument;
+    explicit keyword_spread_expression(statement_ptr && argument) : argument(std::move(argument)) {
+        chk_type<expression>(this->argument);
+    }
+    std::string type() const override { return "KeywordSpreadExpression"; }
 };
 
 struct call_statement : public statement {

@@ -312,6 +312,7 @@ struct server_chat_params {
     std::string reasoning_budget_suffix;
     std::string media_path;
     bool force_pure_content = false;
+    std::optional<common_chat_reasoning> reasoning; // what the template offers for thinking, read once at load
 };
 
 // used by /completions endpoint

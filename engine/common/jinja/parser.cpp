@@ -479,11 +479,16 @@ private:
         statements args;
         while (!is(token::close_paren)) {
             statement_ptr arg;
-            // unpacking: *expr
+            // unpacking: *expr, and **expr for keyword arguments
             if (peek().t == token::multiplicative_binary_operator && peek().value == "*") {
                 size_t start_pos = current;
                 ++current; // consume *
-                arg = mk_stmt<spread_expression>(start_pos, parse_expression());
+                if (peek().t == token::multiplicative_binary_operator && peek().value == "*") {
+                    ++current; // consume the second *
+                    arg = mk_stmt<keyword_spread_expression>(start_pos, parse_expression());
+                } else {
+                    arg = mk_stmt<spread_expression>(start_pos, parse_expression());
+                }
             } else {
                 arg = parse_expression();
                 if (is(token::equals)) {

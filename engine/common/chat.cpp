@@ -257,6 +257,77 @@ bool common_chat_templates_support_enable_thinking(const common_chat_templates *
     return params.supports_thinking;
 }
 
+std::optional<common_chat_reasoning> common_chat_templates_reasoning(const common_chat_templates * chat_templates) {
+    if (!common_chat_templates_support_enable_thinking(chat_templates)) {
+        return std::nullopt;
+    }
+    const common_chat_template & tmpl = *chat_templates->template_default;
+    const std::time_t now = std::time(nullptr); // one clock for every render, so a date in the prompt cannot differ
+
+    // The template alone, as a one-message request renders it, without the engine's own handling of a format: an
+    // option is what the template offers.
+    const auto variables = [](bool thinking) {
+        return json{{"enable_thinking", thinking}};
+    };
+    const auto render = [&](const json & vars, const std::shared_ptr<jinja::comparison_probe> & probe = nullptr)
+            -> std::optional<std::string> {
+        try {
+            jinja::context ctx(tmpl.source());
+            ctx.current_time = now;
+            ctx.probe = probe;
+            json input = {
+                {"messages", json::array({{{"role", "user"}, {"content", "test"}}})},
+                {"bos_token", tmpl.bos_token()},
+                {"eos_token", tmpl.eos_token()},
+                {"add_generation_prompt", true},
+            };
+            for (const auto & [key, value] : vars.items()) {
+                input[key] = value;
+            }
+            jinja::global_from_json(ctx, input, false);
+            jinja::runtime runtime(ctx);
+            return jinja::runtime::gather_string_parts(runtime.execute(tmpl.prog))->as_string().str();
+        } catch (const std::exception &) {
+            return std::nullopt; // the template rejects these variables
+        }
+    };
+
+    const auto on = render(variables(true));
+    if (!on) {
+        return std::nullopt;
+    }
+    common_chat_reasoning reasoning;
+    const auto off = render(variables(false));
+    reasoning.can_turn_off = off && *off != *on;
+
+    // A value no template knows, followed through one render, shows the values the template compares
+    // reasoning_effort with. The template may reject the value afterwards, as Muse does.
+    auto probe = std::make_shared<jinja::comparison_probe>();
+    probe->watched = "inferssd reasoning probe";
+    json vars = variables(true);
+    vars["reasoning_effort"] = probe->watched;
+    render(vars, probe);
+
+    std::vector<std::string> prompts;
+    for (const auto & effort : probe->compared) {
+        if (effort == "none") {
+            continue; // the request's word for thinking off
+        }
+        vars["reasoning_effort"] = effort;
+        const auto prompt = render(vars);
+        // Kept only if the template takes it and it gives a prompt no earlier value gave
+        if (!prompt || std::find(prompts.begin(), prompts.end(), *prompt) != prompts.end()) {
+            continue;
+        }
+        prompts.push_back(*prompt);
+        reasoning.efforts.push_back(effort);
+        if (*prompt == *on) {
+            reasoning.default_effort = effort;
+        }
+    }
+    return reasoning;
+}
+
 std::vector<common_chat_msg> common_chat_msgs_parse_oaicompat(const json & messages) {
     std::vector<common_chat_msg> msgs;
 
@@ -631,8 +702,6 @@ common_chat_templates_ptr common_chat_templates_init(const struct llama_model * 
                            "message['tool_calls'] is none or message['tool_calls']|length == 0) %}",
                            "{%- if false %}");
     }
-
-    inferssd::chat::prepare_muse_sources(default_template_src, template_tool_use_src);
 
     std::string token_bos = bos_token_override;
     std::string token_eos = eos_token_override;
@@ -1987,9 +2056,9 @@ std::optional<common_chat_params> common_chat_try_specialized_template(
         return common_chat_params_init_gigachat_v3(tmpl, params);
     }
 
-    // DeepSeek V4.1: the template names its DSML tags with a leading space (models/templates/deepseek-ai-DeepSeek-V4.1.jinja).
-    if (src.find("dsml_token") != std::string::npos &&
-        src.find("tool_calls_block_name = ' calls'") != std::string::npos) {
+    // DeepSeek V4.1: the template names its DSML tags with a leading space, as its tool instructions show
+    // (models/templates/deepseek-ai-DeepSeek-V4.1.jinja, the model's own template).
+    if (src.find("<｜DSML｜ calls>") != std::string::npos) {
         LOG_DBG("Using specialized template: DeepSeek V4.1\n");
         return inferssd::chat::deepseek(tmpl, params, true, {common_chat_template_direct_apply_impl, foreach_function, foreach_parameter});
     }
@@ -2109,7 +2178,7 @@ static common_chat_params common_chat_templates_apply_jinja(const struct common_
     }
 
     if (auto result = common_chat_try_specialized_template(tmpl, src, params)) {
-        // Muse can extend its generation prefix for a non-thinking request.
+        // A format that sets its own generation prefix keeps it.
         if (result->generation_prompt.empty()) {
             result->generation_prompt = params.generation_prompt;
         }

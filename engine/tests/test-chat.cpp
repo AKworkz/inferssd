@@ -1634,18 +1634,22 @@ static void test_muse_spark_peg_parsers(bool detailed_debug) {
         auto tmpls = read_templates("models/templates/muse-spark.jinja");
         common_chat_templates_inputs inputs;
         inputs.reasoning_format = COMMON_REASONING_FORMAT_AUTO;
-        inputs.enable_thinking = false;
         common_chat_msg system;
         system.role = "system";
         system.content = "Answer concisely.";
         inputs.messages = { system, message_user_parts };
+        // Muse always thinks; reasoning_effort sets how much, xhigh unless the request names another
         auto prompt = common_chat_templates_apply(tmpls.get(), inputs).prompt;
         assert_equals(true, prompt.find("Answer concisely.") != std::string::npos);
         assert_equals(true, prompt.find("<|start|>user<|message|>Heythere<|eot|>") != std::string::npos);
-        assert_equals(true, string_ends_with(prompt, "<|start|>assistant to=user<|message|>"));
-        assert_equals(false, prompt.find("private reasoning and tool planning") != std::string::npos);
+        assert_equals(true, string_ends_with(prompt, "<|start|>assistant"));
+        assert_equals(true, prompt.find("private reasoning and tool planning") != std::string::npos);
+        assert_equals(true, prompt.find("Reasoning strength: 512.") != std::string::npos);
+        inputs.chat_template_kwargs["reasoning_effort"] = "\"low\"";
+        prompt = common_chat_templates_apply(tmpls.get(), inputs).prompt;
+        assert_equals(true, prompt.find("Reasoning strength: 8.") != std::string::npos);
+        inputs.chat_template_kwargs.erase("reasoning_effort");
 
-        inputs.enable_thinking = true;
         inputs.tools = { special_function_tool };
         inputs.parallel_tool_calls = true;
         common_chat_msg call;
@@ -2878,11 +2882,11 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             inputs.enable_thinking = true;
             assert_equals(std::string("<｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nYou are a helpful assistant.<｜User｜>Hello<｜Assistant｜></think>Hi there! How can I help you?<｜end▁of▁sentence｜><｜User｜>What is the capital of France?<｜Assistant｜><think>"), without_bos(common_chat_templates_apply(tmpls.get(), inputs).prompt));
 
-            // Earlier reasoning kept (drop_thinking false), and an OpenAI effort name on the encoder's scale
+            // Earlier reasoning kept (drop_thinking false), and the template's own effort name on its scale
             inputs.chat_template_kwargs["drop_thinking"] = "false";
             assert_equals(std::string("<｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nYou are a helpful assistant.<｜User｜>Hello<｜Assistant｜><think>The user said hello, I should greet back.</think>Hi there! How can I help you?<｜end▁of▁sentence｜><｜User｜>What is the capital of France?<｜Assistant｜><think>"), without_bos(common_chat_templates_apply(tmpls.get(), inputs).prompt));
             inputs.chat_template_kwargs.erase("drop_thinking");
-            inputs.chat_template_kwargs["reasoning_effort"] = "\"xhigh\"";
+            inputs.chat_template_kwargs["reasoning_effort"] = "\"max\"";
             assert_equals(std::string("<｜System｜>Reasoning Effort: 100 (range 1-100, the higher the value, the more thorough the reasoning)\n\nYou are a helpful assistant.<｜User｜>Hello<｜Assistant｜></think>Hi there! How can I help you?<｜end▁of▁sentence｜><｜User｜>What is the capital of France?<｜Assistant｜><think>"), without_bos(common_chat_templates_apply(tmpls.get(), inputs).prompt));
             inputs.chat_template_kwargs.erase("reasoning_effort");
 
@@ -4574,6 +4578,61 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
     }
 }
 
+// What the chat template inferssd serve runs for each supported model offers for thinking: the models' own templates
+// for DeepSeek and Muse, which replace the GGUF's, and the template in Qwen3.6's GGUF.
+static void test_template_reasoning() {
+    printf("[%s]\n", __func__);
+    struct expected {
+        std::string              path;
+        bool                     can_turn_off;
+        std::vector<std::string> efforts;
+        std::string              default_effort;
+    };
+    const std::vector<expected> cases = {
+        { "models/templates/deepseek-ai-DeepSeek-V4.1.jinja", true,  { "low", "medium", "high", "max" },  "high"  },
+        { "models/templates/muse-spark.jinja",                false, { "low", "medium", "high", "xhigh" }, "xhigh" },
+        { "models/templates/unsloth-Qwen3.6-35B-A3B.jinja",   true,  {},                                  ""      },
+    };
+    for (const auto & c : cases) {
+        auto tmpls     = read_templates(c.path);
+        auto reasoning = common_chat_templates_reasoning(tmpls.get());
+        if (!reasoning) {
+            throw std::runtime_error(c.path + ": expected a thinking template");
+        }
+        assert_equals(c.can_turn_off, reasoning->can_turn_off);
+        assert_equals(string_join(c.efforts, ","), string_join(reasoning->efforts, ","));
+        assert_equals(c.default_effort, reasoning->default_effort);
+    }
+
+    // A value the template compares but whose prompt an earlier value already gave is not offered: 'alias' renders
+    // as 'deep' does, and 'plain2' as 'plain', which renders as no reasoning_effort does and so is the default.
+    {
+        const std::string src =
+            "{%- for m in messages -%}<|{{ m.role }}|>"
+            "{%- if m.reasoning_content -%}<think>{{ m.reasoning_content }}</think>{%- endif -%}"
+            "{{ m.content }}<|end|>{%- endfor -%}"
+            "{%- if add_generation_prompt -%}<|assistant|>"
+            "{%- if reasoning_effort is defined and reasoning_effort in ['deep', 'alias'] -%}Think deeply.{%- endif -%}"
+            "{%- if reasoning_effort is defined and (reasoning_effort == 'plain' or reasoning_effort == 'plain2') -%}{%- endif -%}"
+            "{%- if enable_thinking is defined and not enable_thinking -%}<think></think>{%- else -%}<think>{%- endif -%}"
+            "{%- endif -%}";
+        common_chat_templates_ptr tmpls(common_chat_templates_init(/* model= */ nullptr, src));
+        auto reasoning = common_chat_templates_reasoning(tmpls.get());
+        if (!reasoning) {
+            throw std::runtime_error("inline template: expected a thinking template");
+        }
+        assert_equals(true, reasoning->can_turn_off);
+        assert_equals(std::string("deep,plain"), string_join(reasoning->efforts, ","));
+        assert_equals(std::string("plain"), reasoning->default_effort);
+    }
+
+    // A template that does not think offers nothing
+    auto plain = read_templates("models/templates/meta-llama-Llama-3.1-8B-Instruct.jinja");
+    if (common_chat_templates_reasoning(plain.get())) {
+        throw std::runtime_error("Llama 3.1 does not think");
+    }
+}
+
 static void test_reka_edge_common_path() {
     auto tmpls = read_templates("models/templates/Reka-Edge.jinja");
 
@@ -4827,6 +4886,7 @@ int main(int argc, char ** argv) {
         test_convert_responses_to_chatcmpl();
         test_developer_role_to_system_workaround();
         test_reka_edge_common_path();
+        test_template_reasoning();
         test_template_output_peg_parsers(detailed_debug);
         std::cout << "\n[chat] All tests passed!" << '\n';
     }

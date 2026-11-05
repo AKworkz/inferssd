@@ -1216,8 +1216,17 @@ private:
                 /* reasoning_budget_msg  */ params_base.sampling.reasoning_budget_message,
                 /* reasoning_budget_sfx  */ params_base.sampling.reasoning_budget_suffix,
                 /* media_path            */ params_base.media_path,
-                /* force_pure_content    */ params_base.force_pure_content_parser
+                /* force_pure_content    */ params_base.force_pure_content_parser,
+                /* reasoning             */ std::nullopt
             };
+            if (params_base.use_jinja) {
+                chat_params.reasoning = common_chat_templates_reasoning(chat_params.tmpls.get());
+            }
+            if (chat_params.reasoning) {
+                SRV_INF("%s: chat template, turns thinking off = %d, reasoning_effort = [%s], default = '%s'\n", __func__,
+                    chat_params.reasoning->can_turn_off, string_join(chat_params.reasoning->efforts, ", ").c_str(),
+                    chat_params.reasoning->default_effort.c_str());
+            }
         }
 
         return true;
@@ -4171,8 +4180,19 @@ void server_routes::init_routes() {
         std::string tmpl_default = common_chat_templates_source(meta->chat_params.tmpls.get(), "");
         std::string tmpl_tools   = common_chat_templates_source(meta->chat_params.tmpls.get(), "tool_use");
 
+        // What the chat template offers for thinking; null when it does not think
+        json reasoning = nullptr;
+        if (const auto & options = meta->chat_params.reasoning) {
+            reasoning = {
+                { "can_turn_off",   options->can_turn_off },
+                { "efforts",        options->efforts },
+                { "default_effort", options->default_effort.empty() ? json(nullptr) : json(options->default_effort) },
+            };
+        }
+
         json props = {
             { "default_generation_settings", default_generation_settings_for_props },
+            { "reasoning",                   reasoning },
             { "total_slots",                 params.n_parallel },
             { "model_alias",                 meta->model_name },
             { "model_path",                  meta->model_path },

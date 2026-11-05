@@ -15,6 +15,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ci.contract import load, save
+import stream_chat
 from ci import mac_host_gate
 from ci.stage_session import StageSession
 from ci.staged_chat import NativeHTTP
@@ -89,13 +90,12 @@ def smoke(session, config, output, *, stage_id="candidate-smoke", host_policy=No
         before = session.call(stage, "stage.probe", port=config["port"])
         save(output / "runtime-before.json", before)
         capture_host("before-request")
-        chat = {"messages": [{"role": "user", "content": "Say hello in one short sentence."}],
-                "chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none"}
+        props = http.json("GET", "/props", None, 10)
+        chat = stream_chat.chat_request("Say hello in one short sentence.", props)
         templated = http.json("POST", "/apply-template", chat, 10)
         ids = templated.get("tokens")
         if not isinstance(ids, list) or not ids or any(type(x) is not int or x < 0 for x in ids):
             raise ValueError("native template did not return authoritative input tokens")
-        props = http.json("GET", "/props", None, 10)
         if props.get("total_slots") != 1 or props.get("default_generation_settings", {}).get("n_ctx", 0) < len(ids) + 8:
             raise ValueError("native server slot/context differs from smoke contract")
         body = dict(prompt=ids, n_predict=8, stream=False, temperature=0, top_k=1,

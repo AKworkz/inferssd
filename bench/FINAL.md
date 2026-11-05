@@ -7,8 +7,10 @@ this tool does not discover devices, tune settings, retry, average or select run
 No formal performance data is included with the driver.
 
 The labels describe approximate input sizes. `final_chat.py` asks the model's
-`/apply-template` endpoint for authoritative IDs with one user message and thinking
-disabled. It sends those IDs unchanged to native `/completion`. `/props` must
+`/apply-template` endpoint for authoritative IDs with one user message and the least
+thinking the chat template offers, as `/props` reports it: thinking off, or the first
+`reasoning_effort` of a template that always thinks, as Muse's does. It sends those IDs
+unchanged to native `/completion`. `/props` must
 report exactly one slot with space for **actual input count + 256**. An actual
 4K-tier prompt may exceed 4096 tokens; configure context accordingly beforehand.
 The bundled prompt SHA-256 values are enforced before any completion request.

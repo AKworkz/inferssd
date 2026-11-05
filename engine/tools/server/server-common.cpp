@@ -1133,6 +1133,32 @@ void server_turn_memory_record(const common_chat_msg & msg) {
     memory.turns[key] = std::move(turn);
 }
 
+// Refuses a reasoning_effort the chat template does not offer, naming the ones it does.
+static void check_reasoning_effort(const std::optional<common_chat_reasoning> & reasoning, const std::string & effort) {
+    if (!reasoning) {
+        if (effort == "none") {
+            return; // thinking is already off
+        }
+        throw std::invalid_argument("This model does not think, so \"reasoning_effort\" can only be \"none\"");
+    }
+    std::vector<std::string> offered;
+    if (reasoning->can_turn_off) {
+        offered.push_back("none");
+    }
+    offered.insert(offered.end(), reasoning->efforts.begin(), reasoning->efforts.end());
+    if (std::find(offered.begin(), offered.end(), effort) != offered.end()) {
+        return;
+    }
+    if (offered.empty()) {
+        throw std::invalid_argument("This model's chat template takes no \"reasoning_effort\"");
+    }
+    for (auto & value : offered) {
+        value = "\"" + value + "\"";
+    }
+    throw std::invalid_argument("This model's chat template takes \"reasoning_effort\" " + string_join(offered, ", ") +
+        ", not \"" + effort + "\"");
+}
+
 json oaicompat_chat_params_parse(
     json & body, /* openai api json semantics */
     const server_chat_params & opt,
@@ -1289,11 +1315,16 @@ json oaicompat_chat_params_parse(
     }
 
     // reasoning_effort (the OpenAI chat-completions field): "none" turns thinking off for this request, any other
-    // effort turns it on and goes to the template as reasoning_effort, which interprets it (DeepSeek-V4.1 maps it to
-    // its 1-100 scale). Template kwargs given in the request take precedence.
+    // effort turns it on and goes to the template as reasoning_effort. Either must be something the template offers,
+    // as /props reports it, so a request never runs as something other than what it asked for. Template kwargs given
+    // in the request take precedence.
     if (body.contains("reasoning_effort") && !body.at("reasoning_effort").is_null()) {
         const json & effort = body.at("reasoning_effort");
-        const bool   off    = effort.is_string() && effort.get<std::string>() == "none";
+        if (!effort.is_string()) {
+            throw std::invalid_argument("\"reasoning_effort\" must be a string");
+        }
+        check_reasoning_effort(opt.reasoning, effort.get<std::string>());
+        const bool   off    = effort.get<std::string>() == "none";
         if (!chat_template_kwargs_object.contains("enable_thinking")) {
             inputs.chat_template_kwargs["enable_thinking"] = off ? "false" : "true";
         }

@@ -100,6 +100,15 @@ def test_http_contract_retains_prompt_tokens_raw_events_and_failure(tmp_path):
         def log_message(self, *_args):
             pass
 
+        def do_GET(self):
+            assert self.path == "/props"
+            data = json.dumps({"reasoning": {"can_turn_off": True, "efforts": ["high"], "default_effort": "high"}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             received.append((self.path, body))
@@ -184,6 +193,7 @@ def test_template_requires_authoritative_tokens_without_flattened_fallback(tmp_p
         return response
 
     monkeypatch.setattr(stream_chat, "post", fake_post)
+    monkeypatch.setattr(stream_chat, "get", lambda base, endpoint, timeout: {})
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("Literal <|im_end|> text.\n")
     args = argparse.Namespace(prompt=prompt, output=tmp_path / "result.json",
@@ -216,3 +226,18 @@ def test_probability_contract_is_validated_by_recorder_and_comparer(change):
         summary(records, 8)
     with pytest.raises(ValueError):
         compare_outputs.compare(value, value)
+
+
+def test_chat_request_turns_thinking_off_or_takes_the_least_effort():
+    content = "Passage."
+    off = {"messages": [{"role": "user", "content": content}],
+           "chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none"}
+    # A template that turns thinking off, as DeepSeek's does, a model that does not think, and an engine before /props reported it
+    assert stream_chat.chat_request(content, {"reasoning": {"can_turn_off": True, "efforts": ["low", "high"], "default_effort": "high"}}) == off
+    assert stream_chat.chat_request(content, {"reasoning": None}) == off
+    assert stream_chat.chat_request(content, {}) == off
+    # Muse's template always thinks: its least effort
+    muse = {"reasoning": {"can_turn_off": False, "efforts": ["low", "medium", "high", "xhigh"], "default_effort": "xhigh"}}
+    assert stream_chat.chat_request(content, muse) == {"messages": [{"role": "user", "content": content}], "reasoning_effort": "low"}
+    assert stream_chat.chat_request(content, {"reasoning": {"can_turn_off": False, "efforts": [], "default_effort": None}}) == {
+        "messages": [{"role": "user", "content": content}]}

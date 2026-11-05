@@ -210,17 +210,52 @@ def test_session_always_stops_owned_server(tmp_path, monkeypatch, outcome):
     engine.stop.assert_called_once()
 
 
-def test_terminal_stream_and_clear(monkeypatch, capsys):
+def _chat_server(monkeypatch, reasoning):
     stream = b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\ndata: [DONE]\n'
+    props = json.dumps({"reasoning": reasoning}).encode()
     opener = Mock()
-    opener.open.side_effect = lambda *a, **kw: io.BytesIO(stream)
+    opener.open.side_effect = lambda target, **kw: io.BytesIO(
+        props if isinstance(target, str) else stream
+    )
     monkeypatch.setattr(chat.urllib.request, "build_opener", lambda _: opener)
+    return opener
+
+
+def _chat_requests(opener):
+    return [
+        json.loads(call.args[0].data)
+        for call in opener.open.call_args_list
+        if not isinstance(call.args[0], str)
+    ]
+
+
+def test_terminal_stream_and_clear(monkeypatch, capsys):
+    opener = _chat_server(
+        monkeypatch, {"can_turn_off": True, "efforts": ["high"], "default_effort": "high"}
+    )
     prompts = iter(["one", "/clear", "two", "/exit"])
     monkeypatch.setattr("builtins.input", lambda _: next(prompts))
     assert chat.chat(8080, None, 16) == 0
-    requests = [json.loads(call.args[0].data) for call in opener.open.call_args_list]
+    requests = _chat_requests(opener)
     assert requests[1]["messages"] == [{"role": "user", "content": "two"}]
+    assert requests[1]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "reasoning_effort" not in requests[1]
     assert "hello" in capsys.readouterr().out
+
+
+def test_terminal_takes_the_least_effort_of_a_template_that_always_thinks(monkeypatch):
+    opener = _chat_server(
+        monkeypatch,
+        {
+            "can_turn_off": False,
+            "efforts": ["low", "medium", "high", "xhigh"],
+            "default_effort": "xhigh",
+        },
+    )
+    assert chat.chat(8080, "hi", 16) == 0
+    [request] = _chat_requests(opener)
+    assert request["reasoning_effort"] == "low"
+    assert "chat_template_kwargs" not in request
 
 
 def test_truncated_stream_is_an_error(monkeypatch):

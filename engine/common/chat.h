@@ -13,6 +13,7 @@
 #include <chrono>
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -295,6 +296,17 @@ nlohmann::ordered_json common_chat_tools_to_json_oaicompat(const std::vector<com
 
 // get template caps, useful for reporting to server /props endpoint
 std::map<std::string, bool> common_chat_templates_get_caps(const common_chat_templates * chat_templates);
+
+// What a thinking template itself offers, read from the template rather than from a list of models: whether it turns
+// thinking off, and the values it takes for reasoning_effort. A value counts only if it changes the rendered prompt.
+struct common_chat_reasoning {
+    bool                     can_turn_off = false;
+    std::vector<std::string> efforts;        // the template's own values, in the order it compares them
+    std::string              default_effort; // the value that renders as no reasoning_effort does; empty if none does
+};
+
+// nullopt when the template does not think
+std::optional<common_chat_reasoning> common_chat_templates_reasoning(const common_chat_templates * chat_templates);
 
 std::string common_chat_template_direct_apply(
     const common_chat_template & tmpl,

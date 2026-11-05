@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <algorithm>
 #include <cmath>
 
 #define FILENAME "jinja-runtime"
@@ -109,6 +110,38 @@ value object_literal::execute_impl(context & ctx) {
     return obj;
 }
 
+static void record_comparison(comparison_probe & probe, const std::string & op, const value & left, const value & right) {
+    const auto is_watched = [&](const value & v) {
+        return is_val<value_string>(v) && v->as_string().str() == probe.watched;
+    };
+    const auto note = [&](const value & v) {
+        if (!is_val<value_string>(v) || is_watched(v)) {
+            return;
+        }
+        auto s = v->as_string().str();
+        if (std::find(probe.compared.begin(), probe.compared.end(), s) == probe.compared.end()) {
+            probe.compared.push_back(std::move(s));
+        }
+    };
+    if (op == "==" || op == "!=") {
+        if (is_watched(left)) {
+            note(right);
+        } else if (is_watched(right)) {
+            note(left);
+        }
+    } else if ((op == "in" || op == "not in") && is_watched(left)) {
+        if (is_val<value_object>(right)) {
+            for (const auto & pair : right->as_ordered_object()) {
+                note(pair.first);
+            }
+        } else if (is_val<value_array>(right)) {
+            for (const auto & item : right->as_array()) {
+                note(item);
+            }
+        }
+    }
+}
+
 value binary_expression::execute_impl(context & ctx) {
     value left_val = left->execute(ctx);
 
@@ -124,6 +157,9 @@ value binary_expression::execute_impl(context & ctx) {
     // Equality operators
     value right_val = right->execute(ctx);
     JJ_DEBUG("Executing binary expression %s '%s' %s", left_val->type().c_str(), op.value.c_str(), right_val->type().c_str());
+    if (ctx.probe) {
+        record_comparison(*ctx.probe, op.value, left_val, right_val);
+    }
     if (op.value == "==") {
         return mk_val<value_bool>(*left_val == *right_val);
     } else if (op.value == "!=") {
@@ -880,6 +916,31 @@ value call_expression::execute_impl(context & ctx) {
     // gather arguments
     func_args args(ctx);
     for (auto & arg_stmt : this->args) {
+        if (is_stmt<spread_expression>(arg_stmt)) {
+            // f(*items): each item is a positional argument
+            value items = cast_stmt<spread_expression>(arg_stmt)->argument->execute(ctx);
+            if (!is_val<value_array>(items)) {
+                throw std::runtime_error("Only a list can be unpacked with *, got " + items->type());
+            }
+            for (const auto & item : items->as_array()) {
+                args.push_back(item);
+            }
+            continue;
+        }
+        if (is_stmt<keyword_spread_expression>(arg_stmt)) {
+            // f(**mapping): each entry is a keyword argument
+            value mapping = cast_stmt<keyword_spread_expression>(arg_stmt)->argument->execute(ctx);
+            if (!is_val<value_object>(mapping)) {
+                throw std::runtime_error("Only a mapping can be unpacked with **, got " + mapping->type());
+            }
+            for (const auto & entry : mapping->as_ordered_object()) {
+                if (!is_val<value_string>(entry.first)) {
+                    throw std::runtime_error("Keyword argument names must be strings");
+                }
+                args.push_back(mk_val<value_kwarg>(entry.first->as_string().str(), entry.second));
+            }
+            continue;
+        }
         auto arg_val = arg_stmt->execute(ctx);
         JJ_DEBUG("  Argument type: %s", arg_val->type().c_str());
         args.push_back(arg_val);

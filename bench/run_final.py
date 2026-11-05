@@ -136,8 +136,7 @@ def read_result(path, tier, timeout):
     if (protocol.get("server_context_tokens") != context or result.get("prompt_ids") != ids
             or result.get("input_tokens") != len(ids) or protocol.get("input_tokens") != len(ids)):
         raise ValueError("template IDs or actual input/context counts differ")
-    expected_chat = {"messages": [{"role": "user", "content": final_chat.prompt_path(tier).read_text()}],
-                     "chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none"}
+    expected_chat = stream_chat.chat_request(final_chat.prompt_path(tier).read_text(), protocol.get("server_props", {}))
     expected_body = {"prompt": ids, "n_predict": 256, "stream": True,
                      "temperature": 0, "top_k": 1, "samplers": ["top_k"], "seed": 0,
                      "n_probs": 5, "post_sampling_probs": False, "ignore_eos": True,

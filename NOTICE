@@ -57,8 +57,20 @@ source tree.
    Copyright (c) 2024-2025 The ik_llama.cpp authors.
    The MIT permission notice below applies.
 
-MIT permission notice for entries 1-5
--------------------------------------
+6. Model chat templates
+   engine/models/templates/deepseek-ai-DeepSeek-V4.1.jinja is chat_template.jinja
+   from https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash (revision
+   314113f8a7da). Copyright (c) 2023 DeepSeek. The MIT permission notice below
+   applies.
+   engine/models/templates/muse-spark.jinja is chat_template.jinja from
+   https://huggingface.co/meta-models/Muse-Spark-Open-816B-A42B (revision
+   0fb02478b025), under the Muse model license.
+   engine/models/templates/unsloth-Qwen3.6-35B-A3B.jinja is the chat template in
+   https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF (revision a483e9e6cbd5),
+   under Apache-2.0.
+
+MIT permission notice for entries 1-5 and the DeepSeek template in entry 6
+--------------------------------------------------------------------------
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

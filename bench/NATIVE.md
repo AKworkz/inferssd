@@ -84,11 +84,12 @@ list. This supports separate expert and dense-source indexes. Mac uses one alias
 
 Do not put model/context/template/slot/host/port/cache/warmup/log-suppression
 options in `args`; the wrapper owns them. It adds the first shard, explicit chat
-template, thinking off, one slot, fixed context, fit off, no warmup completion,
-no prompt cache and a private loopback port. Library search is fixed to the
-binary's bundle. Preloads must be individually pinned images; H2D governors are
-rejected. Ambient engine, BLAS, OpenMP, CUDA-selection and loader overrides are
-not inherited: put intended values explicitly in the reviewed environment.
+template, `--reasoning off` (thinking off where the template has a switch), one
+slot, fixed context, fit off, no warmup completion, no prompt cache and a private
+loopback port. Library search is fixed to the binary's bundle. Preloads must be
+individually pinned images; H2D governors are rejected. Ambient engine, BLAS,
+OpenMP, CUDA-selection and loader overrides are not inherited: put intended values
+explicitly in the reviewed environment.
 
 ## Platform ownership and resources
 

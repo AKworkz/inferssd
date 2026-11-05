@@ -50,6 +50,24 @@ def post(base, endpoint, body, timeout):
         return decode_json(response.read())
 
 
+def get(base, endpoint, timeout):
+    with urllib.request.urlopen(base + endpoint, timeout=timeout) as response:
+        return decode_json(response.read())
+
+
+def chat_request(content, props):
+    """The benchmark's chat request. Thinking is off where the chat template can turn it off; a template that
+    always thinks, as Muse's does, takes its first reasoning_effort, its least. /props reports both."""
+    chat = {"messages": [{"role": "user", "content": content}]}
+    reasoning = props.get("reasoning") if isinstance(props, dict) else None
+    if isinstance(reasoning, dict) and reasoning.get("can_turn_off") is False:
+        if reasoning.get("efforts"):
+            chat["reasoning_effort"] = reasoning["efforts"][0]
+        return chat
+    chat.update({"chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none"})
+    return chat
+
+
 def events(response, wire=None):
     """Read SSE data records, including multiline data and comment heartbeats."""
     data = []
@@ -204,11 +222,9 @@ def record_chat(args, validate_input, protocol_extra=None, validate_result=None)
     try:
         with deadline(args.timeout):
             base = protocol["base_url"]
-            chat_request = {"messages": [{"role": "user", "content": prompt}],
-                            "chat_template_kwargs": {"enable_thinking": False},
-                            "reasoning_effort": "none"}
-            protocol["chat_request"] = chat_request
-            templated = post(base, "/apply-template", chat_request, args.timeout)
+            chat = chat_request(prompt, get(base, "/props", args.timeout))
+            protocol["chat_request"] = chat
+            templated = post(base, "/apply-template", chat, args.timeout)
             rendered, prompt_ids = templated["prompt"], templated["tokens"]
             # The server retains message provenance when tokenizing a template.
             # Re-tokenizing flattened text could interpret user text as control tokens.

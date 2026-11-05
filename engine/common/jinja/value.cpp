@@ -332,6 +332,25 @@ const func_builtins & global_builtins() {
             }
             return out;
         }},
+        {"dict", [](const func_args & args) -> value {
+            // As in Python: the entries of an optional mapping, then the keyword arguments, which win
+            auto out = mk_val<value_object>();
+            bool has_mapping = false;
+            for (const auto & arg : args.get_args()) {
+                if (is_val<value_kwarg>(arg)) {
+                    auto kwarg = cast_val<value_kwarg>(arg);
+                    out->insert(kwarg->key, kwarg->val);
+                } else if (!has_mapping && is_val<value_object>(arg)) {
+                    for (const auto & entry : arg->as_ordered_object()) {
+                        out->insert(entry.first, entry.second);
+                    }
+                    has_mapping = true;
+                } else {
+                    throw raised_exception("dict() takes at most one mapping, then keyword arguments");
+                }
+            }
+            return out;
+        }},
         {"strftime_now", [](const func_args & args) -> value {
             args.ensure_vals<value_string>();
             std::string format = args.get_pos(0)->as_string().str();

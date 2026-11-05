@@ -155,14 +155,13 @@ def record(http, tier, output, timeout):
                     decode_intervals={"first128": 127, "second128": 128, "overall256": 255})
     result = dict(status="failed", prompt_sha256=protocol["prompt_sha256"])
     try:
-        chat = dict(messages=[dict(role="user", content=raw.decode("utf-8"))],
-                    chat_template_kwargs={"enable_thinking": False}, reasoning_effort="none")
+        props = http.json("GET", "/props", None, timeout)
+        chat = stream_chat.chat_request(raw.decode("utf-8"), props)
         protocol["chat_request"] = chat
         templated = http.json("POST", "/apply-template", chat, timeout)
         rendered, prompt_ids = templated["prompt"], templated["tokens"]
         if not isinstance(rendered, str):
             raise ValueError("template response lacks rendered text")
-        props = http.json("GET", "/props", None, timeout)
         context = final_chat.validate_context(prompt_ids, props)
         request = dict(prompt=prompt_ids, n_predict=256, stream=True, temperature=0,
                        top_k=1, samplers=["top_k"], seed=0, n_probs=5,
