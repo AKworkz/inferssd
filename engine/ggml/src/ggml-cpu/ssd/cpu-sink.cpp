@@ -706,7 +706,6 @@ struct kimi_cpu_sink {
     const bool trace_enabled;
     const bool timeline_enabled;
     bool timeline_active = false;
-    size_t timeline_expert = 0;
     std::array<uint64_t, 6> timeline_call = {}; // enter, prepare end, quant end, job, I/O end, exit
     std::vector<sink_timeline_expert> timeline;
     uint64_t trace_epoch = 0, trace_token = 0, trace_call = 0;
@@ -745,17 +744,29 @@ struct kimi_cpu_sink {
     void * parallel_userdata = nullptr;
     int latent = 0, hidden = 0;
     size_t row_bytes_up = 0, row_bytes_down = 0;
-    const char * up_data = nullptr, * gate_data = nullptr, * down_data = nullptr;
-    float beta = 0, linear_beta = 0, weight = 0;
+    // One expert's share of a compute phase: its weights and routing weight, its hidden row (and SWIGLU's u row) in
+    // the phase's scratch, its output row and its quantized hidden. A phase computes the rows of every item.
+    struct sink_work_item {
+        size_t expert = 0;
+        const char * up = nullptr, * gate = nullptr, * down = nullptr;
+        float weight = 0;
+        float * hidden = nullptr, * hidden_up = nullptr;
+        float * output = nullptr;
+        uint8_t * down_quant = nullptr;
+    };
+    std::vector<sink_work_item> phase_items;
+    // A dynamic phase's chunks: item k's are work_chunks[k] .. work_chunks[k + 1] - 1.
+    std::vector<int> work_chunks;
+    float beta = 0, linear_beta = 0;
     const float * post_exp_norm = nullptr;
     int activation_kind = KIMI_CPU_SINK_ACTIVATION_SITU;
     float swiglu_limit = 0;
     float * output = nullptr;
     bool first_down = false; // without READY_FIRST: this down phase starts the slot-order sum
+    // The hidden rows of a phase's items, one after another: g, or the activation.
     std::vector<float> activation;
     std::vector<float> activation_up; // SWIGLU: u, beside g in activation, until quantize_activation
     std::vector<uint8_t> quant_input, quant_hidden;
-    const uint8_t * down_quant_data = nullptr;
     size_t quant_hidden_stride = 0;
     // Selected from the expert tensor types by prepare(); up and gate share one.
     ggml_vec_dot_t dot_up = nullptr, dot_down = nullptr;
@@ -1336,23 +1347,47 @@ struct kimi_cpu_sink {
         if (io_thread.joinable()) { io_thread.join(); }
     }
 
-    int dynamic_first_row(bool is_down) const {
+    // Request i's item of a phase, the k-th of its batch: hidden scratch row k.
+    sink_work_item work_item(size_t i, const void * const data[3], float weight, size_t k, float * output_row,
+            uint8_t * down_quant) {
+        sink_work_item w;
+        w.expert = i;
+        w.up = static_cast<const char *>(data[0]);
+        w.gate = static_cast<const char *>(data[1]);
+        w.down = static_cast<const char *>(data[2]);
+        w.weight = weight;
+        w.hidden = activation.data() + k * size_t(hidden);
+        w.hidden_up = activation_up.empty() ? nullptr : activation_up.data() + k * size_t(hidden);
+        w.output = output_row;
+        w.down_quant = down_quant;
+        return w;
+    }
+
+    // The rows before an item's first output cache line, which the coordinator computes.
+    int dynamic_first_row(const sink_work_item & w, bool is_down) const {
         const int rows = is_down ? latent : hidden;
-        const float * target = is_down ? output : activation.data();
+        const float * target = is_down ? w.output : w.hidden;
         const uintptr_t misalignment = reinterpret_cast<uintptr_t>(target) % 64;
         const int prefix = int((64 - misalignment) % 64) / int(sizeof(float));
         return std::min(rows, prefix);
     }
 
     void begin_dynamic_phase(bool is_down) {
-        if (dynamic_rows && !parallel_fn) {
-            dynamic_row_counter.next.store(dynamic_first_row(is_down), std::memory_order_relaxed);
+        if (!dynamic_rows || parallel_fn) { return; }
+        const int rows = is_down ? latent : hidden;
+        work_chunks.resize(phase_items.size() + 1);
+        work_chunks[0] = 0;
+        for (size_t k = 0; k < phase_items.size(); ++k) {
+            const int first = dynamic_first_row(phase_items[k], is_down);
+            work_chunks[k + 1] = work_chunks[k] + (rows - first + dynamic_chunk_rows - 1) / dynamic_chunk_rows;
         }
+        dynamic_row_counter.next.store(0, std::memory_order_relaxed);
     }
 
     void compute_rows(int ith, bool is_down) {
-        sink_timeline_worker * timing = timeline_active ?
-            &timeline[timeline_expert].workers[(is_down ? threads : 0) + ith] : nullptr;
+        // a phase of several experts times its workers against its first
+        sink_timeline_worker * timing = timeline_active && !parallel_fn && !phase_items.empty() ?
+            &timeline[phase_items.front().expert].workers[(is_down ? threads : 0) + ith] : nullptr;
         if (timing) { timing->begin = ggml_time_us(); timing->core = ssd::platform::current_cpu(); }
         const auto profile_start = profile_enabled ? sink_clock::now() : sink_clock::time_point();
         const double cpu_start = profile_enabled ? sink_thread_cpu_us() : 0.0;
@@ -1361,60 +1396,67 @@ struct kimi_cpu_sink {
         if (parallel_fn) {
             parallel_fn(parallel_userdata, ith, active_threads);
         } else {
-            auto compute_range = [&](int begin, int end) {
+            auto compute_range = [&](const sink_work_item & w, int begin, int end) {
                 if (!is_down && activation_kind == KIMI_CPU_SINK_ACTIVATION_SWIGLU_CLAMP) {
                     // The scalar expression of ggml_compute_forward_swiglu_clamp_f32
                     // (gate=src0, up=src1): each row is bit-identical to the graph op.
                     const float limit = swiglu_limit;
                     for (int row = begin; row < end; ++row) {
                         float u, g;
-                        dot_up(latent, &u, 0, up_data + row * row_bytes_up, 0, quant_input.data(), 0, 1);
-                        dot_up(latent, &g, 0, gate_data + row * row_bytes_up, 0, quant_input.data(), 0, 1);
+                        dot_up(latent, &u, 0, w.up + row * row_bytes_up, 0, quant_input.data(), 0, 1);
+                        dot_up(latent, &g, 0, w.gate + row * row_bytes_up, 0, quant_input.data(), 0, 1);
                         const float gate_value = std::min(g, limit);
                         const float up_value = std::clamp(u, -limit, limit);
-                        activation[row] = gate_value / (1.f + expf(-gate_value)) * up_value;
+                        w.hidden[row] = gate_value / (1.f + expf(-gate_value)) * up_value;
                     }
                 } else if (!is_down && activation_kind == KIMI_CPU_SINK_ACTIVATION_SWIGLU) {
                     // g and u as they are: the coordinator gates the whole row (quantize_activation)
                     for (int row = begin; row < end; ++row) {
-                        dot_up(latent, &activation_up[row], 0, up_data + row * row_bytes_up, 0, quant_input.data(), 0, 1);
-                        dot_up(latent, &activation[row], 0, gate_data + row * row_bytes_up, 0, quant_input.data(), 0, 1);
+                        dot_up(latent, &w.hidden_up[row], 0, w.up + row * row_bytes_up, 0, quant_input.data(), 0, 1);
+                        dot_up(latent, &w.hidden[row], 0, w.gate + row * row_bytes_up, 0, quant_input.data(), 0, 1);
                     }
                 } else if (!is_down) {
                     for (int row = begin; row < end; ++row) {
                         float u, g;
-                        dot_up(latent, &u, 0, up_data + row * row_bytes_up, 0, quant_input.data(), 0, 1);
-                        dot_up(latent, &g, 0, gate_data + row * row_bytes_up, 0, quant_input.data(), 0, 1);
+                        dot_up(latent, &u, 0, w.up + row * row_bytes_up, 0, quant_input.data(), 0, 1);
+                        dot_up(latent, &g, 0, w.gate + row * row_bytes_up, 0, quant_input.data(), 0, 1);
                         const float a = (beta * std::tanh(g * (1.0f / beta))) * (1.0f / (1.0f + std::exp(-g)));
                         if (linear_beta > 0.0f) { u = linear_beta * std::tanh(u * (1.0f / linear_beta)); }
-                        activation[row] = a * u;
+                        w.hidden[row] = a * u;
                     }
                 } else {
                     for (int row = begin; row < end; ++row) {
                         float value;
-                        dot_down(hidden, &value, 0, down_data + row * row_bytes_down, 0, down_quant_data, 0, 1);
+                        dot_down(hidden, &value, 0, w.down + row * row_bytes_down, 0, w.down_quant, 0, 1);
                         // Preserve the separate multiply followed by the graph's slot-order
                         // addition even when the compiler enables floating point contraction.
-                        volatile float scaled = post_exp_norm ? value : value * weight;
-                        if (ready_first || first_down) { output[row] = scaled; }
-                        else { output[row] += scaled; }
+                        volatile float scaled = post_exp_norm ? value : value * w.weight;
+                        if (ready_first || first_down) { w.output[row] = scaled; }
+                        else { w.output[row] += scaled; }
                     }
                 }
             };
             if (dynamic_rows) {
-                const int first = dynamic_first_row(is_down);
-                // The caller owns the short unaligned prefix. Every claimed
-                // block thereafter begins and ends on an output cache line.
-                if (ith == 0 && first) { compute_range(0, first); }
+                // The caller owns each item's short unaligned prefix. Every claimed
+                // chunk thereafter begins and ends on an output cache line.
+                if (ith == 0) {
+                    for (const auto & w : phase_items) {
+                        const int first = dynamic_first_row(w, is_down);
+                        if (first) { compute_range(w, 0, first); }
+                    }
+                }
+                size_t k = 0;
                 for (;;) {
-                    const int begin = dynamic_row_counter.next.fetch_add(dynamic_chunk_rows, std::memory_order_relaxed);
-                    if (begin >= rows) { break; }
-                    compute_range(begin, std::min(rows, begin + dynamic_chunk_rows));
+                    const int chunk = dynamic_row_counter.next.fetch_add(1, std::memory_order_relaxed);
+                    if (chunk >= work_chunks.back()) { break; }
+                    while (chunk >= work_chunks[k + 1]) { ++k; } // a participant's claims only grow
+                    const int begin = dynamic_first_row(phase_items[k], is_down) + (chunk - work_chunks[k]) * dynamic_chunk_rows;
+                    compute_range(phase_items[k], begin, std::min(rows, begin + dynamic_chunk_rows));
                 }
             } else {
                 const int begin = row_weights.empty() ? rows * ith / active_threads : bounds[ith];
                 const int end = row_weights.empty() ? rows * (ith + 1) / active_threads : bounds[ith + 1];
-                compute_range(begin, end);
+                for (const auto & w : phase_items) { compute_range(w, begin, end); }
             }
         }
         if (timing) { timing->end = ggml_time_us(); }
@@ -1950,13 +1992,13 @@ struct kimi_cpu_sink {
         wait_workers();
     }
 
-    // The hidden row of the last up/gate phase, quantized for down. SWIGLU gates it first with the graph's kernel
-    // over the whole row: split elsewhere than at its vector width, elements would move into its scalar tail.
-    void quantize_activation(void * destination) {
+    // An item's hidden row of the last up/gate phase, quantized for down. SWIGLU gates it first with the graph's
+    // kernel over the whole row: split elsewhere than at its vector width, elements would move into its scalar tail.
+    void quantize_activation(const sink_work_item & w) {
         if (activation_kind == KIMI_CPU_SINK_ACTIVATION_SWIGLU) {
-            ggml_vec_swiglu_f32(hidden, activation.data(), activation.data(), activation_up.data());
+            ggml_vec_swiglu_f32(hidden, w.hidden, w.hidden, w.hidden_up);
         }
-        quantize_hidden(activation.data(), destination, hidden);
+        quantize_hidden(w.hidden, w.down_quant, hidden);
     }
 
     void wait_workers() {
@@ -2577,12 +2619,13 @@ struct kimi_cpu_sink {
         }
         current.ring_bytes = allocated;
         current.experts = requests.size();
-        resize_scratch(activation, hidden);
-        resize_scratch(activation_up, activation_kind == KIMI_CPU_SINK_ACTIVATION_SWIGLU ? size_t(hidden) : 0);
+        // a hidden row for each expert a phase may take
+        const size_t hidden_floats = std::max<size_t>(1, requests.size()) * size_t(hidden);
+        resize_scratch(activation, hidden_floats);
+        resize_scratch(activation_up, activation_kind == KIMI_CPU_SINK_ACTIVATION_SWIGLU ? hidden_floats : 0);
         resize_scratch(quant_input, ggml_row_size(up_traits->vec_dot_type, latent));
         quant_hidden_stride = ggml_row_size(down_traits->vec_dot_type, hidden);
         resize_scratch(quant_hidden, quant_hidden_stride);
-        down_quant_data = quant_hidden.data();
         if (nonblocking_down_sched) {
             if (quant_hidden_stride && requests.size() > std::numeric_limits<size_t>::max() / quant_hidden_stride) {
                 throw std::runtime_error("nonblocking down scheduler scratch overflow");
@@ -2600,7 +2643,10 @@ struct kimi_cpu_sink {
 
     // Role-major makes many up/gate pairs ready before their down reads. Treat
     // those halves as independent work: never reserve the caller on one
-    // expert's late down CQE while another expert's up/gate can run.
+    // expert's late down CQE while another expert's up/gate can run. Each
+    // phase takes every expert ready for it, so a layer whose experts are in
+    // memory runs as one up/gate and one down phase, and one whose reads
+    // land one by one as it did before, an expert a phase.
     void run_nonblocking_down_schedule() {
         enum work_type { no_work, up_gate_work, down_work, gpu_work };
         const size_t cpu_experts = std::count_if(expert_stage.begin(), expert_stage.end(),
@@ -2614,48 +2660,63 @@ struct kimi_cpu_sink {
         bool moved = false; // host jobs launched in this layer
         std::fill(expert_cpu_us.begin(), expert_cpu_us.end(), 0.0);
         expert_cpu_us.resize(requests.size(), 0.0);
+        auto payload = [&](size_t i, int role) {
+            const auto & r = requests[i];
+            return static_cast<const char *>(r.cache_hit >= 0 ? cache.data(r.cache_hit, role) : r.read_target[role]) +
+                r.role[role].data_offset;
+        };
+        std::vector<size_t> batch;           // the experts of the next phase, in request order
+        std::vector<uint8_t> source_whole;   // up/gate work: the expert's three roles are in memory
         while (finished < cpu_experts) {
-            size_t expert = requests.size();
             work_type work = no_work;
-            bool upload_source_complete = false;
             const auto ready_wait_start = sink_clock::now();
             const uint64_t ready_wait_us = timeline_active ? ggml_time_us() : 0;
             {
                 std::unique_lock<std::mutex> lock(io_mutex);
+                // The GPU's work first (its launch returns at once), then every expert whose up and gate are in memory,
+                // then every expert whose down is. The GPU takes whole experts only: a partial planned one waits for
+                // it rather than start here.
                 auto choose = [&] {
-                    // Up/gate work always wins. Fully ready experts do not
-                    // preempt a partial expert, because neither choice blocks.
+                    work = no_work;
+                    batch.clear();
+                    source_whole.clear();
+                    size_t gpu = requests.size();
                     for (size_t i = 0; i < requests.size(); ++i) {
                         if (expert_stage[i] != 0) { continue; }
                         const auto & r = requests[i];
+                        bool pair = true, whole = true;
                         if (r.cache_hit >= 0) {
                             if (prefetch_hit_state(r.cache_hit) != 1) { continue; }
-                            expert = i; work = planned(i) ? gpu_work : up_gate_work; upload_source_complete = true; return;
+                        } else {
+                            const auto & slot = slots[r.io_slot];
+                            if (slot.request != i) { continue; }
+                            pair = (slot.ready_roles & 3u) == 3u;
+                            whole = (slot.ready_roles & 7u) == 7u;
                         }
-                        const auto & slot = slots[r.io_slot];
-                        if (slot.request == i && (slot.ready_roles & 7u) == 7u && planned(i)) {
-                            expert = i; work = gpu_work; upload_source_complete = true; return;
-                        }
-                        // The GPU takes whole experts only; leave a partial planned one to it rather than start it here.
-                        if (slot.request == i && (slot.ready_roles & 3u) == 3u && !planned(i)) {
-                            expert = i; work = up_gate_work;
-                            upload_source_complete = r.cache_admit >= 0 && (slot.ready_roles & 4u);
-                            return;
+                        if (planned(i)) {
+                            if (whole && gpu == requests.size()) { gpu = i; }
+                        } else if (pair) {
+                            batch.push_back(i);
+                            source_whole.push_back(whole);
                         }
                     }
+                    if (gpu < requests.size()) {
+                        batch.assign(1, gpu);
+                        work = gpu_work;
+                        return;
+                    }
+                    if (!batch.empty()) { work = up_gate_work; return; }
                     for (size_t i = 0; i < requests.size(); ++i) {
                         if (expert_stage[i] != 1) { continue; }
                         const auto & r = requests[i];
-                        if (r.cache_hit >= 0) { expert = i; work = down_work; return; }
-                        const auto & slot = slots[r.io_slot];
-                        if (slot.request == i && (slot.ready_roles & 4u)) {
-                            expert = i; work = down_work; return;
+                        if (r.cache_hit >= 0 || (slots[r.io_slot].request == i && (slots[r.io_slot].ready_roles & 4u))) {
+                            batch.push_back(i);
                         }
                     }
+                    if (!batch.empty()) { work = down_work; }
                 };
                 io_cv.wait(lock, [&] {
                     if (!io_error.empty()) { return true; }
-                    expert = requests.size(); work = no_work; upload_source_complete = false;
                     choose();
                     if (work != no_work || prefetch_hit_failed()) { return true; }
                     if (!io_done || prefetch_hits_pending()) { host_lock_in_shadow(); return false; }
@@ -2679,27 +2740,17 @@ struct kimi_cpu_sink {
                     throw std::runtime_error("nonblocking down scheduler has no runnable work");
                 }
                 if (timeline_active && work == up_gate_work) {
-                    timeline[expert].cpu[0] = ready_wait_us;
-                    timeline[expert].cpu[1] = ggml_time_us();
+                    for (size_t i : batch) {
+                        timeline[i].cpu[0] = ready_wait_us;
+                        timeline[i].cpu[1] = ggml_time_us();
+                    }
                 }
             }
 
-            const auto & request = requests[expert];
-            const void * data[3];
-            for (int role = 0; role < 3; ++role) {
-                data[role] = static_cast<const char *>(request.cache_hit >= 0 ? cache.data(request.cache_hit, role) : request.read_target[role]) + request.role[role].data_offset;
-            }
-            const bool borrow_upload = request.cache_hit >= 0 || request.cache_admit >= 0;
-            up_data = static_cast<const char *>(data[0]);
-            gate_data = static_cast<const char *>(data[1]);
-            down_data = static_cast<const char *>(data[2]);
-            weight = request.weight;
-            output = expert_output.data() + expert * size_t(latent);
-            timeline_expert = expert;
-
             if (work == gpu_work) {
+                const size_t expert = batch.front();
                 // Every other whole planned expert goes in the same engine batch.
-                std::vector<size_t> batch = { expert };
+                std::vector<size_t> gpu_batch = { expert };
                 {
                     std::lock_guard<std::mutex> lock(io_mutex);
                     for (size_t i = 0; i < requests.size(); ++i) {
@@ -2707,27 +2758,24 @@ struct kimi_cpu_sink {
                         const auto & r = requests[i];
                         const bool whole = r.cache_hit >= 0 ? prefetch_hit_state(r.cache_hit) == 1 :
                             (slots[r.io_slot].request == i && (slots[r.io_slot].ready_roles & 7u) == 7u);
-                        if (whole) { batch.push_back(i); }
+                        if (whole) { gpu_batch.push_back(i); }
                     }
                 }
                 std::vector<kimi_vram_host_job> jobs;
                 std::vector<std::array<const void *, 3>> payloads;
-                for (size_t i : batch) {
+                for (size_t i : gpu_batch) {
                     const auto & r = requests[i];
-                    std::array<const void *, 3> payload;
-                    for (int role = 0; role < 3; ++role) {
-                        payload[role] = static_cast<const char *>(r.cache_hit >= 0 ? cache.data(r.cache_hit, role) : r.read_target[role]) + r.role[role].data_offset;
-                    }
-                    payloads.push_back(payload);
+                    const std::array<const void *, 3> roles = { payload(i, 0), payload(i, 1), payload(i, 2) };
+                    payloads.push_back(roles);
                     // A post-norm model weights each expert after its norm (the reduction below), as the
                     // resident tier requests do: the GPU returns the unweighted output.
-                    jobs.push_back({ int32_t(i), post_exp_norm ? 1.0f : r.weight, { payload[0], payload[1], payload[2] } });
+                    jobs.push_back({ int32_t(i), post_exp_norm ? 1.0f : r.weight, { roles[0], roles[1], roles[2] } });
                 }
                 if (vram.launch_host(jobs)) {
                     place.gpu_experts += jobs.size();
                     moved = true;
-                    for (size_t k = 0; k < batch.size(); ++k) {
-                        const size_t i = batch[k];
+                    for (size_t k = 0; k < gpu_batch.size(); ++k) {
+                        const size_t i = gpu_batch[k];
                         const auto & r = requests[i];
                         // Tier admission as on the CPU path, from the same complete payload, after the launch: a discrete
                         // GPU's job may have taken the expert's reservation, and then this admit has nothing to do.
@@ -2742,69 +2790,83 @@ struct kimi_cpu_sink {
                     }
                     continue;
                 }
-                // The tier took nothing for this layer: compute them here, and the rest of the layer too.
+                // The tier took nothing for this layer: the CPU computes the rest of it, these experts too.
                 ++place.refused;
                 host_gpu = false;
-                work = up_gate_work;
-            }
-            if (work == up_gate_work) {
-                const auto compute_start = sink_clock::now();
-                if (vram.async_upload && borrow_upload && upload_source_complete && !expert_upload_started[expert]) {
-                    vram.admit(expert, data, true);
-                    expert_upload_started[expert] = 1;
-                }
-                auto phase_start = sink_clock::now();
-                if (timeline_active) { timeline[expert].cpu[2] = ggml_time_us(); }
-                compute_phase(false);
-                if (timeline_active) { timeline[expert].cpu[3] = ggml_time_us(); }
-                current.up_gate_us += elapsed_us(phase_start);
-
-                phase_start = sink_clock::now();
-                const double quant_cpu_start = profile_enabled ? sink_thread_cpu_us() : 0.0;
-                if (timeline_active) { timeline[expert].cpu[4] = ggml_time_us(); }
-                quantize_activation(staged_quant_hidden.data() + expert * quant_hidden_stride);
-                if (timeline_active) { timeline[expert].cpu[5] = ggml_time_us(); }
-                current.hidden_quantize_us += elapsed_us(phase_start);
-                if (profile_enabled) { current.compute_cpu_us += sink_thread_cpu_us() - quant_cpu_start; }
-                const double up_gate_us = elapsed_us(compute_start);
-                current.compute_us += up_gate_us;
-                expert_cpu_us[expert] += up_gate_us;
-                expert_stage[expert] = 1;
                 continue;
             }
 
             const auto compute_start = sink_clock::now();
-            if (!expert_upload_started[expert] && vram.async_upload && borrow_upload) {
-                // Down readiness proves that all three immutable payloads are
-                // complete. The upload and CPU down projection may borrow them
-                // concurrently, exactly as in the blocking path.
-                vram.admit(expert, data, true);
-                expert_upload_started[expert] = 1;
+            phase_items.clear();
+            for (size_t k = 0; k < batch.size(); ++k) {
+                const size_t i = batch[k];
+                const auto & r = requests[i];
+                const void * data[3] = { payload(i, 0), payload(i, 1), payload(i, 2) };
+                const bool borrow = r.cache_hit >= 0 || r.cache_admit >= 0;
+                // Up/gate work may borrow an admission's payload only once its down has landed too; down readiness
+                // proves all three roles, exactly as in the blocking path.
+                const bool whole = work == up_gate_work ? r.cache_hit >= 0 || (r.cache_admit >= 0 && source_whole[k]) : true;
+                if (vram.async_upload && borrow && whole && !expert_upload_started[i]) {
+                    vram.admit(i, data, true);
+                    expert_upload_started[i] = 1;
+                }
+                phase_items.push_back(work_item(i, data, r.weight, k, expert_output.data() + i * size_t(latent),
+                    staged_quant_hidden.data() + i * quant_hidden_stride));
             }
-            down_quant_data = staged_quant_hidden.data() + expert * quant_hidden_stride;
+            if (work == up_gate_work) {
+                auto phase_start = sink_clock::now();
+                if (timeline_active) { for (size_t i : batch) { timeline[i].cpu[2] = ggml_time_us(); } }
+                compute_phase(false);
+                if (timeline_active) { for (size_t i : batch) { timeline[i].cpu[3] = ggml_time_us(); } }
+                current.up_gate_us += elapsed_us(phase_start);
+
+                phase_start = sink_clock::now();
+                const double quant_cpu_start = profile_enabled ? sink_thread_cpu_us() : 0.0;
+                if (timeline_active) { for (size_t i : batch) { timeline[i].cpu[4] = ggml_time_us(); } }
+                for (const auto & w : phase_items) { quantize_activation(w); }
+                if (timeline_active) { for (size_t i : batch) { timeline[i].cpu[5] = ggml_time_us(); } }
+                current.hidden_quantize_us += elapsed_us(phase_start);
+                if (profile_enabled) { current.compute_cpu_us += sink_thread_cpu_us() - quant_cpu_start; }
+                const double up_gate_us = elapsed_us(compute_start);
+                current.compute_us += up_gate_us;
+                for (size_t i : batch) {
+                    expert_cpu_us[i] += up_gate_us / double(batch.size());
+                    expert_stage[i] = 1;
+                }
+                continue;
+            }
+
             const auto phase_start = sink_clock::now();
-            if (timeline_active) { timeline[expert].cpu[6] = ggml_time_us(); }
-            // the last unfinished expert's down projection ends the layer's CPU work
-            compute_phase(true, finished + 1 == cpu_experts);
-            if (timeline_active) { timeline[expert].cpu[7] = ggml_time_us(); }
-            current.down_reduce_us += elapsed_us(phase_start);
+            if (timeline_active) { for (size_t i : batch) { timeline[i].cpu[6] = ggml_time_us(); } }
+            // the last unfinished experts' down projections end the layer's CPU work
+            compute_phase(true, finished + batch.size() == cpu_experts);
+            if (timeline_active) { for (size_t i : batch) { timeline[i].cpu[7] = ggml_time_us(); } }
+            const double down_us = elapsed_us(phase_start);
+            current.down_reduce_us += down_us;
             current.compute_us += elapsed_us(compute_start);
-            // This machine's CPU time per decode expert, the cost the GPU placement compares against.
-            const double expert_us = expert_cpu_us[expert] + elapsed_us(phase_start);
-            ssd::place::observe_expert(learning, { expert_us, expert_cpu_us[expert], io_requests.empty(), moved });
-            observe_decode_threads(expert_us);
-            if (!expert_upload_started[expert]) { vram.admit(expert, data, borrow_upload); }
-            cache.admit(request, current);
-            if (request.cache_hit < 0) {
-                std::lock_guard<std::mutex> lock(io_mutex);
-                slots[request.io_slot].state = sink_slot::empty;
+            for (size_t i : batch) {
+                const auto & request = requests[i];
+                // This machine's CPU time per decode expert, the cost the GPU placement compares against: an expert's
+                // share of the phases it ran in.
+                const double expert_us = expert_cpu_us[i] + down_us / double(batch.size());
+                ssd::place::observe_expert(learning, { expert_us, expert_cpu_us[i], io_requests.empty(), moved });
+                observe_decode_threads(expert_us);
+                if (!expert_upload_started[i]) {
+                    const void * data[3] = { payload(i, 0), payload(i, 1), payload(i, 2) };
+                    vram.admit(i, data, request.cache_hit >= 0 || request.cache_admit >= 0);
+                }
+                cache.admit(request, current);
+                if (request.cache_hit < 0) {
+                    std::lock_guard<std::mutex> lock(io_mutex);
+                    slots[request.io_slot].state = sink_slot::empty;
+                }
+                expert_stage[i] = 2;
+                expert_computed[i] = 1;
+                current.ready_out_of_order_experts += i != down_ordinal;
+                ++down_ordinal;
+                ++finished;
             }
             io_cv.notify_one();
-            expert_stage[expert] = 2;
-            expert_computed[expert] = 1;
-            current.ready_out_of_order_experts += expert != down_ordinal;
-            ++down_ordinal;
-            ++finished;
         }
     }
 
@@ -3698,21 +3760,17 @@ extern "C" bool kimi_cpu_sink_run_activation(
             }
             bool upload_started = sink->vram.async_upload && borrow_upload && upload_source_complete;
             if (upload_started) { sink->vram.admit(expert, data, true); }
-            sink->up_data = static_cast<const char *>(data[0]);
-            sink->gate_data = static_cast<const char *>(data[1]);
-            sink->down_data = static_cast<const char *>(data[2]);
-            sink->weight = request.weight;
+            sink->phase_items.assign(1, sink->work_item(expert, data, request.weight, 0, sink->output, sink->quant_hidden.data()));
             double down_wait_us = 0;
-            if (sink->timeline_active) { sink->timeline_expert = expert; }
             auto phase_start = sink_clock::now();
-            if (sink->timeline_active) { sink->timeline_expert = expert; sink->timeline[expert].cpu[2] = ggml_time_us(); }
+            if (sink->timeline_active) { sink->timeline[expert].cpu[2] = ggml_time_us(); }
             sink->compute_phase(false);
             if (sink->timeline_active) { sink->timeline[expert].cpu[3] = ggml_time_us(); }
             sink->current.up_gate_us += elapsed_us(phase_start);
             phase_start = sink_clock::now();
             quant_cpu_start = sink->profile_enabled ? sink_thread_cpu_us() : 0.0;
             if (sink->timeline_active) { sink->timeline[expert].cpu[4] = ggml_time_us(); }
-            sink->quantize_activation(sink->quant_hidden.data());
+            sink->quantize_activation(sink->phase_items.front());
             if (sink->timeline_active) { sink->timeline[expert].cpu[5] = ggml_time_us(); }
             sink->current.hidden_quantize_us += elapsed_us(phase_start);
             if (sink->profile_enabled) { sink->current.compute_cpu_us += sink_thread_cpu_us() - quant_cpu_start; }

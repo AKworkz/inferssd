@@ -205,7 +205,7 @@ extern "C" bool kimi_cpu_sink_run_cache_compute(kimi_cpu_sink * sink,
         for(int n=0;n<native_count;++n){if((a.plan.original_mask&~before)&(1u<<n)){a.baseline_miss_bytes+=stride;}}
         a.prepared_us=ggml_time_us();
         sink->activation_kind=KIMI_CPU_SINK_ACTIVATION_SITU;sink->swiglu_limit=0.0f;
-        sink->beta=situ_beta;sink->linear_beta=situ_linear_beta;sink->weight=1.0f;
+        sink->beta=situ_beta;sink->linear_beta=situ_linear_beta;
         auto phase=sink_clock::now();sink->quantize_input(input,sink->quant_input.data(),sink->latent);
         sink->current.input_quantize_us=elapsed_us(phase);sink->current.compute_us+=sink->current.input_quantize_us;
         std::fill(output,output+sink->latent,0.0f);
@@ -272,10 +272,10 @@ extern "C" bool kimi_cpu_sink_run_cache_compute(kimi_cpu_sink * sink,
             const bool upload_early=locations.version&&locations.admit&&!r.cache_only&&sink->vram.async_upload&&
                 (r.cache_hit>=0||r.cache_admit>=0);
             if(upload_early){checked(locations.admit(location_context,&candidates[n],data[0],data[1],data[2],1,error,error_size));}
-            sink->up_data=static_cast<const char *>(data[0]);sink->gate_data=static_cast<const char *>(data[1]);sink->down_data=static_cast<const char *>(data[2]);
-            sink->output=sink->expert_output.data()+size_t(selected)*sink->latent;sink->weight=1.0f;
+            sink->phase_items.assign(1,sink->work_item(size_t(selected),data,1.0f,0,sink->expert_output.data()+size_t(selected)*sink->latent,
+                sink->quant_hidden.data()));
             phase=sink_clock::now();sink->compute_phase(false);sink->current.up_gate_us+=elapsed_us(phase);
-            phase=sink_clock::now();sink->quantize_hidden(sink->activation.data(),sink->quant_hidden.data(),sink->hidden);sink->current.hidden_quantize_us+=elapsed_us(phase);
+            phase=sink_clock::now();sink->quantize_hidden(sink->phase_items.front().hidden,sink->quant_hidden.data(),sink->hidden);sink->current.hidden_quantize_us+=elapsed_us(phase);
             phase=sink_clock::now();sink->compute_phase(true);sink->current.down_reduce_us+=elapsed_us(phase);
             r.events[7]=ggml_time_us();sink->current.compute_us+=elapsed_us(compute_start);a.computed_mask|=1u<<n;
             if(locations.version&&locations.admit&&!r.cache_only&&!upload_early) {
