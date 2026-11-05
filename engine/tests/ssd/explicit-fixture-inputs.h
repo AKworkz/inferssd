@@ -162,8 +162,8 @@ struct fixture_inputs {
 #define FIXTURE_TIER_INT(field) out.field = integer("tier." #field, out.field)
         FIXTURE_TIER_BOOL(async_upload); FIXTURE_TIER_BOOL(memory_trace); FIXTURE_TIER_BOOL(keep_across_requests);
         FIXTURE_TIER_BOOL(timing); FIXTURE_TIER_BOOL(elastic); FIXTURE_TIER_BOOL(demand_reclaim);
-        FIXTURE_TIER_BOOL(deferred_upload); FIXTURE_TIER_BOOL(mxfp4_batch); FIXTURE_TIER_BOOL(watermark);
-        FIXTURE_TIER_BOOL(global); FIXTURE_TIER_BOOL(adaptive_admission); FIXTURE_TIER_BOOL(mxfp4_gpu_hidden);
+        FIXTURE_TIER_BOOL(deferred_upload); FIXTURE_TIER_BOOL(watermark);
+        FIXTURE_TIER_BOOL(global); FIXTURE_TIER_BOOL(adaptive_admission);
         FIXTURE_TIER_INT(safety_mib); FIXTURE_TIER_INT(safety_blocks); FIXTURE_TIER_INT(margin_mib);
         FIXTURE_TIER_INT(max_slots); FIXTURE_TIER_INT(fail_malloc_at); FIXTURE_TIER_INT(fail_free_at);
         FIXTURE_TIER_INT(low_mib); FIXTURE_TIER_INT(high_mib);

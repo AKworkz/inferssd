@@ -55,8 +55,8 @@ the finite-RAM same-sink numerical comparison or normal reader-shutdown checks.
 
 Device failures are not allowlisted. Record each one with its full test name,
 reproduction conditions and outcome on the current hardware. A test with a
-hardware-specific numeric expectation, such as MXFP4 parity on GB10, must
-document that expectation rather than become a generic skip.
+hardware-specific numeric expectation must document that expectation rather
+than become a generic skip.
 
 ## Resource prerequisites
 

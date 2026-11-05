@@ -42,7 +42,9 @@ struct fixture {
 
 // Frozen acceptance expressions from main b3904ade6's shared graph callsite,
 // and those of qwen4exp and qwen35moe: SiLU-gated experts, up and gate of one
-// type, no post norm required. Keep this independent of the extracted requirement flags and validator.
+// type, no post norm required. DeepSeek's once required MXFP4 experts (the GPU
+// tier's hand engine); it takes any format now, as the others do. Keep this
+// independent of the extracted requirement flags and validator.
 bool baseline_accepts(llm_arch arch, float clamp, const llama_ssd::expert_inputs & in) {
     const bool layout = in.backend_available && in.runtime_available && in.up && in.gate && in.down &&
         ggml_is_contiguous(in.up) && ggml_is_contiguous(in.gate) && ggml_is_contiguous(in.down) &&
@@ -54,10 +56,8 @@ bool baseline_accepts(llm_arch arch, float clamp, const llama_ssd::expert_inputs
         !in.up_bias && !in.gate_bias && !in.down_bias &&
         !in.up_scale && !in.gate_scale && !in.down_scale &&
         !in.weight_before_ffn && !in.has_lora;
-    const bool mxfp4 = layout && in.up->type == GGML_TYPE_MXFP4 &&
-        in.gate->type == GGML_TYPE_MXFP4 && in.down->type == GGML_TYPE_MXFP4;
     const bool deepseek = layout && arch == LLM_ARCH_DEEPSEEK41 &&
-        in.silu && !in.cache_compute && (in.n_tokens == 1 || in.prefill) && mxfp4 &&
+        in.silu && !in.cache_compute && (in.n_tokens == 1 || in.prefill) && in.gate->type == in.up->type &&
         std::isfinite(clamp) && clamp > 1e-6f;
     const bool muse = layout && arch == LLM_ARCH_MUSE_SPARK && in.silu && !in.cache_compute &&
         in.post_norm && in.gate->type == in.up->type;
@@ -311,7 +311,8 @@ void refusal_reasons() {
 
 bool contains(const std::string & text, const char * part) { return text.find(part) != std::string::npos; }
 
-// DeepSeek-V4.1-Flash Q3_K_M as published: Q3_K up and gate, Q4_K down in most layers.
+// DeepSeek-V4.1-Flash Q3_K_M as published: Q3_K up and gate, Q4_K down in most layers. Accepted as MXFP4 is; up and
+// gate of different types are refused, and the refusal names them.
 void quantization_refusals_name_the_types() {
     using refusal = llama_ssd::expert_refusal;
     fixture f;
@@ -320,11 +321,13 @@ void quantization_refusals_name_the_types() {
     llama_hparams hparams{};
     hparams.swiglu_clamp_exp[0] = 7.0f;
     const auto deepseek = llama_ssd::describe_experts(LLM_ARCH_DEEPSEEK41, hparams, 0);
+    CHECK(llama_ssd::validate_experts(deepseek, f.inputs()).accepted());
+    f.gate = tensor(GGML_TYPE_Q4_K, 256, 512, 4);
     const auto refused = llama_ssd::validate_experts(deepseek, f.inputs());
     CHECK(refused.refusal == refusal::quantization);
     const auto message = llama_ssd::describe_refusal(f.inputs(), refused.refusal);
     CHECK(contains(message, "not supported yet"));
-    CHECK(contains(message, "up=q3_K gate=q3_K down=q4_K"));
+    CHECK(contains(message, "up=q3_K gate=q4_K down=q4_K"));
 
     fixture mixed;
     mixed.up = tensor(GGML_TYPE_Q4_K, 256, 512, 4);

@@ -1,4 +1,4 @@
-#include "gpu-kernels.h"
+#include "gpu-services.h"
 #include "explicit-fixture-inputs.h"
 // The grouped prefill engine of the VRAM tier (ggml-cuda/ssd/group-compute-adapter.cu) against the CPU lane
 // (kimi_cpu_prefill_run_activation) on the same packed experts.

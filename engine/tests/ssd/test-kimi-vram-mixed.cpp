@@ -1,11 +1,11 @@
 #include "explicit-fixture-inputs.h"
-// CUDA test of a tier whose layers' experts have different formats, as Muse Spark Q4_K_S's (down Q4_K in most layers,
-// Q5_K in some): layer 1 Q4_K/Q4_K and layer 2 Q4_K/Q5_K, declared per layer. Slots are the larger expert's; both
-// layers' residents share the one pool, an eviction gives a slot to an expert of the other format, a deferred upload
-// copies its own layer's roles while a layer of the other format is prepared, and a host job is copied as its layer
-// lays it out; each layer's rows match its experts computed on the CPU. Declarations that change, calls that differ
-// from theirs and MXFP4 mixed with another format are refused.
-#include "gpu-kernels.h"
+// CUDA test of a tier whose layers' experts have different formats, declared per layer: as Muse Spark Q4_K_S's (down
+// Q4_K in most layers, Q5_K in some), layer 1 Q4_K/Q4_K and layer 2 Q4_K/Q5_K; and MXFP4 beside them, layer 1
+// MXFP4/MXFP4 and layer 2 Q4_K/Q5_K. Slots are the larger expert's; both layers' residents share the one pool, an
+// eviction gives a slot to an expert of the other format, a deferred upload copies its own layer's roles while a layer
+// of the other format is prepared, and a host job is copied as its layer lays it out; each layer's rows match its
+// experts computed on the CPU. Declarations that change and calls that differ from theirs are refused.
+#include "gpu-services.h"
 #include "vram-tier.cpp"
 #include <cmath>
 #include <cstring>
@@ -33,8 +33,8 @@ void require(bool ok, const std::string & what) { ++assertions; if (!ok) throw s
 
 constexpr int latent = 256, hidden = 256, experts = 8;
 const int32_t layer_ids[2] = { 1, 2 };
-const int32_t up_types[2] = { GGML_TYPE_Q4_K, GGML_TYPE_Q4_K };
-const int32_t down_types[2] = { GGML_TYPE_Q4_K, GGML_TYPE_Q5_K };
+// the model's layers' types (run sets them)
+int32_t up_types[2] = {}, down_types[2] = {};
 size_t role_bytes(int layer, int role) {
     const ggml_type type = ggml_type(role == 2 ? down_types[layer - 1] : up_types[layer - 1]);
     return (ggml_row_size(type, role == 2 ? hidden : latent) * size_t(role == 2 ? latent : hidden) + 4095) & ~size_t(4095);
@@ -162,20 +162,14 @@ void refused(tier & t, int layer, const kimi_vram_expert_format & f, const char 
         std::string("not refused with \"") + wanted + "\": " + error);
     require(!t.table && !t.arena && t.blocks.empty(), "a refusal left the tier's storage");
 }
-}
 
-int main() {
-    fixture_inputs inputs; inputs.set_runtime_services(test_gpu_services()); try {
-    ggml_cpu_init();
-    inputs.set("vram_async", "1");
-    inputs.set("vram_deferred", "1");
-    inputs.set("tier.policy", "lru");
-    inputs.set("tier.min_count", "0");
-    inputs.set("tier.global", "1");
+void run(fixture_inputs & inputs, ggml_type first_layer) {
+    up_types[0] = down_types[0] = first_layer;
+    up_types[1] = GGML_TYPE_Q4_K; down_types[1] = GGML_TYPE_Q5_K;
     const store s;
     const size_t larger = expert_bytes(2);
     require(larger > expert_bytes(1), "the fixture's second layer must have the larger expert");
-    tier t(3 * larger, inputs.tier_policy(), nullptr, test_cpu_kernels()); // three slots, one pool for both layers
+    tier t(3 * larger, inputs.tier_policy()); // three slots, one pool for both layers
     struct cleanup { ~cleanup() { open_gate(); } } cleanup_on_error; // before the tier waits for a held upload
     t.deferred_hook = upload_gate;
 
@@ -222,7 +216,7 @@ int main() {
     require(copy_started(), "the deferred upload did not start");
     const int target = t.table->admissions[0];
     layer_step(t, s, 1, 7, { 0 }, "a layer 1 hit while a layer 2 upload is in flight");
-    require(t.now().down_type == int(GGML_TYPE_Q4_K), "the tier did not select layer 1's format");
+    require(t.now().down_type == down_types[0], "the tier did not select layer 1's format");
     open_gate();
     {
         kimi_vram_request collected[4] = {};
@@ -270,10 +264,10 @@ int main() {
     // Refusals. A later call whose declaration differs, a call whose types differ from its layer's declaration, a
     // geometry that differs from the first call's.
     {
-        tier u(3 * larger, inputs.tier_policy(), nullptr, test_cpu_kernels());
+        tier u(3 * larger, inputs.tier_policy());
         u.begin(77, 1, true);
         layer_step(u, s, 1, 1, { 0 }, "a declared layer");
-        const int32_t uniform_down[2] = { GGML_TYPE_Q4_K, GGML_TYPE_Q4_K };
+        const int32_t uniform_down[2] = { down_types[0], down_types[0] };
         auto changed = declared(1); changed.layer_down_types = uniform_down;
         refused(u, 1, changed, "VRAM expert format changed");
         auto wrong = declared(2); wrong.down_type = GGML_TYPE_Q4_K;
@@ -281,15 +275,24 @@ int main() {
         auto wider = declared(1); wider.hidden = 2 * hidden;
         refused(u, 1, wider, "geometry changed");
     }
-    // MXFP4 experts have their own engine family: a model of MXFP4 and another format stays off the tier.
-    {
-        tier v(3 * larger, inputs.tier_policy(), nullptr, test_cpu_kernels());
-        const int32_t mx_up[2] = { GGML_TYPE_MXFP4, GGML_TYPE_Q4_K }, mx_down[2] = { GGML_TYPE_MXFP4, GGML_TYPE_Q4_K };
-        const kimi_vram_expert_format f = { latent, hidden, GGML_TYPE_Q4_K, GGML_TYPE_Q4_K, experts, 2, layer_ids, mx_up, mx_down };
-        refused(v, 2, f, "MXFP4 experts cannot share");
-    }
-    std::printf("KIMI_VRAM_MIXED_PASS assertions=%d stride=%zu layer1_expert=%zu layer2_expert=%zu\n", assertions,
-        larger, expert_bytes(1), expert_bytes(2));
+    std::printf("KIMI_VRAM_MIXED_MODEL_PASS layer1=%s/%s layer2=%s/%s stride=%zu layer1_expert=%zu layer2_expert=%zu\n",
+        ggml_type_name(ggml_type(up_types[0])), ggml_type_name(ggml_type(down_types[0])),
+        ggml_type_name(ggml_type(up_types[1])), ggml_type_name(ggml_type(down_types[1])), larger, expert_bytes(1),
+        expert_bytes(2));
+}
+}
+
+int main() {
+    fixture_inputs inputs; inputs.set_runtime_services(test_gpu_services()); try {
+    ggml_cpu_init();
+    inputs.set("vram_async", "1");
+    inputs.set("vram_deferred", "1");
+    inputs.set("tier.policy", "lru");
+    inputs.set("tier.min_count", "0");
+    inputs.set("tier.global", "1");
+    run(inputs, GGML_TYPE_Q4_K);
+    run(inputs, GGML_TYPE_MXFP4);
+    std::printf("KIMI_VRAM_MIXED_PASS assertions=%d\n", assertions);
     return 0;
     } catch (const std::exception & e) {
         std::fprintf(stderr, "KIMI_VRAM_MIXED_FAIL: %s\n", e.what());

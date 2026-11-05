@@ -15,12 +15,8 @@ struct sink_vram {
     std::vector<kimi_vram_request> requests;
     std::vector<int> slots;
     int hits = 0;
-    bool format_f32_input = false;
-    bool format_mxfp4_input = false;
-    bool mxfp4_batch_enabled = true;
-    // The format's grouped-prefill lane (the tier's, prefill API v7): which engine its passes run on, and this layer's
-    // use of it: a batched engine (MXFP4's hand engine or the batched engine of any other format),
-    // and whether this pass's streamed transients are read in place.
+    // The format's grouped-prefill lane (the tier's, prefill API v9): whether its passes run on the batched engine, and
+    // this layer's use of it, and whether this pass's streamed transients are read in place.
     kimi_vram_prefill_lane prefill_lane = {};
     bool prefill_batched = false, prefill_in_place = false;
     bool exclusive = false, decode = false, prefill_open = false, async_upload = false, prefill_enabled = false;
@@ -100,7 +96,6 @@ struct sink_vram {
             exclusive = configuration.policy.vram_exclusive;
             deferred_upload = configuration.policy.vram_deferred;
             prefill_enabled = configuration.policy.vram_prefill;
-            mxfp4_batch_enabled = configuration.policy.tier.mxfp4_batch;
         }
         if (configuration.production) {
             const auto * budget = configuration.settings.vram_budget();
@@ -153,7 +148,7 @@ struct sink_vram {
         }
         if (prefill_enabled) {
             prefill_api = configuration.gpu.prefill;
-            if (!prefill_api || prefill_api->version != 8 || prefill_api->size != sizeof(*prefill_api) ||
+            if (!prefill_api || prefill_api->version != 9 || prefill_api->size != sizeof(*prefill_api) ||
                     !prefill_api->prepare || !prefill_api->transient_available || !prefill_api->launch ||
                     !prefill_api->finish || !prefill_api->cancel || !prefill_api->cold_admission_active ||
                     !prefill_api->admit_cold || !prefill_api->lane) {
@@ -194,14 +189,14 @@ struct sink_vram {
                 throw std::runtime_error("GPU tier typed-settings ABI missing or incompatible");
             }
             const ssd::runtime_services services{ configuration.events, &configuration.debug, configuration.host,
-                &configuration.gpu, &configuration.cpu, configuration.gpu_device, configuration.source, configuration.gpu_transport };
+                &configuration.gpu, configuration.gpu_device, configuration.source, configuration.gpu_transport };
             context = settings_api->create(&configuration.settings, &services, error, sizeof(error));
         } else {
             const auto * test_api = configuration.gpu.testing;
-            if (!test_api || test_api->version != 2 || test_api->size != sizeof(*test_api) || !test_api->create) {
+            if (!test_api || test_api->version != 3 || test_api->size != sizeof(*test_api) || !test_api->create) {
                 throw std::runtime_error("explicit CUDA fixture factory missing");
             }
-            context = test_api->create(bytes, &configuration.policy.tier, &configuration.cpu, error, sizeof(error));
+            context = test_api->create(bytes, &configuration.policy.tier, error, sizeof(error));
         }
         if (!context) { throw std::runtime_error(std::string("GPU tier create: ") + error); }
         if (configuration.gpu.policy) {
@@ -337,26 +332,20 @@ struct sink_vram {
         char error[512] = {};
         int result;
         {
-            // MXFP4's engine takes the input quantized, the generic one (every other format the CUDA
-            // backend has a matrix-vector kernel for; it refuses the rest) takes it as f32
-            const bool mxfp4 = up->type == GGML_TYPE_MXFP4 && down->type == GGML_TYPE_MXFP4;
             const kimi_vram_expert_format f = layers.format(up, down, latent, hidden);
             result = format->prepare(context, requests.data(), int(requests.size()), &f, slots.data(), error, sizeof(error));
-            format_f32_input = !mxfp4;
         }
         format_path = true;
         check(result, error);
         for (size_t i = 0; i < source.size(); ++i) { source[i].vram_slot = slots[i]; hits += slots[i] >= 0; }
     }
-    void launch(const void * quantized, size_t quantized_bytes, const float * f32, size_t f32_bytes,
-                const kimi_cpu_sink_activation & activation) {
+    // The tier's engines take the f32 input row.
+    void launch(const float * input, size_t bytes, const kimi_cpu_sink_activation & activation) {
         if (!context || prefill_only) { return; }
         char error[512] = {};
         int result;
         if (format_path) {
             const kimi_vram_activation a = { activation.kind, activation.situ_beta, activation.situ_linear_beta, activation.swiglu_limit };
-            const void * input = format_f32_input ? static_cast<const void *>(f32) : quantized;
-            const size_t bytes = format_f32_input ? f32_bytes : quantized_bytes;
             result = format->launch(context, input, bytes, &a, error, sizeof(error));
         } else {
             throw std::runtime_error("GPU launch requires an explicit expert format");
@@ -454,10 +443,8 @@ struct sink_vram {
     }
     // The layer's grouped prefill on the tier: every format the tier has a lane for (it initializes the format on a cold
     // prefill, its decode arena deferred to the first decode token).
-    // A pass the format's engine cannot take (a per-expert post norm on MXFP4's
-    // hand engine) stays the CPU's.
     int prepare_prefill(std::vector<sink_request> & source, const ggml_tensor * up, const ggml_tensor * down,
-            int latent, int hidden, const layer_list & layers, int ntokens, bool post_norm) {
+            int latent, int hidden, const layer_list & layers, bool post_norm) {
         hits = 0;
         prefill_plan.valid = false;
         learning.cpu_fit = {};
@@ -486,8 +473,7 @@ struct sink_vram {
                 slots.data(), error, sizeof(error)), error);
         prefill_lane = {};
         prefill_api->lane(context, &prefill_lane);
-        const bool batched_pass = ntokens > prefill_lane.vector_tokens;
-        if (prefill_lane.engine == KIMI_VRAM_PREFILL_ENGINE_NONE || (post_norm && batched_pass && !prefill_lane.post_norm)) {
+        if (prefill_lane.engine == KIMI_VRAM_PREFILL_ENGINE_NONE || (post_norm && !prefill_lane.post_norm)) {
             // the tier pinned the layer's residents only where it has a lane: give them back
             if (std::any_of(slots.begin(), slots.end(), [](int slot) { return slot >= 0; })) {
                 check(prefill_api->cancel(context, error, sizeof(error)), error);
@@ -495,10 +481,7 @@ struct sink_vram {
             std::fill(slots.begin(), slots.end(), -1);
             return 0;
         }
-        format_f32_input = prefill_lane.f32_input != 0;
-        format_mxfp4_input = prefill_lane.engine == KIMI_VRAM_PREFILL_ENGINE_MXFP4;
-        prefill_batched = prefill_lane.engine == KIMI_VRAM_PREFILL_ENGINE_MXFP4 ||
-            prefill_lane.engine == KIMI_VRAM_PREFILL_ENGINE_BATCHED;
+        prefill_batched = prefill_lane.engine == KIMI_VRAM_PREFILL_ENGINE_BATCHED;
         for (size_t i = 0; i < source.size(); ++i) {
             source[i].vram_slot = slots[i];
             hits += slots[i] >= 0;
@@ -667,16 +650,13 @@ struct sink_vram {
         }
         throw std::runtime_error("SSD prefill staging request was not scheduled");
     }
-    void launch_prefill(const void * quantized, size_t quantized_stride, const float * f32, size_t f32_stride,
-            const int32_t * route_requests, const float * weights, int nslots, int ntokens,
-            const kimi_cpu_sink_activation & activation) {
+    void launch_prefill(const float * input, size_t stride, const int32_t * route_requests, const float * weights,
+            int nslots, int ntokens, const kimi_cpu_sink_activation & activation) {
         if (!context || !prefill_enabled || (!hits && prefill_transient.empty())) { return; }
         const kimi_vram_prefill_launch options = {
             { activation.kind, activation.situ_beta, activation.situ_linear_beta, activation.swiglu_limit },
             activation.post_exp_norm, activation.post_exp_norm_eps, int32_t(prefill_in_place),
         };
-        const void * input = format_f32_input ? static_cast<const void *>(f32) : quantized;
-        const size_t stride = format_f32_input ? f32_stride : quantized_stride;
         char error[512] = {};
         check(prefill_api->launch(context, input, stride, route_requests, weights, nslots, ntokens,
                 prefill_transient.data(), int(prefill_transient.size()), &options, error, sizeof(error)), error);

@@ -78,14 +78,8 @@ static void configured_runtime_tests(fixture_inputs & inputs) {
     require(!ssd::cpu::valid(&wrong_layout), "mixed runtime services layout accepted");
     auto short_table = *getter(); --short_table.size;
     require(!ssd::cpu::valid(&short_table), "mixed CPU provider table accepted");
-    const auto kernel_getter = reinterpret_cast<ssd::gpu::get_cpu_kernels_v1>(
-        ggml_backend_reg_get_proc_address(reg, "ggml_backend_cpu_ssd_kernels_v1"));
-    require(kernel_getter && ssd::gpu::valid(kernel_getter()), "normal CPU quant/reference registry");
     auto bad_services = services;
-    auto bad_kernels = *kernel_getter(); bad_kernels.size = 0; bad_services.cpu = &bad_kernels;
-    sink_ptr rejected_kernels(ssd::cpu::create_configured(&settings, &bad_services, fixture::resolve, &f, error, sizeof(error)));
-    require(!rejected_kernels && error[0] && configured_task_count() == before, "kernel ABI rejection started a worker");
-    ssd::gpu::provider_v1 missing_gpu{}; bad_services.cpu = kernel_getter(); bad_services.gpu = &missing_gpu;
+    ssd::gpu::provider_v1 missing_gpu{}; bad_services.gpu = &missing_gpu;
     sink_ptr rejected_gpu(ssd::cpu::create_configured(&settings, &bad_services, fixture::resolve, &f, error, sizeof(error)));
     require(!rejected_gpu && error[0] && configured_task_count() == before, "GPU ABI rejection started a worker");
     sink_ptr first(ssd::cpu::create_configured(&settings, &services, fixture::resolve, &f, error, sizeof(error)));

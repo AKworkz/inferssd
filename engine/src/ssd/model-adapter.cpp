@@ -11,7 +11,7 @@ expert_requirements describe_experts(
         llm_arch architecture, const llama_hparams & hparams, int layer) noexcept {
     switch (architecture) {
         case LLM_ARCH_DEEPSEEK41:
-            return {expert_quantization::all_mxfp4, expert_activation::swiglu_clamp,
+            return {expert_quantization::matching_up_gate, expert_activation::swiglu_clamp,
                 layer >= 0 ? hparams.swiglu_clamp_exp[layer] : 0.0f, true, false, true};
         case LLM_ARCH_MUSE_SPARK:
             return {expert_quantization::matching_up_gate, expert_activation::swiglu, 0.0f, false, true, false};
@@ -44,9 +44,6 @@ bool has_extra_parameters(const expert_inputs & in) noexcept {
 
 bool quantization_accepted(expert_quantization rule, const expert_inputs & in) noexcept {
     switch (rule) {
-        case expert_quantization::all_mxfp4:
-            return in.up->type == GGML_TYPE_MXFP4 &&
-                in.gate->type == GGML_TYPE_MXFP4 && in.down->type == GGML_TYPE_MXFP4;
         case expert_quantization::matching_up_gate:
             // Do not invent a model-specific type list: the selected
             // executor validates its actual vec-dot/quantization traits.

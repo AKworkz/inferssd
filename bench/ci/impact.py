@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ci.contract import DEVICES, MODELS, revision
 
 
-RULES_VERSION = 1
+RULES_VERSION = 2
 SELECTION = "impact-selection"
 BASELINE = "baseline-history"
 CUDA = DEVICES[:2]
@@ -27,12 +27,10 @@ CASES = {
     "activation": ("test-backend-ops", "SWIGLU", ""),
     "dsv-hc": ("test-backend-ops", "DSV4_HC_COMB", ""),
     "cuda-generic-tier": ("test-kimi-vram-generic", None, None),
-    "cuda-mxfp4-tier": ("test-kimi-vram-mxfp4", None, None),
     "model-adapter": ("test-ssd-model-adapter", None, None),
     "runtime-policy": ("test-ssd-runtime-policy", None, None),
 }
 MARKERS = {"cuda-generic-tier": b"REAL_GPU_GENERIC_TIER_PASS ",
-           "cuda-mxfp4-tier": b"REAL_GPU_MXFP4_TIER_PASS ",
            "model-adapter": b"model adapter: ",
            "runtime-policy": b"RUNTIME_POLICY_PASS "}
 
@@ -96,7 +94,8 @@ def numerical_cases(device, models):
     if "deepseek" in models:
         cases.update(("moe-mxfp4", "moe-q8"))
         if device in CUDA:
-            cases.update(("dsv-hc", "cuda-mxfp4-tier"))
+            # the tier's one engine family serves every format, DeepSeek's MXFP4 too
+            cases.update(("dsv-hc", "cuda-generic-tier"))
     if "muse" in models:
         cases.update(("moe-q4", "moe-q5"))
         if device in CUDA:

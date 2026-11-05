@@ -522,8 +522,6 @@ extern "C" bool kimi_cpu_prefill_run_activation(
         kimi_cpu_sink_stats stream = {};
         const int32_t empty_id = 0; // keep the empty-union call's pointer valid
         kimi_cpu_sink_prefill_batch batch = {};
-        batch.quantized_input = prefill->quant_input.data();
-        batch.quantized_stride = prefill->quant_bytes_input;
         batch.f32_input = input;
         batch.f32_stride = size_t(prefill->latent) * sizeof(float);
         batch.route_request_index = prefill->route_request_index.data();

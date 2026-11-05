@@ -18,7 +18,7 @@
 // Shared lifecycle assertions use the retained explicit Q4_K format engine.
 #include "ggml-backend.h"
 #include "ggml-cuda.h"
-#include "gpu-kernels.h"
+#include "gpu-services.h"
 #include "vram-tier.cpp"
 #include "test-kimi-vram-format-fixture.h"
 #include <future>
@@ -118,7 +118,7 @@ int main() {
     // auto: one block first; growth at once on a discrete GPU, after the first decode step on unified memory.
     inputs.set("tier.max_slots", "40");
     {
-        tier t(tier::automatic_budget, inputs.tier_policy(), nullptr, test_cpu_kernels());
+        tier t(tier::automatic_budget, inputs.tier_policy());
         const auto k = key(1, 0);
         int slot = -1;
         t.begin(51, 1, true);
@@ -140,7 +140,7 @@ int main() {
     // OOM reclaim: refused inside a live layer, then waits for a deferred copy and aborts its reservation.
     inputs.set("tier.max_slots", "2");
     {
-        tier t(2 * stride, inputs.tier_policy(), nullptr, test_cpu_kernels()); // one block of two slots
+        tier t(2 * stride, inputs.tier_policy()); // one block of two slots
         t.deferred_hook = upload_gate;
         const auto g = key(2, 1);
         int slot = -1, queued = 0;
@@ -183,7 +183,7 @@ int main() {
     // reclaim_host: blocks go until free memory covers the allocation, one stays, a live layer refuses.
     inputs.set("tier.max_slots", "40");
     {
-        tier t(40 * stride, inputs.tier_policy(), nullptr, test_cpu_kernels()); // a base of three blocks: 16, 16 and 8 slots
+        tier t(40 * stride, inputs.tier_policy()); // a base of three blocks: 16, 16 and 8 slots
         const auto k = key(3, 2);
         int slot = -1;
         t.begin(53, 1, true); lifecycle_prepare(t,&k, 1,&slot); t.finish(out.data(), 256);
@@ -208,7 +208,7 @@ int main() {
     }
     // At or under the floor free memory reads 0: a request of nothing, the tier's own at a token boundary, still gives back.
     {
-        tier t(40 * stride, inputs.tier_policy(), nullptr, test_cpu_kernels());
+        tier t(40 * stride, inputs.tier_policy());
         const auto k = key(3, 2);
         int slot = -1;
         t.begin(53, 1, true); lifecycle_prepare(t,&k, 1,&slot); t.finish(out.data(), 256);
@@ -224,12 +224,12 @@ int main() {
     {
         inputs.set("tier.elastic", "0");
         bool refused = false;
-        try { tier t(tier::automatic_budget, inputs.tier_policy(), nullptr, test_cpu_kernels()); } catch (const std::exception &) { refused = true; }
+        try { tier t(tier::automatic_budget, inputs.tier_policy()); } catch (const std::exception &) { refused = true; }
         require(refused, "auto was accepted without an elastic tier");
         inputs.set("tier.elastic", "1");
         inputs.set("tier.demand_reclaim", "0");
-        { tier t(tier::automatic_budget, inputs.tier_policy(), nullptr, test_cpu_kernels()); require(t.elastic_demand_reclaim, "auto did not reclaim on demand"); }
-        { tier t(2 * stride, inputs.tier_policy(), nullptr, test_cpu_kernels()); require(!t.elastic_demand_reclaim, "a byte budget changed its prefill policy"); }
+        { tier t(tier::automatic_budget, inputs.tier_policy()); require(t.elastic_demand_reclaim, "auto did not reclaim on demand"); }
+        { tier t(2 * stride, inputs.tier_policy()); require(!t.elastic_demand_reclaim, "a byte budget changed its prefill policy"); }
         inputs.set("tier.demand_reclaim", "1");
     }
 
@@ -244,7 +244,7 @@ int main() {
     const size_t low = size_t(1) << 20, safety = size_t(2) << 20, floor = size_t(3) << 30, demand = size_t(1) << 30;
     // Published before the first prepare (the sink does so at its first decode layer), floor and demand bound the base.
     {
-        tier t(tier::automatic_budget, inputs.tier_policy(), nullptr, test_cpu_kernels());
+        tier t(tier::automatic_budget, inputs.tier_policy());
         modeled = &t; pool = floor + demand + low + 5 * stride + stride / 2; published = 0;
         policy_set_host_floor(&t, floor); policy_set_host_demand(&t, demand);
         const auto k = key(4, 0);
@@ -261,7 +261,7 @@ int main() {
     }
     // Growth at the second decode boundary waits for a copy still in flight; a demand rise gives blocks back.
     {
-        tier t(tier::automatic_budget, inputs.tier_policy(), nullptr, test_cpu_kernels());
+        tier t(tier::automatic_budget, inputs.tier_policy());
         modeled = &t; pool = floor + demand + safety + 20 * stride + stride / 2; published = 0;
         t.deferred_hook = upload_gate;
         policy_set_host_floor(&t, floor); policy_set_host_demand(&t, demand);
@@ -328,7 +328,7 @@ int main() {
         auto client = std::move(made.value);
         ssd::host::client_config config; config.unified = true;
         require(bool(client->configure(config)), "the host-memory client was not configured");
-        tier t(tier::automatic_budget, inputs.tier_policy(), client.get(), test_cpu_kernels());
+        tier t(tier::automatic_budget, inputs.tier_policy(), client.get());
         modeled = &t; pool = floor + demand + safety + 60 * stride; published = 0;
         policy_set_host_floor(&t, floor); policy_set_host_demand(&t, demand);
         const auto k = key(5, 0);
@@ -363,7 +363,7 @@ int main() {
         // A full block of 16 slots takes whole device pages, so three of them are 48 slots.
         const size_t block = ssd::gpu::device_pages(16 * stride);
         card_reserve = size_t(1) << 20; card_others = 0; card_room = line + 3 * block + stride / 2;
-        tier t(tier::automatic_budget, inputs.tier_policy(), nullptr, test_cpu_kernels());
+        tier t(tier::automatic_budget, inputs.tier_policy());
         const auto k = key(6, 0);
         int slot = -1;
         const auto token = [&](uint64_t n) { t.finish(out.data(), 256); t.drain(); t.drain_deferred(); t.begin(64, n, true); };

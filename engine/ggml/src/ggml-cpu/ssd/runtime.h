@@ -6,13 +6,10 @@
 #include "../../ggml-ssd/host/arbiter.h"
 
 namespace ssd {
-namespace gpu { struct cpu_kernels_v1; }
 namespace settings {
 class snapshot;
 }
 namespace cpu {
-// Normal CPU registry export; GPU consumers receive a copy through L3.
-GGML_BACKEND_API const gpu::cpu_kernels_v1 * kernels() noexcept;
 // Copy settings/debug before starting any thread; the read ring has eight
 // expert slots. The resolver and writer remain borrowed until sink destruction.
 [[nodiscard]] GGML_BACKEND_API kimi_cpu_sink * create_configured(

@@ -5794,8 +5794,8 @@ extern "C" bool ggml_backend_cuda_ssd_attach_services(
     };
     if (!ggml_backend_is_cuda(backend)) { return refuse("SSD services require a CUDA backend"); }
     auto * context = static_cast<ggml_backend_cuda_context *>(backend->context);
-    if (!services || !services->gpu || !services->cpu) {
-        return refuse("CUDA SSD services require explicit GPU and CPU providers");
+    if (!services || !services->gpu) {
+        return refuse("CUDA SSD services require an explicit GPU provider");
     }
     if (context->ssd_services && context->ssd_services != services) {
         return refuse("CUDA SSD services are already attached to another context");

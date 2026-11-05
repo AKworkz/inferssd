@@ -62,4 +62,4 @@ jobs:
       - name: Configure
         run: cmake --preset linux-cuda -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.arch }} "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,$CUDA_DRIVER_LINK_DIR"
       - name: Build
-        run: cmake --build build-linux-cuda --parallel 4 --target inferssd-server inferssd-memprobe kimi-vram-tier kimi-mxfp4-parity
+        run: cmake --build build-linux-cuda --parallel 4 --target inferssd-server inferssd-memprobe kimi-vram-tier

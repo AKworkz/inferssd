@@ -1,4 +1,4 @@
-#include "gpu-kernels.h"
+#include "gpu-services.h"
 #include "explicit-fixture-inputs.h"
 #define main original_async_test_main
 #include "test-kimi-vram-async.cpp"
@@ -20,7 +20,7 @@ int main(){
         requests[j].layer=j<2?1:2;requests[j].expert=j%2;requests[j].weight=.7f;
         for(int i=0;i<3;++i)requests[j].role[i]={1,2,1000000,uint64_t(3*j+i)*role,role,3,4,5,6};
     }
-    tier t(2*3*role, inputs.tier_policy(), nullptr, test_cpu_kernels());int slots[2]={};std::vector<float> out(512);
+    tier t(2*3*role, inputs.tier_policy());int slots[2]={};std::vector<float> out(512);
     std::vector<float> input(256,0.0f);std::vector<unsigned char> copied(3*role);
     auto upload=[&](int j){const void * data[]={payload[j].data(),payload[j].data(),payload[j].data()};t.admit(requests[j],data,true);};
     auto bytes_equal=[&](int slot,int j){

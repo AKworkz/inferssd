@@ -53,7 +53,7 @@ const ssd::gpu::provider_v1 * stand_in_provider() {
         tier_no_lease_check, tier_no_lease_check, tier_held };
     static const kimi_vram_format_api format = { 2, sizeof(kimi_vram_format_api), no_slots,
         [](void *, const void *, size_t, const kimi_vram_activation *, char *, size_t) { return 0; } };
-    static const kimi_vram_prefill_api prefill = { 8, sizeof(kimi_vram_prefill_api), no_slots,
+    static const kimi_vram_prefill_api prefill = { 9, sizeof(kimi_vram_prefill_api), no_slots,
         [](void *) { return 0; },
         [](void *, const void *, size_t, const int32_t *, const float *, int, int, const kimi_vram_prefill_transient *,
            int, const kimi_vram_prefill_launch *, char * e, size_t n) { return refuse(nullptr, e, n); },
@@ -80,8 +80,8 @@ const ssd::gpu::provider_v1 * stand_in_provider() {
         [](void *) { return uint64_t(0); }, tier_place };
     static const kimi_vram_location_api location = {};
     static const ssd::gpu::settings_api settings = {};
-    static const ssd::gpu::testing::api testing = { 2, sizeof(ssd::gpu::testing::api),
-        [](uint64_t, const ssd::gpu::testing::tier_options *, const ssd::gpu::cpu_kernels_v1 *, char *, size_t) noexcept -> void * {
+    static const ssd::gpu::testing::api testing = { 3, sizeof(ssd::gpu::testing::api),
+        [](uint64_t, const ssd::gpu::testing::tier_options *, char *, size_t) noexcept -> void * {
             return &tier_context; } };
     static const ssd::gpu::transport_v1 transport = {};
     static const ssd::gpu::provider_v1 provider = { 1, sizeof(ssd::gpu::provider_v1), &api, &residency, &location,
@@ -90,13 +90,6 @@ const ssd::gpu::provider_v1 * stand_in_provider() {
         [](ggml_backend_t, const ssd::runtime_services *, char *, size_t) noexcept { return true; },
         [](ggml_backend_t) -> void * { return nullptr; } };
     return &provider;
-}
-const ssd::gpu::cpu_kernels_v1 * cpu_kernels() {
-    const auto get = reinterpret_cast<ssd::gpu::get_cpu_kernels_v1>(
-        ggml_backend_reg_get_proc_address(ggml_backend_cpu_reg(), "ggml_backend_cpu_ssd_kernels_v1"));
-    const auto * kernels = get ? get() : nullptr;
-    require(ssd::gpu::valid(kernels), "the CPU backend has no SSD kernels");
-    return kernels;
 }
 }
 
@@ -126,7 +119,6 @@ int main(int argc, char ** argv) {
     ggml_cpu_init();
     ssd::runtime_services services;
     services.gpu = stand_in_provider();
-    services.cpu = cpu_kernels();
     inputs.set_runtime_services(services);
     fixture f; make_synthetic(f);
     const uint64_t unit = triplet_bytes(f);

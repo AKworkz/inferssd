@@ -35,8 +35,7 @@ positive value counts the leading ggml threads of each decode phase, and a
 decode call with fewer threads fails. Non-applicable platform keys cannot be
 explicitly set. The `vram.*` keys size the CUDA expert tier. Its slots each hold
 one expert and are sized for the model's largest, so a model that quantizes its
-layers differently keeps experts of every layer there; MXFP4 experts go there
-only when all of the model's experts are MXFP4. `vram.budget = auto`
+layers differently keeps experts of every layer there. `vram.budget = auto`
 gives the tier all the room
 the GPU admits; on a GPU that shares the host's memory, such as GB10, that is
 the host memory envelope below less the slots the next-layer prefetch lands in,

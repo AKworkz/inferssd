@@ -23,8 +23,8 @@ belongs to the separate host arbiter.
 
 The CUDA reader uses a same-build typed-settings extension and refuses an absent
 or incompatible extension. Its supported profile fixes asynchronous/deferred
-uploads, retained elastic global residency, count decay and measured admission;
-the MXFP4 format uses GPU hidden rows. Debug observation is copied separately.
+uploads, retained elastic global residency, count decay and measured admission.
+Debug observation is copied separately.
 The original untyped GPU creation ABI slot returns an explicit error. It remains
 non-null so older ABI discovery cannot dereference a missing function slot.
 
@@ -40,9 +40,6 @@ Private `ssd/testing.h` and `ggml-ssd/testing/tier.h` structures preserve explic
 inputs for numerical, scheduling and lifecycle fixtures. They construct the real
 reader and real CUDA format engines. Product factories derive their canonical
 policy directly from typed snapshots and do not consume these fixture objects.
-The MXFP4 component fault fixture still injects after the real creation self-check
-and checks submit/wait failures, drain, unchanged output, closed contexts and a
-separate healthy context for both hidden-row modes.
 
 `fixture_inputs` is owned by each test invocation and passed through constructors
 and calls. CPU CTest matrix variants use `--fixture key=value`; unknown fields

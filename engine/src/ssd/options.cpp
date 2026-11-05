@@ -164,15 +164,6 @@ llama_ssd_context::llama_ssd_context(const llama_ssd_options & options)
     services.gpu_reserve_bytes = static_cast<size_t>(*reserve_mib) * mib;
 }
 
-void llama_ssd_context::bind_cpu(ggml_backend_t backend) {
-    const auto registry = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend));
-    const auto get = reinterpret_cast<ssd::gpu::get_cpu_kernels_v1>(
-        ggml_backend_reg_get_proc_address(registry, "ggml_backend_cpu_ssd_kernels_v1"));
-    const auto * kernels = get ? get() : nullptr;
-    if (!ssd::gpu::valid(kernels)) { throw std::runtime_error("CPU backend has no compatible SSD quantization services"); }
-    services.cpu = kernels;
-}
-
 void llama_ssd_context::attach_backend(ggml_backend_t backend) {
     if (!sources.resolve) { return; }
     const auto registry = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend));
@@ -199,7 +190,7 @@ void llama_ssd_context::attach_backend(ggml_backend_t backend) {
     const int device = provider->device_ordinal(backend);
     // This device of the backend has no expert executor (the graph lane needs host memory it can read).
     if (device < 0 && !transport) { return; }
-    if (device < 0 || !services.cpu) { throw std::runtime_error("SSD GPU device/CPU services are unavailable"); }
+    if (device < 0) { throw std::runtime_error("SSD GPU device is unavailable"); }
     services.gpu = provider;
     services.gpu_device = device;
     char error[512] {};

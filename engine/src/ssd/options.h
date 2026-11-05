@@ -41,7 +41,6 @@ struct llama_ssd_context {
     ssd::stream::runtime stream;
 
     explicit llama_ssd_context(const llama_ssd_options & options);
-    void bind_cpu(ggml_backend_t backend);
     void attach_backend(ggml_backend_t backend);
     void prepare_dense(const llama_model & model);
 };

@@ -29,8 +29,6 @@ using kimi_cpu_sink_consumer_fn = void (*)(void * userdata, size_t expert,
         const void * up, const void * gate, const void * down);
 
 struct kimi_cpu_sink_prefill_batch {
-    const void * quantized_input;
-    size_t quantized_stride;
     const float * f32_input;
     size_t f32_stride;
     const int32_t * route_request_index;
@@ -51,7 +49,7 @@ struct kimi_cpu_sink_prefill_batch {
     uint64_t gpu_ssd_transient_upload_bytes;
     double gpu_ssd_transient_upload_us;
     double gpu_worker_us;
-    double gpu_expert_us;    // MXFP4 batch path: the GPU worker's time in its expert computations
+    double gpu_expert_us;    // the GPU's time in its expert chains
     double gpu_read_wait_us; // the GPU worker's wait for streamed SSD reads
     uint64_t gpu_cold_admit_candidates;
     uint64_t gpu_cold_admit_experts;

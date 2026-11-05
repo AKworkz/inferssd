@@ -1,10 +1,8 @@
 # Expert VRAM tier
 
 This optional CUDA component caches routed expert weights and runs explicit
-expert formats for DeepSeek and Muse. The `kimi-vram-tier` and
-`kimi-mxfp4-parity` object targets link normally into `ggml-cuda`. The strict
-MXFP4 target keeps `--fmad=false --ftz=false`, the explicit architecture, and
-the original kernel bodies. No component DSO or preload is used.
+expert formats for DeepSeek and Muse. The `kimi-vram-tier` object target links
+normally into `ggml-cuda`. No component DSO or preload is used.
 
 The owner supplies tensor types, geometry, expert count and layer IDs through
 `kimi_vram_format_api`; it supplies source file identities and ranges through
@@ -14,12 +12,13 @@ A borrowed upload keeps its source pinned until collect/finish or failure drain.
 Reclaim refuses live compute/residency leases and drains queued copies before
 freeing their blocks. The CPU sink owns the request and phase boundaries.
 
-MXFP4 uses its dedicated parity or clamped hidden-chain component. Other
-supported CUDA expert formats use the generic format adapter; grouped prefill
-uses the retained batch adapters. The host MXFP4 bridge checks its parity against
-the CPU implementation through an immutable L1 kernel table copied into each
-tier. The GPU backend does not link the CPU backend. The optional GPU hidden chain has its existing
-numerical tolerance and does not promise byte equality with that host bridge.
+Every expert format, MXFP4 included, runs on the CUDA backend's own kernels:
+decode on the generic format adapter (MMVQ), grouped prefill on the batched
+adapter (MMQ, MMVQ or a dequantizing GEMM, as ggml chooses). A model may mix
+formats across layers; slots take the largest expert. The results follow
+ggml's CUDA backend, not the CPU sink bit for bit: on Blackwell, MMQ takes
+MXFP4 with FP4 activations, as ggml's own `MUL_MAT` does. The GPU backend does
+not link the CPU backend.
 
 The former implicit Q3_K transport path has been removed. The internal
 transport ABI remains version 2 with its existing field order; implicit

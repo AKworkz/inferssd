@@ -1,7 +1,7 @@
-#include "gpu-kernels.h"
+#include "gpu-services.h"
 #include "explicit-fixture-inputs.h"
 // End-to-end generic-format CPU-sink test with the real VRAM tier: Q4_K/Q5_K
-// as in Muse Spark UD-Q4_K_XL, and Q8_0. Synthetic
+// as in Muse Spark UD-Q4_K_XL, Q8_0, and MXFP4 as in DeepSeek-V4.1. Synthetic
 // packed weights cover non-uniform padded role sizes and mixed CPU/GPU expert
 // reduction without requiring the full model. The CUDA path intentionally uses
 // Q8_1 activations and is checked numerically, not bitwise.
@@ -166,7 +166,9 @@ int main() {
         run_shape(inputs, 512, 256, 8, {true, "production-generic"}, checks, worst_rel, worst_abs, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0);
         run_shape(inputs, 512, 256, 8, {true, "production-mixed-layers"}, checks, worst_rel, worst_abs, GGML_TYPE_Q4_K,
             GGML_TYPE_Q5_K, GGML_TYPE_Q4_K);
+        run_shape(inputs, 512, 256, 8, {true, "production-generic"}, checks, worst_rel, worst_abs, GGML_TYPE_MXFP4, GGML_TYPE_MXFP4);
         run_host_jobs(inputs, GGML_TYPE_Q8_0, checks);
+        run_host_jobs(inputs, GGML_TYPE_MXFP4, checks);
         std::printf("REAL_GPU_GENERIC_TIER_PASS checks=%zu worst_rel_l2=%.6g worst_abs=%.6g\n",
             checks, worst_rel, worst_abs);
         return 0;

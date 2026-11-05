@@ -81,9 +81,8 @@ memory, the available memory) to choose:
   streams the model's weight format faster there than on every CPU;
 - the starting estimates the engine uses to place experts between the CPU and
   the GPU (it refines them as it runs);
-- `vram.budget = 0` when the engine has CUDA and no CUDA GPU is usable or the
-  model mixes MXFP4 experts with another format, and on macOS the host memory
-  budget from the runtime policy and a host margin of a
+- `vram.budget = 0` when the engine has CUDA and no CUDA GPU is usable, and on
+  macOS the host memory budget from the runtime policy and a host margin of a
   quarter of the machine's memory (`host.headroom_mib`), since macOS compresses
   the cold pages of a RAM cache that leaves less free;
 - with an engine that has CUDA and one usable CUDA GPU, which prompt passes the CPU prefills

@@ -30,8 +30,9 @@ static std::set<const ggml_tensor *> graph_dependencies(ggml_cgraph * graph) {
     return visited;
 }
 
+// gate_type: the gate's type where it is not weight_type
 static void graph_case(ggml_backend_t cpu, int ntokens, bool prefill, bool decode, const char * label,
-        ggml_type weight_type = GGML_TYPE_MXFP4, llm_arch arch = LLM_ARCH_DEEPSEEK41) {
+        ggml_type weight_type = GGML_TYPE_MXFP4, llm_arch arch = LLM_ARCH_DEEPSEEK41, ggml_type gate_type = GGML_TYPE_COUNT) {
     constexpr int latent = 256, hidden = 512, experts = 20, slots = 8;
     // Metadata-only runtimes: no pool, ring, resolver or cache is initialized.
     const auto configured = ssd::settings::parse("", "");
@@ -96,7 +97,8 @@ static void graph_case(ggml_backend_t cpu, int ntokens, bool prefill, bool decod
     ggml_tensor * input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, latent, ntokens);
     ggml_tensor * logits = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, experts, ntokens);
     ggml_tensor * up = ggml_new_tensor_3d(ctx, weight_type, latent, hidden, experts);
-    ggml_tensor * gate = ggml_new_tensor_3d(ctx, weight_type, latent, hidden, experts);
+    ggml_tensor * gate = ggml_new_tensor_3d(ctx, gate_type == GGML_TYPE_COUNT ? weight_type : gate_type, latent, hidden,
+        experts);
     ggml_tensor * down = ggml_new_tensor_3d(ctx, weight_type, hidden, latent, experts);
     ggml_set_name(up, "blk.0.ffn_up_exps.weight");
     ggml_set_name(gate, "blk.0.ffn_gate_exps.weight");
@@ -188,10 +190,12 @@ int main() {
         graph_case(cpu.get(), 1, false, true, "qwen35moe_decode_one", GGML_TYPE_Q8_0, LLM_ARCH_QWEN35MOE);
         bool refused = false;
         try {
-            graph_case(cpu.get(), 1, false, true, "unsupported_f16", GGML_TYPE_F16);
+            // up and gate of different types
+            graph_case(cpu.get(), 1, false, true, "unsupported_up_gate", GGML_TYPE_MXFP4, LLM_ARCH_DEEPSEEK41, GGML_TYPE_F16);
         } catch (const std::runtime_error & error) {
             const std::string message = error.what();
-            refused = message.find("not supported yet") != std::string::npos && message.find("f16") != std::string::npos;
+            refused = message.find("not supported yet") != std::string::npos &&
+                message.find("up=mxfp4 gate=f16") != std::string::npos;
         }
         require(refused, "unsupported expert layout did not refuse with a recoverable graph error");
         std::printf("CPU_PREFILL_GRAPH_OK execution=not_run kda_validation=not_run\n");

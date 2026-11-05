@@ -177,7 +177,6 @@ struct sink_configuration {
     ssd::telemetry::writer * events = nullptr;
     ssd::host::context_client * host = nullptr;
     ssd::gpu::provider_v1 gpu{};
-    ssd::gpu::cpu_kernels_v1 cpu{};
     bool has_gpu = false;
     int gpu_device = 0;
     const ssd::store::source_view * source = nullptr;
@@ -295,10 +294,6 @@ static void sink_copy_services(sink_configuration & value, const ssd::runtime_se
     value.gpu_transport = services->gpu_transport;
     value.events = services->events;
     if (services->debug) { value.debug = *services->debug; }
-    if (services->cpu) {
-        if (!ssd::gpu::valid(services->cpu)) { throw std::runtime_error("CPU kernel provider ABI mismatch"); }
-        value.cpu = *services->cpu;
-    }
     if (services->gpu) {
         const auto * gpu = services->gpu;
         // The tables a tier needs are checked when it starts (sink_vram::initialize): a tier with no residency
@@ -307,7 +302,6 @@ static void sink_copy_services(sink_configuration & value, const ssd::runtime_se
                 !gpu->device_is_unified || !gpu->device_ordinal || !gpu->attach_services || services->gpu_device < 0) {
             throw std::runtime_error("GPU provider ABI missing or incompatible");
         }
-        if (!ssd::gpu::valid(&value.cpu)) { throw std::runtime_error("GPU tier requires injected CPU kernels"); }
         value.gpu = *gpu;
         value.gpu_device = services->gpu_device;
         value.has_gpu = true;
@@ -2893,7 +2887,7 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
         sink->vram.begin(0, 0, false, sink->cache);
         sink->cache.begin(0, 0, false);
         if (!ids || !consumer || nexperts < 0 || nexperts > 1024 || !batch ||
-                !batch->quantized_input || !batch->f32_input || !batch->output ||
+                !batch->f32_input || !batch->output ||
                 (batch->nslots && (!batch->route_request_index || !batch->weights)) || batch->nslots < 0 || batch->nslots > 16 ||
                 batch->ntokens < 1 || (batch->nslots &&
                 batch->ntokens > std::numeric_limits<int>::max() / batch->nslots)) {
@@ -2955,8 +2949,8 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
             return 1;
         };
         batch->gpu_experts = sink->vram.prepare_prefill(sink->requests, up, down, sink->latent, sink->hidden,
-            sink_vram::layer_list(sink->cache), batch->ntokens, batch->activation.post_exp_norm != nullptr);
-        // the batched lanes stream their SSD transients through the ring (MXFP4's hand engine, the batched engine)
+            sink_vram::layer_list(sink->cache), batch->activation.post_exp_norm != nullptr);
+        // the batched lane streams its SSD transients through the ring
         streaming_ssd = sink->vram.prefill_batched;
         route_bytes = double(sink->vram.prefill_lane.route_bytes);
         // no read of this layer has started and the tier is idle: a quiescent point to page-lock the ring
@@ -2982,7 +2976,7 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
             streaming_cap < 0 ? sink->requests.size() : size_t(streaming_cap);
         if (streaming_ssd) {
             std::fprintf(stderr,
-                "[kimi_mxfp4_prefill_staging] selected_cap=%zu ring_buffers=%zu streaming=1\n",
+                "[kimi_prefill_staging] selected_cap=%zu ring_buffers=%zu streaming=1\n",
                 staging_limit, sink->slots.size());
         }
         sink->vram.select_prefill_transient(
@@ -3093,9 +3087,8 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
             else { ++batch->ssd_routes; }
         }
         if (ssd_transient_requests.empty()) {
-            sink->vram.launch_prefill(batch->quantized_input, batch->quantized_stride,
-                batch->f32_input, batch->f32_stride, batch->route_request_index, batch->weights,
-                batch->nslots, batch->ntokens, batch->activation);
+            sink->vram.launch_prefill(batch->f32_input, batch->f32_stride, batch->route_request_index,
+                batch->weights, batch->nslots, batch->ntokens, batch->activation);
         }
         {
             std::lock_guard<std::mutex> lock(sink->io_mutex);
@@ -3104,9 +3097,8 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
         }
         sink->io_cv.notify_one();
         if (streaming_ssd && !ssd_transient_requests.empty()) {
-            sink->vram.launch_prefill(batch->quantized_input, batch->quantized_stride,
-                batch->f32_input, batch->f32_stride, batch->route_request_index, batch->weights,
-                batch->nslots, batch->ntokens, batch->activation);
+            sink->vram.launch_prefill(batch->f32_input, batch->f32_stride, batch->route_request_index,
+                batch->weights, batch->nslots, batch->ntokens, batch->activation);
         }
         if (!ssd_transient_requests.empty() && !streaming_ssd) {
             // launch_prefill() borrows the staging pointers until finish. Wait
@@ -3128,9 +3120,8 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
                 }
                 sink->io_cv.notify_one();
             }
-            sink->vram.launch_prefill(batch->quantized_input, batch->quantized_stride,
-                batch->f32_input, batch->f32_stride, batch->route_request_index, batch->weights,
-                batch->nslots, batch->ntokens, batch->activation);
+            sink->vram.launch_prefill(batch->f32_input, batch->f32_stride, batch->route_request_index,
+                batch->weights, batch->nslots, batch->ntokens, batch->activation);
         }
         for (size_t expert = 0; expert < sink->requests.size(); ++expert) {
             auto & request = sink->requests[expert];
@@ -3636,8 +3627,7 @@ extern "C" bool kimi_cpu_sink_run_activation(
         sink->current.input_quantize_us = elapsed_us(compute_start);
         if (sink->profile_enabled) { sink->current.compute_cpu_us += sink_thread_cpu_us() - quant_cpu_start; }
         sink->current.compute_us += sink->current.input_quantize_us;
-        sink->vram.launch(sink->quant_input.data(), sink->quant_input.size(), input,
-                          size_t(sink->latent) * sizeof(float), *activation);
+        sink->vram.launch(input, size_t(sink->latent) * sizeof(float), *activation);
         if (sink->timeline_active) { sink->timeline_call[2] = ggml_time_us(); }
         sink->plan.start = sink_clock::now();
         {

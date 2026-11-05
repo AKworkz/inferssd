@@ -214,7 +214,6 @@ void run() {
     backend_owner cpu_owned(ggml_backend_cpu_init(), ggml_backend_free);
     ggml_backend_t gpu = gpu_owned.get(), cpu = cpu_owned.get();
     require(gpu && cpu, "backend init failed");
-    runtime->bind_cpu(cpu);
     runtime->attach_backend(gpu);
     ssd::host::client_config budget;
     budget.unified = runtime->services.gpu->device_is_unified(runtime->services.gpu_device);

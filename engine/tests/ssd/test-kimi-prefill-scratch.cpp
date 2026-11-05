@@ -1,6 +1,4 @@
-#ifdef KIMI_SCRATCH_MXFP4_ONLY
-#include "gpu-kernels.h"
-#endif
+#include "gpu-services.h"
 #include "explicit-fixture-inputs.h"
 // Reuse one real grouped-prefill handle as expert service moves CPU -> GPU.
 // Synthetic packed weights; real tier kernels; zero input is an exact oracle
@@ -39,13 +37,10 @@ void run_case(fixture_inputs & inputs, ggml_type type, int tokens, int activatio
     inputs.set("ready_first", "1");
     inputs.set("tier.keep_across_requests", "1");
     inputs.set("tier.min_count", "0");
-    inputs.set("tier.mxfp4_gpu_hidden", "1");
     for (const char * key : {"tier.global", "vram_exclusive",
             "vram_async", "vram_deferred",
             "tier.elastic", "early_up_gate",
-            "role_major", "nonblocking_down_sched",
-            "GGML_KIMI_CPU_PREFILL_Q8_SSD_GPU_MAX_EXPERTS_PER_LAYER",
-            "GGML_KIMI_CPU_PREFILL_MXFP4_SSD_GPU_MAX_EXPERTS_PER_LAYER"}) {
+            "role_major", "nonblocking_down_sched"}) {
         inputs.set(key, "0");
     }
     auto sink = make_sink(inputs, f, 4, 2);
@@ -114,25 +109,15 @@ void run_case(fixture_inputs & inputs, ggml_type type, int tokens, int activatio
 
 int main(int argc, char ** argv) {
     fixture_inputs inputs;
-#ifdef KIMI_SCRATCH_MXFP4_ONLY
     inputs.set_runtime_services(test_gpu_services());
-#endif
     try {
         ggml_cpu_init();
-        #ifdef KIMI_SCRATCH_MXFP4_ONLY
         (void) argv;
-#else
-        const bool mxfp4_only = argc == 2 && std::string(argv[1]) == "--mxfp4-only";
-        #endif
-        require(argc == 1 || (argc == 2 && std::string(argv[1]) == "--mxfp4-only"), "usage: test-kimi-prefill-scratch [--mxfp4-only]");
+        require(argc == 1, "usage: test-kimi-prefill-scratch");
         for (int tokens : {9, 14, 48, 64, 65}) {
             run_case(inputs, GGML_TYPE_MXFP4, tokens, KIMI_CPU_SINK_ACTIVATION_SWIGLU_CLAMP);
-#ifndef KIMI_SCRATCH_MXFP4_ONLY
-            if (!mxfp4_only) {
-                run_case(inputs, GGML_TYPE_Q8_0, tokens, KIMI_CPU_SINK_ACTIVATION_SWIGLU);
-                run_case(inputs, GGML_TYPE_Q8_0, tokens, KIMI_CPU_SINK_ACTIVATION_SWIGLU_CLAMP);
-            }
-#endif
+            run_case(inputs, GGML_TYPE_Q8_0, tokens, KIMI_CPU_SINK_ACTIVATION_SWIGLU);
+            run_case(inputs, GGML_TYPE_Q8_0, tokens, KIMI_CPU_SINK_ACTIVATION_SWIGLU_CLAMP);
         }
         std::printf("PREFILL_SCRATCH_%s cases=%zu failures=%zu\n", failures ? "FAIL" : "PASS", cases, failures);
         return failures ? 1 : 0;

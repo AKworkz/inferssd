@@ -210,7 +210,7 @@ struct generic_engine {
 };
 
 void * create(int device, int latent, int hidden, int max_hits, int weight_type, int down_type,
-        const ssd::gpu::cpu_kernels_v1 *, char * error, size_t error_size) {
+        char * error, size_t error_size) {
     try {
         return new generic_engine(device, latent, hidden, max_hits, weight_type, down_type);
     } catch (const std::exception & e) {
@@ -263,7 +263,7 @@ size_t host_bytes(void * context) {
 
 extern "C" const vram_format_compute_api * kimi_vram_generic_format_compute_get_api() {
     static const vram_format_compute_api api = {
-        2, sizeof(vram_format_compute_api), create, destroy, compute, device_bytes, host_bytes
+        3, sizeof(vram_format_compute_api), create, destroy, compute, device_bytes, host_bytes
     };
     return &api;
 }

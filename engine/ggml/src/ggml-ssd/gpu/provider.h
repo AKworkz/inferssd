@@ -3,7 +3,6 @@
 #include "ggml-backend.h"
 #include "kimi-vram-tier-api.h"
 #include "kimi-vram-location-api.h"
-#include "kernels.h"
 #include "transport.h"
 #include "../gpu-tier-settings.h"
 #include "../testing/tier.h"

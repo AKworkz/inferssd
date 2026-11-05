@@ -120,17 +120,15 @@ struct kimi_vram_format_api {
     int (*prepare)(void * context, const struct kimi_vram_request * requests, int count,
                    const struct kimi_vram_expert_format * format, int * slots,
                    char * error, size_t error_size);
-    // input is the up weight type's CPU vec_dot input row for the original
-    // explicit engines (Q8_0 for MXFP4), or an F32 row when the selected
-    // format engine documents that requirement (IQ2_XXS/Q2_K).
+    // input is the layer's f32 input row (latent floats).
     int (*launch)(void * context, const void * input, size_t input_bytes,
                   const struct kimi_vram_activation * activation, char * error, size_t error_size);
 };
 // One host-resident expert selected for transient GPU prefill compute. The
 // request index addresses the distinct-expert union passed to prepare. RAM
 // pointers stay leased by the cache owner. Q2 SSD pointers use dedicated
-// staging through finish/cancel; a batched lane's SSD pointers (MXFP4's, the
-// batched engine's) use a recyclable I/O ring slot and the stage callback below.
+// staging through finish/cancel; the batched lane's SSD pointers use a
+// recyclable I/O ring slot and the stage callback below.
 // The tier copies into a dedicated device scratch slot without changing decode
 // residency, or the batched engine reads it in place (prefill_launch in_place).
 enum kimi_vram_prefill_transient_source {
@@ -164,10 +162,10 @@ struct kimi_vram_prefill_stats {
     uint64_t ssd_transient_upload_bytes;
     double ssd_transient_upload_us;
     double total_worker_us;
-    // Version 5, MXFP4 batch path only. The worker's time in each expert computation (its routes' gather, the
-    // kernels and their synchronisation) as sums over the experts, routes = the expert's distinct tokens: count, sum
-    // of routes, of routes squared, of the times, and of routes times the time; the worker's wait for streamed SSD
-    // reads; the GPU output's addition into the caller's rows at finish.
+    // Version 5. Each expert chain's time from device memory (the batched engine's CUDA events) as sums over the
+    // experts, routes = the expert's distinct tokens: count, sum of routes, of routes squared, of the times, and of
+    // routes times the time; the worker's wait for streamed SSD reads; the GPU output's addition into the caller's
+    // rows at finish.
     double gpu_fit_experts;
     double gpu_fit_routes;
     double gpu_fit_routes_sq;
@@ -190,20 +188,16 @@ struct kimi_vram_prefill_stats {
     double engine_overhead_us;
 };
 // The engine a format's grouped prefill runs on (version 7, lane). Its passes of at most vector_tokens tokens run the
-// vector engine, a call of the layer's residents a token, as decode does; longer passes the batched engine of the
-// format: KIMI_VRAM_PREFILL_ENGINE_MXFP4, the MXFP4 hand engine (no post norm); KIMI_VRAM_PREFILL_ENGINE_BATCHED, the
-// grouped engine over the CUDA backend's matrix products (any format they serve; the per-expert post norm; streamed
-// transients in place on a GPU that reads host memory so); KIMI_VRAM_PREFILL_ENGINE_TOKENS, the vector engine for
-// every pass (Q2, and MXFP4 without its batch component).
+// vector engine, a call of the layer's residents a token, as decode does; longer passes the batched engine,
+// KIMI_VRAM_PREFILL_ENGINE_BATCHED: the grouped engine over the backend's matrix products (any format they serve; the
+// per-expert post norm; streamed transients in place on a GPU that reads host memory so). NONE: the CPU's. A pass's
+// input rows are f32 (version 9).
 enum kimi_vram_prefill_engine {
     KIMI_VRAM_PREFILL_ENGINE_NONE    = 0,
-    KIMI_VRAM_PREFILL_ENGINE_TOKENS  = 1,
-    KIMI_VRAM_PREFILL_ENGINE_MXFP4   = 2,
     KIMI_VRAM_PREFILL_ENGINE_BATCHED = 3,
 };
 struct kimi_vram_prefill_lane {
     int32_t engine;           // enum kimi_vram_prefill_engine
-    int32_t f32_input;        // the pass's input rows are f32 (else the up type's vec_dot rows)
     int32_t in_place;         // the batched engine can read streamed transients in place from host memory
     int32_t post_norm;        // the batched engine applies a per-expert post norm (the vector path always does)
     int32_t vector_tokens;    // passes of at most this many tokens run the vector engine
@@ -230,12 +224,13 @@ struct kimi_vram_prefill_launch {
 // transient from page-locked memory (the read ring registered through the host API) is a DMA copy that overlaps
 // the computation of another. Version 7 adds the lane (which engine a format's passes run on, for any format the
 // decode engine serves), the launch options (the per-expert post norm, in place) and the in-place chains' stats.
-// Version 8 takes the per-layer types of kimi_vram_expert_format; the lane is the prepared layer's.
+// Version 8 takes the per-layer types of kimi_vram_expert_format; the lane is the prepared layer's. Version 9: every
+// pass's input rows are f32 (the lane's f32_input field is gone).
 // Cold seeds start with zero decode heat and are therefore the
 // first victims unless decode reuses them; the path never evicts an existing
 // decode resident.
 struct kimi_vram_prefill_api {
-    uint32_t version, size;   // 8
+    uint32_t version, size;   // 9
     // requests contains the distinct expert union for one layer. slots receives
     // -1 for CPU work or an opaque resident slot for GPU work. The tier must
     // already hold the same explicit format from an earlier decode phase.

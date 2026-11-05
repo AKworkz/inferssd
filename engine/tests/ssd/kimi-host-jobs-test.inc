@@ -1,14 +1,13 @@
 #include "explicit-fixture-inputs.h"
-// The tier's host path (kimi_vram_host_api v3) through its C API, shared by test-kimi-vram-q2 (Q8_0, the generic
-// engine) and test-kimi-vram-mxfp4 (MXFP4, DeepSeek's engine). Included after test-kimi-cpu-sink.cpp (require, ggml).
+// The tier's host path (kimi_vram_host_api v3) through its C API, used by test-kimi-vram-generic (Q8_0 and MXFP4).
+// Included after test-kimi-cpu-sink.cpp (require, ggml).
 #pragma once
 #include "ggml-ssd/gpu/kimi-vram-tier-api.h"
 #include <dlfcn.h>
 #include <functional>
 #include <sys/mman.h>
 
-// The host path of the tier (kimi_vram_host_api v3) through its C API, on experts of one type (Q8_0: the generic
-// engine; MXFP4: DeepSeek's own engine, with libkimi-mxfp4-parity.so preloaded):
+// The host path of the tier (kimi_vram_host_api v3) through its C API, on experts of one type:
 // a host job computes the same rows as the same expert resident (same kernel, same bytes, bit for bit); on a discrete
 // GPU a pageable source is refused, a page-locked one is copied into the expert's admission reservation, which finish
 // publishes (the next prepare hits it), or into a scratch slot the tier allocates at the token boundary after the first
@@ -36,11 +35,11 @@ inline void run_host_jobs(fixture_inputs & inputs, ggml_type type, size_t & chec
         dlsym(RTLD_DEFAULT, "ggml_ssd_tier_testing_get_api"));
     require(get_fixture != nullptr, "explicit tier fixture factory missing");
     const auto * fixture_api = get_fixture();
-    require(fixture_api && fixture_api->version == 2 &&
+    require(fixture_api && fixture_api->version == 3 &&
         fixture_api->size == sizeof(ssd::gpu::testing::api) && fixture_api->create,
         "explicit tier fixture factory ABI mismatch");
     const auto options = inputs.tier_policy();
-    const auto create_tier = [&] { return fixture_api->create(2 * stride, &options, test_cpu_kernels(), error, sizeof(error)); };
+    const auto create_tier = [&] { return fixture_api->create(2 * stride, &options, error, sizeof(error)); };
     void * t = create_tier();
     require(t != nullptr, std::string("tier create: ") + error);
     // five experts in host memory, blocks with small scales, in an anonymous mapping like the RAM cache's
@@ -85,14 +84,9 @@ inline void run_host_jobs(fixture_inputs & inputs, ggml_type type, size_t & chec
     const kimi_vram_activation act = { KIMI_VRAM_ACTIVATION_SWIGLU_CLAMP, 0, 0, 7.0f };
     std::vector<float> input(latent);
     for (int i = 0; i < latent; ++i) { input[size_t(i)] = std::sin(0.37f * float(i)); }
-    // the engine's input row: F32 for the generic engine, the CPU vec_dot input (Q8_0) for MXFP4's
+    // the engine's input row: F32
     std::vector<uint8_t> row_in(input.size() * sizeof(float));
     std::memcpy(row_in.data(), input.data(), row_in.size());
-    if (type == GGML_TYPE_MXFP4) {
-        const ggml_type q = ggml_get_type_traits_cpu(type)->vec_dot_type;
-        row_in.assign(ggml_row_size(q, latent), 0);
-        ggml_get_type_traits_cpu(q)->from_float(input.data(), row_in.data(), latent);
-    }
     uint64_t token = 0;
     // one layer: begin, prepare the experts, launch, then `between` (host jobs, admissions), finish; the rows
     struct layer_result { std::vector<int> slots; std::vector<float> rows; };

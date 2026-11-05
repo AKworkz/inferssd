@@ -5,7 +5,7 @@
 
 namespace ssd {
 namespace store { struct source_view; }
-namespace gpu { struct provider_v1; struct cpu_kernels_v1; }
+namespace gpu { struct provider_v1; }
 namespace host { class context_client; }
 namespace telemetry {
 class writer;
@@ -19,7 +19,6 @@ struct runtime_services {
     const telemetry::debug_channels * debug = nullptr;
     host::context_client * host = nullptr;
     const gpu::provider_v1 * gpu = nullptr;
-    const gpu::cpu_kernels_v1 * cpu = nullptr;
     int gpu_device = 0;
     const store::source_view * source = nullptr;
     void * gpu_transport = nullptr;

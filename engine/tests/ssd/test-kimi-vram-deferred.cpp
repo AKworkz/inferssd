@@ -2,7 +2,7 @@
 // CUDA lifecycle test of deferred VRAM uploads (GGML_KIMI_CPU_SINK_VRAM_DEFERRED_UPLOAD=1). A borrowed upload
 // outlives finish, keeps its slot out of every eviction, is published only by collect, and release waits for it.
 // A hook on the upload thread holds a copy in flight or makes it fail, independently of GPU/CPU speed.
-#include "gpu-kernels.h"
+#include "gpu-services.h"
 #include "vram-tier.cpp"
 #include "test-kimi-vram-format-fixture.h"
 #include <future>
@@ -52,7 +52,7 @@ int main() {
     kimi_vram_ready_lease lease = {};
     int ready[2] = {};
     struct cleanup { ~cleanup() { open_gate(); } } cleanup_on_error;
-    tier t(2 * stride, inputs.tier_policy(), nullptr, test_cpu_kernels()); // two slots, one global pool for every layer
+    tier t(2 * stride, inputs.tier_policy()); // two slots, one global pool for every layer
     t.deferred_hook = upload_gate;
 
     // The upload outlives finish; its slot is reserved, not ready, and collect does not publish it.
@@ -161,7 +161,7 @@ int main() {
     // destructor must wait, abort that unpublished reservation, and free the
     // elastic blocks without treating the live tail as corruption.
     {
-        auto * pending = new tier(2 * stride, inputs.tier_policy(), nullptr, test_cpu_kernels());
+        auto * pending = new tier(2 * stride, inputs.tier_policy());
         pending->deferred_hook = upload_gate;
         hold();
         pending->begin(32, 1, true);

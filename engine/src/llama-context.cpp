@@ -304,7 +304,6 @@ llama_context::llama_context(
         backends.emplace_back(backend_cpu);
 
         if (ssd_runtime) {
-            ssd_runtime->bind_cpu(backend_cpu);
             for (const auto & backend : backends) { ssd_runtime->attach_backend(backend.get()); }
             // After the backends: the sink has a GPU tier only when one of them injected its provider.
             if (cpu_sink_enabled) {

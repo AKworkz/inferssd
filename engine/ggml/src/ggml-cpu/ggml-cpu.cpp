@@ -734,9 +734,6 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
     if (strcmp(name, "ggml_backend_cpu_set_ssd_runtime_services") == 0) {
         return (void *) ggml_backend_cpu_set_ssd_runtime_services;
     }
-    if (strcmp(name, "ggml_backend_cpu_ssd_kernels_v1") == 0) {
-        return (void *) ssd::cpu::kernels;
-    }
     if (strcmp(name, "ggml_backend_cpu_ssd_api_v2") == 0) {
         return (void *) ggml_backend_cpu_ssd_api_v2;
     }
