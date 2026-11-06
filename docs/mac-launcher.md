@@ -22,7 +22,7 @@ model weights. It selects the matching chat template from the deployment
 resources; `qwen4exp` and `qwen35moe` keep the template embedded in their GGUF. The server runs
 the same SSD executor as on Linux: Metal computes the dense layers and the CPU
 sink reads and computes every routed expert, with its RAM cache sized within
-the process envelope (`host.budget_mib`, or the memory available at startup;
+the process envelope (`host.budget_mib`, or the machine's physical memory;
 see [configuration](configuration.md)). There is no GPU expert tier on macOS.
 The launch chooses the decode `-t` and prefill `-tb` thread counts; macOS cannot
 pin threads to CPUs, and `cpu.io_cpus` is only validated. Model-specific memory envelopes need

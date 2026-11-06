@@ -327,7 +327,9 @@ struct expert_cache {
         }
         stats.mapped_bytes = stats.committed_bytes = stats.enabled_bytes = stats.valid_bytes = stats.page_table_bytes = 0;
         elastic_prefill = adopt = false;
-        for (auto & e : entries) { e = {}; e.enabled = true; }
+        // A room-sized cache comes back at the size it last had (capacity_bytes); every other cache at all its slots.
+        const bool sized = room_sized();
+        for (auto & e : entries) { e = {}; e.enabled = !sized; }
         for (size_t layer_index = 0; layer_index < layers.size(); ++layer_index) {
             auto & l = layers[layer_index];
             l.seen = false; l.frequency.clear(); l.count_frequency.clear(); l.count_step = 0;
@@ -337,7 +339,8 @@ struct expert_cache {
                 }
             }
         }
-        if (!entries.empty()) { stats.enabled_bytes = stats.capacity_bytes; }
+        if (!entries.empty() && !sized) { stats.enabled_bytes = stats.capacity_bytes; }
+        if (!entries.empty() && sized && stride) { enable_to(size_t(stats.capacity_bytes / stride)); }
         clock = age_steps = 0;
     }
     void configure(uint64_t budget, const int32_t * priority, int n, int per_layer) {
@@ -627,19 +630,25 @@ struct expert_cache {
             // Otherwise, a unified GPU without a tier included, it takes what the cgroup guard would admit now.
             // The receipt names both terms: on a discrete GPU the cgroup term should be the smaller one.
             uint64_t surplus = 0;
-            const bool readable = check_room(0, nullptr, &surplus) == room_ok;
+            const room_state state = check_room(0, nullptr, &surplus);
             budget = tier_caches
                     ? multiply(multiply(layers.size(), uint64_t(std::max(1, staging_per_layer))), next_stride)
-                    : (readable ? surplus : 0);
+                    : (state == room_ok ? surplus : 0);
             const auto & r = last_room;
+            // binding: the term that sizes the cache, or the short one when the room is already taken
             std::fprintf(stderr, "[kimi_cpu_sink_cache] auto_budget=%llu unified=%d tier=%d slot_bytes=%zu cgroup_surplus=%llu system_surplus=%llu available=%llu floor=%llu binding=%s\n",
                     (unsigned long long) budget, int(ledger.state().unified), int(tier_caches), next_stride,
                     (unsigned long long) (r.cgroup == room_unreadable ? 0 : r.cgroup_surplus), (unsigned long long) r.system_surplus,
                     (unsigned long long) r.available, (unsigned long long) r.floor,
-                    !readable ? "unreadable" : !r.system || r.cgroup_surplus <= r.system_surplus ? "cgroup" : "system");
+                    state == room_unreadable ? "unreadable" : state == room_pressure ? binding_term(r) :
+                    !r.system || r.cgroup_surplus <= r.system_surplus ? "cgroup" : "system");
         }
-        size_t count = static_cast<size_t>(std::min(budget / next_stride,
-                                                  multiply(layers.size(), uint64_t(quota))));
+        // The slots the cache may ever hold: every expert of every layer up to the per-layer quota. A cache sized
+        // from the room (room_sized) keeps that many slots' metadata and address space, holds `fits` of them now and
+        // grows into the rest as the room allows at later requests (regrow); every other cache holds all of its slots.
+        const size_t limit = static_cast<size_t>(multiply(layers.size(), uint64_t(quota)));
+        const bool sized = room_sized();
+        size_t count = static_cast<size_t>(std::min<uint64_t>(budget / next_stride, limit)), fits = count;
         if (stats.budget_bytes == auto_budget && !tier_caches) {
             // Price the same page rounding/tables and allocation guards used
             // by admission. Payload-only division can spend their headroom,
@@ -652,9 +661,10 @@ struct expert_cache {
             const uint64_t node_storage = frequencies
                     ? allocation_cost(multiply(multiply(layers.size(), uint64_t(tensor->ne[2])), node)) : 0;
             const uint64_t node_guard = frequencies ? multiply(max_requests, allocation_cost(node)) : 0;
+            // a room-sized cache's metadata covers every slot it may hold, whatever it holds now
             const auto cost = [&](size_t slots) {
                 if (!slots) { return uint64_t(0); }
-                return add(add(multiply(slots, slot_cost), allocation_cost(multiply(slots, sizeof(entry)))),
+                return add(add(multiply(slots, slot_cost), allocation_cost(multiply(sized ? limit : slots, sizeof(entry)))),
                            add(add(node_storage, node_guard), 64 * 1024));
             };
             size_t low = 0, high = count;
@@ -663,16 +673,17 @@ struct expert_cache {
                 if (cost(middle) <= budget) { low = middle; }
                 else { high = middle - 1; }
             }
-            count = low;
+            fits = count = low;
+            if (sized) { count = limit; }
             slot_cost_bytes = slot_cost;
             metadata_bytes = add(add(node_storage, node_guard), 64 * 1024);
             std::fprintf(stderr,
-                    "[kimi_cpu_sink_cache] auto_capacity_bytes=%llu capacity_cost_bytes=%llu surplus_bytes=%llu slot_cost_bytes=%llu metadata_node_storage_bytes=%llu metadata_guard_bytes=%llu\n",
-                    (unsigned long long) multiply(count, next_stride), (unsigned long long) cost(count),
+                    "[kimi_cpu_sink_cache] auto_capacity_bytes=%llu capacity_cost_bytes=%llu surplus_bytes=%llu slot_cost_bytes=%llu metadata_node_storage_bytes=%llu metadata_guard_bytes=%llu limit_slots=%zu\n",
+                    (unsigned long long) multiply(fits, next_stride), (unsigned long long) cost(fits),
                     (unsigned long long) budget, (unsigned long long) slot_cost,
-                    (unsigned long long) node_storage, (unsigned long long) node_guard);
+                    (unsigned long long) node_storage, (unsigned long long) node_guard, sized ? limit : fits);
         }
-        const uint64_t capacity = multiply(count, next_stride);
+        const uint64_t capacity = multiply(fits, next_stride);
         if (elastic && prefill_slots > count) {
             throw std::runtime_error("CACHE_PREFILL_SLOTS exceeds the decode cache slot count");
         }
@@ -684,12 +695,22 @@ struct expert_cache {
             }
         }
         if (count > size_t(INT_MAX) || count > entries.max_size() ||
-                capacity > uint64_t(std::numeric_limits<ptrdiff_t>::max())) {
+                multiply(count, next_stride) > uint64_t(std::numeric_limits<ptrdiff_t>::max())) {
             throw std::runtime_error("CPU sink cache geometry exceeds addressable storage");
         }
         // Check before vector value-initialization can touch metadata pages.
         // Existing allocations are already included in memory.current.
         auto metadata_ticket = take_guard(allocation_cost(multiply(count, sizeof(entry))));
+        if (!metadata_ticket && sized) {
+            // The room holds not even the metadata now: no cache until a later request finds room (regrow).
+            release();
+            std::vector<entry>().swap(entries);
+            for (auto & l : layers) { l.begin = l.count = 0; }
+            std::copy(bytes, bytes + 3, role_bytes);
+            stride = next_stride;
+            stats.capacity_bytes = stats.enabled_bytes = 0;
+            return true;
+        }
         if (!metadata_ticket) { return false; }
         std::vector<entry> next(count);
         metadata_ticket.value.commit();
@@ -713,10 +734,37 @@ struct expert_cache {
             }
             assigned += l.count;
         }
-        for (auto & e : entries) { e.enabled = true; }
         stats.capacity_bytes = capacity;
-        stats.enabled_bytes = capacity;
+        if (sized) {
+            for (auto & e : entries) { e.enabled = false; }
+            stats.enabled_bytes = 0;
+            enable_to(fits);
+        } else {
+            for (auto & e : entries) { e.enabled = true; }
+            stats.enabled_bytes = capacity;
+        }
         return true;
+    }
+    // A cache sized from the room (an automatic budget for the RAM cache itself: no unified GPU tier, uniform
+    // allocation, partial reclaim or none): its arena may hold every slot, and how many it holds follows the room.
+    bool room_sized() const {
+        return stats.budget_bytes == auto_budget && !tier_caches && allocation == uniform && layer_quotas.empty() &&
+            !elastic;
+    }
+    // Enables slots evenly across the layers until `target` are enabled; disables none.
+    void enable_to(size_t target) {
+        if (layers.empty()) { return; }
+        for (size_t layer_index = 0; layer_index < layers.size(); ++layer_index) {
+            const auto & item = layers[layer_index];
+            const size_t wanted = std::min(item.count, target / layers.size() + (layer_index < target % layers.size()));
+            size_t have = 0;
+            for (size_t i = item.begin; i < item.begin + item.count; ++i) { have += entries[i].enabled; }
+            for (size_t i = item.begin; i < item.begin + item.count && have < wanted; ++i) {
+                if (entries[i].enabled) { continue; }
+                entries[i].enabled = true; ++have;
+                stats.enabled_bytes = add(stats.enabled_bytes, stride);
+            }
+        }
     }
     void prepare(std::vector<expert_request> & requests, const ggml_tensor * const * tensors,
                  const size_t * bytes, kimi_cpu_sink_stats & current) {
@@ -883,11 +931,13 @@ struct expert_cache {
     }
     // The arena, address space only: the guard admits each resident slot against the cgroup, so the kernel's
     // overcommit heuristic must not refuse a mapping larger than RAM plus swap. Ordinary pages: partial reclaim gives
-    // single slots back (arena_discard). nullptr, or why it failed.
+    // single slots back (arena_discard). Every slot's address space: a room-sized cache grows into the slots it does
+    // not hold yet. nullptr, or why it failed.
     const char * map_arena() {
-        void * memory = ssd::platform::arena_reserve(stats.capacity_bytes);
+        const uint64_t bytes = multiply(entries.size(), stride);
+        void * memory = ssd::platform::arena_reserve(size_t(bytes));
         if (!memory) { return "mmap_failed"; }
-        arena = static_cast<char *>(memory); stats.mapped_bytes = stats.capacity_bytes;
+        arena = static_cast<char *>(memory); stats.mapped_bytes = bytes;
         return ssd::platform::arena_no_hugepage(arena, stats.mapped_bytes) ? nullptr : "nohugepage_failed";
     }
     // Commits the pages of slots [first, first + count) before their first touch, and again after a discard: Windows
@@ -910,8 +960,8 @@ struct expert_cache {
     // ledger as every later request's prefill does; the first decode adopts the arena whatever its epoch, and takes
     // back what the room allows then (regrow). So only a cache that can give room back takes its storage here
     // (partial reclaim, or elastic): an arena that cannot would refuse the first prefill's ledger requests, where a
-    // cache sized at the first decode token comes after them. The arena has the slots the first decode token would
-    // size, when no prefill holds room; the slots committed leave the room the ledger holds for the first prefill's
+    // cache sized at the first decode token comes after them. The slots enabled are the ones the first decode token
+    // would size, when no prefill holds room; the slots committed leave the room the ledger holds for the first prefill's
     // pages (prefill_pages: the load-time graph's, the largest prefill's), which the first decode token takes back.
     // Returns the slots committed.
     size_t reserve_at_load(const size_t * bytes, const ggml_tensor * tensor, size_t max_requests, int threads, double & us) {
@@ -936,16 +986,37 @@ struct expert_cache {
         uint64_t surplus = 0;
         if (check_room(0, nullptr, &surplus) == room_unreadable) { return 0; }
         size_t n = std::min<size_t>(entries.size(), surplus > 64 * 1024 ? (surplus - 64 * 1024) / add(payload_pages, tables) : 0);
+        // The slots committed, as runs [first, first + count): the first n, or for a room-sized cache the first of
+        // each layer's enabled slots, n in all.
+        std::vector<std::pair<size_t, size_t>> runs;
+        if (room_sized()) {
+            size_t left = n;
+            for (const auto & l : layers) {
+                size_t k = 0;
+                while (k < l.count && entries[l.begin + k].enabled) { ++k; }
+                k = std::min(k, left);
+                left -= k;
+                if (k) { runs.emplace_back(l.begin, k); }
+            }
+            n -= left;
+        } else if (n) {
+            runs.emplace_back(0, n);
+        }
         if (!n) { return 0; }
         auto load_ticket = take_guard(cost(n));
         if (!load_ticket) { return 0; }
-        if (map_arena() || !commit_slots(0, n)) { release(); return 0; }
+        if (map_arena()) { release(); return 0; }
+        for (const auto & run : runs) { if (!commit_slots(run.first, run.second)) { release(); return 0; } }
         const auto start = detail::cache_clock::now();
         const size_t workers = size_t(std::max(1, std::min(threads, int(n))));
         std::atomic<bool> touched{false};
+        // each worker pages in its share of every run
         auto populate = [&](size_t w) {
-            char * begin = arena + n * w / workers * stride, * end = arena + n * (w + 1) / workers * stride;
-            if (!ssd::platform::arena_populate(begin, size_t(end - begin))) { touched = true; }
+            for (const auto & run : runs) {
+                char * begin = arena + (run.first + run.second * w / workers) * stride;
+                char * end = arena + (run.first + run.second * (w + 1) / workers) * stride;
+                if (end > begin && !ssd::platform::arena_populate(begin, size_t(end - begin))) { touched = true; }
+            }
         };
         // this thread takes part 0 and whatever no started thread took (the pool's storage is reserved, so only a
         // thread's creation can fail, and then nothing was added)
@@ -958,10 +1029,12 @@ struct expert_cache {
         for (auto & t : pool) { t.join(); }
         // Page-aligned production strides are fully populated by the workers;
         // also touch the tail for a valid nonaligned legacy/test geometry.
-        touch_pages(arena + n * stride - 1, 1, size_t(page_size));
+        for (const auto & run : runs) { touch_pages(arena + (run.first + run.second) * stride - 1, 1, size_t(page_size)); }
         load_ticket.value.commit();
         us = detail::cache_elapsed_us(start);
-        for (size_t i = 0; i < n; ++i) { entries[i].resident = true; }
+        for (const auto & run : runs) {
+            for (size_t i = run.first; i < run.first + run.second; ++i) { entries[i].resident = true; }
+        }
         stats.committed_bytes = multiply(n, stride);
         stats.page_table_bytes = multiply(n, tables);
         stats.peak_bytes = std::max(stats.peak_bytes, stats.committed_bytes);
@@ -978,8 +1051,14 @@ struct expert_cache {
     // every slot was without the load step. So are the enabled slots the load step did not commit (the room it saw
     // was smaller than the one geometry sized from, or it left the first prefill's pages): with an automatic budget
     // they take their room first (owed). `after`: "load" for the first request of an arena made at load, "prefill".
+    // A room-sized cache grows here past the size it had, up to every slot of its arena, so a cache that started
+    // short of memory takes the room that frees up later; one that had no room for its metadata learns its geometry
+    // again at this request.
     void regrow(const char * after) {
-        if (!partial_reclaim || elastic || !arena || !stride || paused) { return; }
+        if (!partial_reclaim || elastic || !stride || paused) { return; }
+        const bool sized = room_sized();
+        if (sized && entries.empty()) { stride = 0; std::fill(role_bytes, role_bytes + 3, 0); return; }
+        if (!arena && !sized) { return; }
         const size_t before = enabled_slots();
         uint64_t more = entries.size() - before, surplus = 0, owed = 0;
         if (!more) { return; }
@@ -989,18 +1068,8 @@ struct expert_cache {
             const uint64_t room = surplus > metadata_bytes ? (surplus - metadata_bytes) / slot_cost_bytes : 0;
             more = std::min<uint64_t>(more, room > owed ? room - owed : 0);
         }
-        const size_t target = before + size_t(more);
-        for (size_t layer_index = 0; layer_index < layers.size(); ++layer_index) {
-            const auto & item = layers[layer_index];
-            const size_t wanted = target / layers.size() + (layer_index < target % layers.size());
-            size_t have = 0;
-            for (size_t i = item.begin; i < item.begin + item.count; ++i) { have += entries[i].enabled; }
-            for (size_t i = item.begin; i < item.begin + item.count && have < wanted; ++i) {
-                if (entries[i].enabled) { continue; }
-                entries[i].enabled = true; ++have;
-                stats.enabled_bytes = add(stats.enabled_bytes, stride);
-            }
-        }
+        enable_to(before + size_t(more));
+        if (sized) { stats.capacity_bytes = std::max(stats.capacity_bytes, multiply(enabled_slots(), stride)); }
         std::fprintf(stderr, "[kimi_cpu_sink_cache] %s_regrow=1 before_slots=%zu after_slots=%zu of=%zu owed_slots=%llu surplus_bytes=%llu committed_bytes=%llu\n",
                 after, before, enabled_slots(), entries.size(), (unsigned long long) owed, (unsigned long long) surplus,
                 (unsigned long long) stats.committed_bytes);

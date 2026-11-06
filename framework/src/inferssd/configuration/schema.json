@@ -195,7 +195,7 @@
             "default": 0
         },
         "host.headroom_mib": {
-            "description": "Host safety headroom in MiB",
+            "description": "Host memory in MiB the expert caches leave free",
             "kind": "integer",
             "unit": "MiB",
             "producer": "plan",
@@ -208,7 +208,7 @@
             "default": 512
         },
         "host.budget_mib": {
-            "description": "Host memory envelope in MiB against this process's own memory; zero derives it at startup",
+            "description": "Host memory envelope in MiB against this process's own memory; zero leaves the machine's physical memory",
             "kind": "integer",
             "unit": "MiB",
             "producer": "plan",

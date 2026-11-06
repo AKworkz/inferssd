@@ -493,12 +493,26 @@ def _available(host: Host, system: str) -> Optional[int]:
             value = room if value is None else min(value, room)
         return value
     if system == "darwin":
-        text = identity.output(host, ["vm_stat"]) or ""
-        page = re.search(r"page size of (\d+) bytes", text)
-        pages = dict(re.findall(r"^Pages (free|inactive|speculative):\s+(\d+)\.", text, re.M))
-        if not page or len(pages) != 3:
+        # As the engine's ledger measures it (ledger-native.cpp): what an allocation takes
+        # before the kernel compresses anything, by its own live thresholds. That is the
+        # free pages above the free target, the file-backed pages above the file cache
+        # minimum, and the purgeable and reusable pages.
+        names = (
+            "vm.pagesize",
+            "vm.page_free_count",
+            "vm.vm_page_free_target",
+            "vm.page_pageable_external_count",
+            "vm.vm_page_filecache_min",
+            "vm.page_purgeable_count",
+            "vm.page_reusable_count",
+        )
+        try:
+            page, free, target, file, minimum, purgeable, reusable = (
+                identity.sysctl_int(host, n) for n in names
+            )
+        except RuntimeError:
             return None
-        return sum(int(count) for count in pages.values()) * int(page.group(1))
+        return (max(0, free - target) + max(0, file - minimum) + purgeable + reusable) * page
     return None
 
 

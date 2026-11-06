@@ -42,10 +42,6 @@ UNIFIED_HEADROOM_MIB = 4096
 # grow into. A GPU this launch has to itself keeps nothing back: that memory would
 # only cost expert slots.
 SHARED_GPU_RESERVE_MIB = 1024
-# On macOS the share of memory kept out of the RAM expert cache: macOS compresses
-# a cache's cold pages long before free memory runs out, and every hit on a
-# compressed slot then decompresses it.
-DARWIN_HEADROOM_SHARE = 4
 # The longest prompt pass the prefill route is priced for.
 MAX_PASS = 1 << 20
 
@@ -518,11 +514,10 @@ def host_headroom_mib(
 ) -> Optional[int]:
     """The host margin a launch sets as host.headroom_mib, or None to keep the engine's own.
 
-    On macOS it is a quarter of memory; on Linux with one usable GPU that shares host memory,
-    UNIFIED_HEADROOM_MIB.
+    On Linux with one usable GPU that shares host memory, UNIFIED_HEADROOM_MIB. macOS keeps the
+    engine's: the engine measures room by the kernel's own live thresholds (its free target and
+    its file cache minimum kept back).
     """
-    if platform == "darwin":
-        return characteristics["memory"]["total_bytes"] // DARWIN_HEADROOM_SHARE >> 20
     if platform == "linux":
         device = single_gpu(characteristics, runtime)
         if device is not None and device["integrated"]:
@@ -648,14 +643,6 @@ def derive(
                 "prefill: one pass a prompt, -b and -ub as large as the context; a pass reads "
                 "every expert it routes to once"
             )
-    if platform == "darwin":
-        mib = cast(int, host_headroom_mib(characteristics, runtime, platform))
-        choices["host.headroom_mib"] = (
-            str(mib),
-            f"a quarter of the {size(characteristics['memory']['total_bytes'])} of memory: macOS "
-            "compresses a RAM cache's cold pages long before free memory runs out",
-        )
-        notes.append(f"host.headroom_mib: {mib}, a quarter of the machine's memory")
     if platform in ("darwin", "windows") and runtime.memory_budget_bytes:
         mib = runtime.memory_budget_bytes >> 20
         if mib:

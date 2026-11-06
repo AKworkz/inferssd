@@ -24,7 +24,7 @@ struct execution_policy {
     std::string cache_policy = "window", cache_allocation = "priority";
     bool cache_keep = false, cache_prefill_read = false, cache_elastic = false, cache_partial_reclaim = false;
     bool cache_reclaimable_file = false;
-    uint64_t cache_reserve_bytes = 2ull << 30;
+    uint64_t cache_reserve_bytes = 512ull << 20; // the reserve a configured server runs with
     size_t cache_prefill_slots = 0;
     std::map<int32_t, size_t> cache_layer_quotas;
     uint64_t vram_budget = 0;

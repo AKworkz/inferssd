@@ -283,17 +283,26 @@ def test_linux_runtime_without_affinity_uses_the_online_cpus(tmp_path):
 
 
 def test_darwin_runtime_facts(tmp_path):
-    vm_stat = (
-        "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
-        "Pages free:                               1000.\n"
-        "Pages active:                             9000.\n"
-        "Pages inactive:                           2000.\n"
-        "Pages speculative:                         500.\n"
-    )
-    commands = {("sysctl", "-n", "hw.logicalcpu"): ok("10\n"), ("vm_stat",): ok(vm_stat)}
+    counters = {
+        "hw.logicalcpu": 10,
+        "vm.pagesize": 16384,
+        "vm.page_free_count": 1000,
+        "vm.vm_page_free_target": 400,
+        "vm.page_pageable_external_count": 9000,
+        "vm.vm_page_filecache_min": 4000,
+        "vm.page_purgeable_count": 70,
+        "vm.page_reusable_count": 30,
+    }
+    commands = {("sysctl", "-n", name): ok(f"{value}\n") for name, value in counters.items()}
     host = RuntimeHost(tmp_path, system="darwin", commands=commands)
     facts = read_runtime(host=host)
-    assert facts == RuntimeFacts(tuple(range(10)), (), 3500 * 16384, None)
+    # free above the free target, file pages above the file cache minimum, purgeable, reusable
+    assert facts == RuntimeFacts(tuple(range(10)), (), (600 + 5000 + 70 + 30) * 16384, None)
+    below = dict(commands)
+    below[("sysctl", "-n", "vm.vm_page_free_target")] = ok("5000\n")
+    below[("sysctl", "-n", "vm.vm_page_filecache_min")] = ok("12000\n")
+    facts = read_runtime(host=RuntimeHost(tmp_path, system="darwin", commands=below))
+    assert facts.available_bytes == (70 + 30) * 16384
 
 
 @pytest.mark.parametrize(

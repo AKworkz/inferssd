@@ -128,8 +128,10 @@ inline void finite_cgroup(kimi_host_ledger & ledger) {
 #endif
 // The RAM cache admits only under a finite, readable memory envelope. Linux: a cgroup v2
 // memory.max on this process or an ancestor, which the environment may not provide. macOS and
-// Windows: the native ledger always has one (a job limit, host.budget_mib or the one derived at
-// creation), so an unreadable one is an OS query failure, not a missing resource.
+// Windows: the native ledger always has one (a job limit, host.budget_mib or the machine's memory),
+// so an unreadable one is an OS query failure, not a missing resource; what those machines may not
+// provide is room in the system term for the cache's floor, which a busy machine lacks as a
+// machine without a finite cgroup lacks the envelope.
 inline void finite_envelope() {
 #if defined(__linux__)
     kimi_host_ledger ledger;
@@ -142,6 +144,9 @@ inline void finite_envelope() {
     if (room.cgroup == ssd::host::room_unreadable) {
         throw std::runtime_error("the native memory envelope is unreadable; the RAM cache would admit nothing");
     }
+    const ssd::host::room system = ledger.measure(0);
+    need(system.system && system.system_surplus > 0,
+            "cache fixture needs room in the system term beyond its floor (the machine's memory is taken)");
 #endif
 }
 

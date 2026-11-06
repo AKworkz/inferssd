@@ -1,6 +1,6 @@
 #pragma once
-// Host-memory ledger on Linux: the two terms of room.h from cgroup v2 and /proc. It measures; the arbiter
-// (arbiter.h) admits allocations, runs the caches' reclaimers and learns the margin.
+// Host-memory ledger on Linux: the two terms and the limits of room.h from cgroup v2 and /proc. It measures; the
+// arbiter (arbiter.h) admits allocations, runs the caches' reclaimers and learns the margin.
 //  - envelope: every finite memory.max among this process's cgroup and its ancestors. On a discrete GPU it is the
 //    term that binds. On a unified-memory GPU (DGX Spark, Jetson) the cgroup does not charge device allocations, so
 //    the device memory the expert caches hold (device_held: the GPU tier's blocks and buffers) counts as used beside
@@ -169,13 +169,15 @@ struct kimi_host_ledger : ssd::host::ledger_terms {
     }
     // The envelope: every finite memory.max ancestor must keep the reserve and the open prefill's pages free after
     // `extra`, the device memory the caches hold on unified memory counted as used beside memory.current. Unreadable
-    // controller files below the root disable the term (and with it RAM cache admission) conservatively.
+    // controller files below the root disable the term (and with it RAM cache admission) conservatively. The limits
+    // are the same memory.max ancestors holding `extra` alone, file pages counted as use unless the LRU counts as
+    // headroom; with none finite, nothing limits.
     void cgroup_term(uint64_t extra, room & r) const {
         if (cgroup.empty()) { return; }
         const size_t root = std::strlen("/sys/fs/cgroup");
         std::string path = cgroup, text;
         bool bounded = false;
-        uint64_t missing = 0, spare = UINT64_MAX;
+        uint64_t missing = 0, spare = UINT64_MAX, lacking = 0;
         while (path.size() >= root) {
             const std::string maximum = get(path + "/memory.max", text) ? first_token(text) : "";
             if (maximum.empty()) {
@@ -185,6 +187,7 @@ struct kimi_host_ledger : ssd::host::ledger_terms {
                 bounded = true;
                 uint64_t limit = 0, used = 0;
                 if (!decimal(maximum, limit) || !get(path + "/memory.current", text) || !decimal(first_token(text), used)) { return; }
+                uint64_t charged = used; // the limits' use
                 if (reclaimable_file || prefill_pages) {
                     // File-backed page cache is reclaimable before anonymous memory (dirty pages may first need
                     // writeback). With reclaimable_file both LRU lists count as headroom, and the open prefill's
@@ -196,15 +199,18 @@ struct kimi_host_ledger : ssd::host::ledger_terms {
                             !field(text, "inactive_file", inactive)) { return; }
                     const uint64_t file = ssd::host::add(active, inactive);
                     used -= std::min(used, reclaimable_file ? file : std::min(file, prefill_pages));
+                    if (reclaimable_file) { charged = used; }
                 }
                 bound(limit, ssd::host::add(used, device_held), ssd::host::add(ssd::host::add(reserve, prefill_pages), extra),
                     missing, spare);
+                lacking = std::max(lacking, lack(limit, ssd::host::add(charged, device_held), extra));
             }
             const size_t slash = path.find_last_of('/');
             if (slash == std::string::npos) { break; }
             path.resize(slash);
         }
         if (bounded) { set_envelope(missing, spare, r); }
+        set_limits(lacking, r);
     }
     // full_boost: the system term counts MemAvailable at the full watermark boost, for memory about to be taken up
     // to the floor (the arbiter's take and make_room). The RAM cache's per-layer guard reads MemAvailable as it is:

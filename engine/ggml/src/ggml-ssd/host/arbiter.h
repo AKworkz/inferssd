@@ -20,7 +20,7 @@ struct client_config {
     uint64_t margin_bytes = 512ull << 20;
     uint64_t explicit_reserve_bytes = 0;
     bool reclaimable_file = true;
-    // host.budget_mib in bytes: the macOS/Windows envelope against process memory; 0 derives it at startup.
+    // host.budget_mib in bytes: the macOS/Windows envelope against process memory; 0 leaves the machine's memory.
     // Linux ignores it: its envelope is the cgroup's memory.max.
     uint64_t budget_bytes = 0;
 };
@@ -40,13 +40,15 @@ struct actions {
     // The RAM cache gives slots back until room for `bytes` fits (false when it cannot).
     std::function<bool(uint64_t bytes)> reclaim_cache;
 };
-// Who an admission is for, which decides what the reclaimer gives back for it.
-// An allocation outside the caches (compute and work buffers, scratch,
-// checkpoints) has the GPU tier give room first on unified memory while a term
-// is short, as the tier grows back into memory that is free again at a later
-// decode token, then the RAM cache. The RAM cache's own growth has its colder
-// slots give room. The GPU tier's growth takes free room only: it keeps the
-// floor and the RAM cache's demand free itself.
+// Who an admission is for, which decides what the reclaimer gives back for it
+// and what refuses it. An allocation outside the caches (compute and work
+// buffers, scratch, checkpoints) has the GPU tier give room first on unified
+// memory while a term is short, as the tier grows back into memory that is
+// free again at a later decode token, then the RAM cache. It is one the run
+// needs, so after that only a limit it would not fit refuses it (room.h).
+// The RAM cache's own growth has its colder slots give room. The GPU tier's
+// growth takes free room only: it keeps the floor and the RAM cache's demand
+// free itself. The caches grow only while both terms fit.
 enum class requester { outside, ram_cache, gpu_tier };
 
 struct snapshot {
@@ -134,8 +136,10 @@ class context_client {
     // executor must not hold anything they wait for.
     [[nodiscard]] result<void> set_reclaimer(const actions &) noexcept;
     void clear_reclaimer() noexcept;
-    // Observation/reclaim compatibility seam. It does not reserve a future
-    // allocation. Production allocations must keep the returned take ticket.
+    // Observation/reclaim compatibility seam for an allocation outside the
+    // caches: the reclaimer runs as take() runs it, and the room's limits
+    // (room::within_limits) answer. It does not reserve a future allocation.
+    // Production allocations must keep the returned take ticket.
     [[nodiscard]] result<room> make_room(uint64_t extra) noexcept;
     [[nodiscard]] result<allocation_ticket> take(uint64_t host, uint64_t device = 0,
                            requester who = requester::outside, bool require_finite_cgroup = false,

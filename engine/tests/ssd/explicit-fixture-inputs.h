@@ -284,7 +284,7 @@ struct fixture_inputs {
     template<class Ledger> void configure_terms(Ledger & ledger, bool unified, long) const { ledger.unified = unified; }
     template<class Ledger> void configure(Ledger & ledger, bool unified) const {
         configure_terms(ledger, unified, 0);
-        ledger.reserve = integer("cache_reserve_bytes", 2ull << 30);
+        ledger.reserve = integer("cache_reserve_bytes", 512ull << 20); // the reserve a configured server runs with
         if (ledger.reserve < (512ull << 20)) { throw std::runtime_error("fixture reserve below safe floor"); }
         ledger.margin = std::max(ledger.margin, ledger.reserve);
         ledger.reclaimable_file = boolean("cache_reclaimable_file", false);

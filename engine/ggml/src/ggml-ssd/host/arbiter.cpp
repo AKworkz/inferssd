@@ -347,17 +347,20 @@ result<allocation_ticket> context_client::take(uint64_t host, uint64_t device, r
             return failed<allocation_ticket>(status::resource, "host byte overflow");
         }
         const uint64_t extra = add(host, state_->config.unified ? device : 0);
-        // The room measured under the mutex, and the ticket issued under the same lock when it fits.
-        const auto admit = [&]() -> result<allocation_ticket> {
+        // The room measured under the mutex, and the ticket issued under the same lock when it fits: both terms for
+        // the caches' growth; for an allocation the run needs (by_limits), only the limits themselves.
+        const auto admit = [&](bool by_limits) -> result<allocation_ticket> {
             std::lock_guard<std::mutex> lock(owner.mutex);
             if (const auto * error = owner.invalid(*state_)) { return failed<allocation_ticket>(status::invalid, error); }
             auto observed = owner.measure(extra, true);
-            const bool readable = observed.system || observed.cgroup != room_unreadable;
-            const bool missing_cgroup = observed.cgroup == room_unreadable && (finite || !owner.budget.unbounded());
+            const bool readable = by_limits ? observed.limits != room_unreadable :
+                (observed.system || observed.cgroup != room_unreadable) &&
+                !(observed.cgroup == room_unreadable && (finite || !owner.budget.unbounded()));
             // Nothing asked for needs no room: a shortage must not stop a run over memory it already holds.
-            if ((extra && !observed.fits()) || !readable || missing_cgroup) {
-                const auto code = !readable || missing_cgroup ? status::io : status::resource;
-                return {allocation_ticket({}, {}, 0, observed), code, "host budget refused"};
+            const bool admitted = by_limits ? observed.within_limits(extra) : readable && (!extra || observed.fits());
+            if (!admitted) {
+                return {allocation_ticket({}, {}, 0, observed), readable ? status::resource : status::io,
+                        by_limits ? "host memory limit refused" : "host budget refused"};
             }
             const uint64_t held_pages = owner.pages();
             if (extra == UINT64_MAX || held_pages == UINT64_MAX || extra > UINT64_MAX - owner.pending ||
@@ -371,12 +374,20 @@ result<allocation_ticket> context_client::take(uint64_t host, uint64_t device, r
             ++state_->tickets; owner.invalidate_peers(state_->id);
             return passed(allocation_ticket(owner_, state_, id, observed));
         };
-        // One measurement when the room is there. A shortage runs the context's reclaimer, then measures again.
-        auto ticket = admit();
-        if (ticket.code != status::resource) { return ticket; }
-        const auto reclaimed = owner.reclaim(extra, ticket.value.observation(), state_, who);
-        if (!reclaimed) { return failed<allocation_ticket>(reclaimed.code, reclaimed.error.c_str()); }
-        return reclaimed.value ? admit() : std::move(ticket);
+        // One measurement when the room is there. A shortage runs the context's reclaimer, which gives back what both
+        // terms ask. The caches' own growth then measures them again. An allocation outside the caches is one the
+        // run needs: refusing it ends the run, so after the reclaimer only a limit it would not fit refuses it,
+        // and terms that cannot be read do not.
+        const bool needed = who == requester::outside;
+        auto ticket = admit(false);
+        if (ticket.code == status::resource) {
+            const auto reclaimed = owner.reclaim(extra, ticket.value.observation(), state_, who);
+            if (!reclaimed) { return failed<allocation_ticket>(reclaimed.code, reclaimed.error.c_str()); }
+            if (needed) { return admit(true); }
+            return reclaimed.value ? admit(false) : std::move(ticket);
+        }
+        if (needed && ticket.code == status::io) { return admit(true); }
+        return ticket;
     });
 }
 result<bool> context_client::update_file_reserve() noexcept {

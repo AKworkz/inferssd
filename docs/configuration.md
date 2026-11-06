@@ -60,26 +60,32 @@ at launch, and 0 otherwise; a setting of yours replaces that choice. On a GPU th
 shares the host's memory, the reserve adds to the host memory floor below, and the
 tier gives memory back under pressure from any process.
 
-The host memory ledger has two terms on every platform. The envelope is a finite
-limit on this process's memory less a 512 MiB reserve: on Linux the tightest
-cgroup v2 `memory.max`; on Windows a memory limit of the process's job, when the
-job sets one, against commit; and on macOS and Windows `host.budget_mib` against
-the process's own memory (Windows PrivateUsage, macOS phys_footprint). With
-`host.budget_mib = 0` and no job limit, the envelope is fixed at startup as the
-process's use plus the memory then available, so its room starts at the
-available memory less the reserve. The system term is the memory available now
-less the floor: Linux MemAvailable, Windows the smaller of available physical
-memory and available commit, macOS free, file-backed, purgeable and reusable
-pages. The RAM expert cache admits only under a readable envelope. On a GPU
+The host memory ledger has two terms on every platform, and they size the expert
+caches. The envelope is a finite limit on this process's memory less a 512 MiB
+reserve: on Linux the tightest cgroup v2 `memory.max`; on Windows a memory limit
+of the process's job, when the job sets one, against commit; and on macOS and
+Windows `host.budget_mib` against the process's own memory (Windows PrivateUsage,
+macOS phys_footprint). With `host.budget_mib = 0` and no job limit, the limit is
+the machine's physical memory, the budget the framework passes by default. The
+system term is the memory available now less the floor, which is at least
+`host.headroom_mib` and the reserve: Linux MemAvailable, Windows the smaller of available physical
+memory and available commit, macOS what a new allocation takes before the kernel
+compresses anything, by its own live thresholds: the free pages above its free
+target, the file-backed pages above its file cache minimum
+(`vm.vm_page_filecache_min`), and the purgeable and reusable pages. The RAM
+expert cache admits only under a readable envelope. On a GPU
 that shares the host's memory (unified memory, such as GB10), a CUDA allocation
 is not charged to the cgroup, so the Linux envelope counts the CUDA expert
 tier's storage as used beside the cgroup's own usage: the tier and the RAM
 cache share one envelope, and the tier also stays within MemAvailable less the
-floor. An allocation that does not fit, such as a compute or work buffer, a
-scratch buffer or a server checkpoint, first takes room back from the expert
-caches: on unified memory from the GPU tier, whose blocks also answer any CUDA
-allocation that would fail while no layer holds them, then from the RAM
-cache's coldest slots.
+floor. Every other allocation, such as a compute or work buffer, a scratch
+buffer or a server checkpoint, is one the run needs. When it does not fit both
+terms it first takes room back from the expert caches: on unified memory from
+the GPU tier, whose blocks also answer any CUDA allocation that would fail while
+no layer holds them, then from the RAM cache's coldest slots. Then it goes
+ahead unless it would exceed one of the limits above itself. The reserve, the
+floor and the memory available now only decide how much the caches hold, so a
+machine short of memory runs with smaller caches instead of failing.
 
 ## File and CLI contract
 

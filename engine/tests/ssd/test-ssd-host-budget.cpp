@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The native host budget sources (macOS, Windows) on the running machine: the ledger reads a finite envelope and
-// a system term of sane magnitude, and the arbiter admits a small take and refuses one past the envelope.
+// a system term of sane magnitude; the arbiter admits a small take, holds the RAM cache to the envelope, and lets an
+// allocation the run needs go up to the limit itself.
 #include "ggml-ssd/host/arbiter.h"
 #include "ggml-ssd/host/ledger-native.h"
 
@@ -15,8 +16,6 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-#else
-#include <sys/sysctl.h>
 #endif
 
 using namespace ssd::host;
@@ -27,18 +26,6 @@ static void require(bool ok, const char * what) {
         std::fprintf(stderr, "FAIL: %s\n", what);
         std::exit(1);
     }
-}
-
-static uint64_t physical_memory() {
-#if defined(_WIN32)
-    MEMORYSTATUSEX status{};
-    status.dwLength = sizeof(status);
-    return GlobalMemoryStatusEx(&status) ? status.ullTotalPhys : 0;
-#else
-    uint64_t bytes = 0;
-    size_t size = sizeof(bytes);
-    return sysctlbyname("hw.memsize", &bytes, &size, nullptr, 0) == 0 ? bytes : 0;
-#endif
 }
 
 static unsigned long long mib(uint64_t bytes) { return (unsigned long long) (bytes / MiB); }
@@ -71,20 +58,34 @@ static std::unique_ptr<context_client> client(const std::shared_ptr<process_arbi
     return std::move(made.value);
 }
 
-// The arbiter on the real sources: a 64 MiB take fits, one `past` beyond the envelope's surplus is refused by it.
+// The arbiter on the real sources: a 64 MiB take fits. The RAM cache's growth `past` (less than the reserve) beyond
+// the envelope's surplus is refused by the envelope. An allocation the run needs of the same size goes ahead, as the
+// reserve is the caches', and one `past` beyond the limit itself is refused.
 static void admission(const char * label, context_client & c, uint64_t past) {
+    const uint64_t reserve = client_config{}.reserve_bytes;
+    require(past < reserve, "admission: past must be less than the reserve");
     const auto measured = c.measure(0);
     require(bool(measured), "measure");
     print(label, measured.value);
-    require(measured.value.cgroup == room_ok, "envelope readable with room");
+    require(measured.value.cgroup == room_ok && measured.value.limits == room_ok, "envelope readable with room");
     {
         auto small = c.take(64 * MiB, 0, requester::outside, true);
         require(bool(small) && bool(small.value), "small take admitted");
         small.value.cancel();
     }
-    auto large = c.take(measured.value.cgroup_surplus + past, 0, requester::outside, true);
-    require(!large && large.code == ssd::status::resource && !large.value, "take past the envelope refused");
-    require(large.value.observation().cgroup_shortage > 0, "the envelope refused it");
+    const uint64_t surplus = measured.value.cgroup_surplus;
+    auto cache = c.take(surplus + past, 0, requester::ram_cache, true, allocation_class::tracked);
+    require(!cache && cache.code == ssd::status::resource && !cache.value, "the RAM cache grew past the envelope");
+    require(cache.value.observation().cgroup_shortage > 0, "the envelope refused it");
+    {
+        auto needed = c.take(surplus + past);
+        require(bool(needed) && bool(needed.value), "an allocation the run needs was held to the caches' reserve");
+        needed.value.cancel();
+    }
+    auto large = c.take(surplus + reserve + past);
+    require(!large && large.code == ssd::status::resource && !large.value && large.error == "host memory limit refused",
+            "an allocation past the limit itself was admitted");
+    require(large.value.observation().limits_shortage > 0, "the limit refused it");
 }
 
 // Use is the process's own memory: touching 128 MiB of heap raises it by about that much.
@@ -101,39 +102,48 @@ static void use_tracks_allocation() {
     std::free(block);
 }
 
-// host.budget_mib 0 and no job limit: the envelope is the use and availability at creation.
-static void derived() {
-    const uint64_t total = physical_memory();
-    require(total > 0, "physical memory readable");
+// host.budget_mib 0 and no job limit: the limit is the machine's physical memory against the process's own use.
+static void machine() {
+    uint64_t total = 0;
+    require(native::physical(total) && total > 0, "physical memory readable");
     native_ledger ledger;
+    require(ledger.machine == total, "the ledger read the machine's memory");
     envelopes found;
     require(ledger.limits(found) && found.count >= 1, "envelope readable");
-    print("derived", found);
+    print("machine", found);
     const envelope & e = found.item[found.count - 1];
-    if (std::strcmp(e.source, "derived") == 0) {
-        require(e.limit > e.used && e.limit - e.used <= total, "derived envelope within physical memory");
+    if (std::strcmp(e.source, "machine") == 0) {
+        require(e.limit == total && e.used < total, "the machine envelope is its physical memory");
     } else {
-        std::printf("derived: this process runs under a job memory limit (%s)\n", e.source);
+        std::printf("machine: this process runs under a job memory limit (%s)\n", e.source);
     }
     const room r = ledger.measure(0);
-    print("derived", r);
+    print("machine", r);
     require(r.cgroup == room_ok && r.cgroup_surplus > 0 && r.cgroup_surplus < total, "envelope room sane");
-    require(r.system && r.available > 0 && r.available <= total, "system term within physical memory");
+    require(r.limits == room_ok && !r.limits_shortage, "the limits hold nothing more");
+    require(r.system && r.available <= total, "system term within physical memory");
     require(r.floor == 512 * MiB, "floor is the margin");
     const room full = ledger.measure(0, true);
     require(full.system && full.boost_headroom == 0, "no watermark boost");
     const room over = ledger.measure(r.cgroup_surplus + GiB);
     require(over.cgroup == room_pressure && over.cgroup_shortage > GiB / 2, "envelope binds past its surplus");
+    require(over.limits == room_pressure && over.limits_shortage > 256 * MiB && over.limits_shortage <= GiB,
+            "the limits bind past the limit itself");
+    const room within = ledger.measure(r.cgroup_surplus + 256 * MiB);
+    require(within.cgroup == room_pressure && within.limits == room_ok, "the reserve is the envelope's, not the limits'");
     require(!ledger.update_file_reserve() && ledger.floor() == 512 * MiB, "file reserve stays inert");
     ledger.prefill_pages = 256 * MiB;
     const room held = ledger.measure(0);
-    require(held.system && held.available > held.floor + 256 * MiB &&
-            held.system_surplus == held.available - held.floor - 256 * MiB, "the system term holds prefill pages");
+    const uint64_t need = held.floor + 256 * MiB; // whatever the machine has available now
+    require(held.system && held.system_surplus == (held.available > need ? held.available - need : 0) &&
+            held.system_shortage == (need > held.available ? need - held.available : 0),
+            "the system term holds prefill pages");
     require(held.cgroup_surplus + 16 * MiB >= r.cgroup_surplus, "the envelope does not hold prefill pages");
+    require(held.limits == room_ok, "the limits do not hold prefill pages");
 
     auto owner = std::make_shared<process_arbiter>();
     auto c = client(owner, client_config{});
-    admission("derived arbiter", *c, GiB);
+    admission("machine arbiter", *c, 64 * MiB);
 }
 
 // host.budget_mib against the process's own memory; the tightest client budget binds.
@@ -158,8 +168,12 @@ static void explicit_budget() {
     admission("budget arbiter", *tight, 64 * MiB);
     config.budget_bytes = budget + 4 * GiB;
     auto loose = client(owner, config);
-    auto refused = loose->take(512 * MiB, 0, requester::outside, true);
-    require(!refused && refused.code == ssd::status::resource, "the tighter budget binds every client");
+    // The tighter budget binds every client: the loose one's RAM cache within the envelope, and what its run needs
+    // within the limit.
+    auto refused = loose->take(512 * MiB, 0, requester::ram_cache, true, allocation_class::tracked);
+    require(!refused && refused.code == ssd::status::resource, "the tighter budget did not bind the RAM cache");
+    auto past = loose->take(GiB);
+    require(!past && past.code == ssd::status::resource, "the tighter budget did not limit what the run needs");
     require(!client(std::make_shared<process_arbiter>(), config)->configure(client_config{}), "budget change refused");
 }
 
@@ -214,7 +228,7 @@ static void job_limit() {
 
 int main() {
     use_tracks_allocation();
-    derived();
+    machine();
     explicit_budget();
 #if defined(_WIN32)
     job_limit(); // last: the process stays in the job

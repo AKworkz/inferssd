@@ -46,7 +46,7 @@ CUDA GPU it
 also chooses `prefill.cpu_max_tokens`, the longest prompt pass the CPU prefills
 no slower than the GPU graph, and prefills each prompt in one pass (`-b` and
 `-ub` as large as the context); on a GPU that shares host memory it keeps
-`host.headroom_mib = 4096`, and on macOS a quarter of the machine's memory. It fills only settings left at their registry
+`host.headroom_mib = 4096`. It fills only settings left at their registry
 defaults and thread options and sizes not given, so explicit values always win.
 The choices are written to the generated `settings.ssd` with `source=strategy`
 receipts and to `strategy.json`, with the values your settings kept and the

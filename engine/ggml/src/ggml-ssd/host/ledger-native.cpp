@@ -40,6 +40,14 @@ bool available(uint64_t & bytes) {
     return true;
 }
 
+bool physical(uint64_t & bytes) {
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (!GlobalMemoryStatusEx(&status)) { return false; }
+    bytes = uint64_t(status.ullTotalPhys);
+    return true;
+}
+
 bool job_limits(envelopes & out) {
     BOOL in_job = FALSE;
     if (!IsProcessInJob(GetCurrentProcess(), nullptr, &in_job)) { return false; }
@@ -100,18 +108,29 @@ struct page_counter {
 };
 
 bool available(uint64_t & bytes) {
-    // Free pages (without the speculative ones, which the file-backed count holds), file-backed, purgeable and
-    // reusable pages (MADV_FREE_REUSABLE: the RAM cache's discarded slots and the allocator's free blocks), which
-    // the kernel frees without compressing. Other inactive anonymous pages are not available: the kernel must
-    // compress or swap them first.
+    // What a new allocation takes before the kernel compresses anyone's memory, by the kernel's own live
+    // thresholds: the free pages above its free target (below it the pageout scan runs); the file-backed pages
+    // (the speculative ones among them) above its file cache minimum, which the scan takes before it compresses
+    // anything and keeps; and the purgeable and reusable pages (MADV_FREE_REUSABLE: the RAM cache's discarded
+    // slots and the allocator's free blocks), which it frees without compressing.
     static const page_counter free_pages("vm.page_free_count"), file_pages("vm.page_pageable_external_count"),
-            purgeable_pages("vm.page_purgeable_count"), reusable_pages("vm.page_reusable_count");
-    uint64_t free = 0, file = 0, purgeable = 0, reusable = 0;
+            purgeable_pages("vm.page_purgeable_count"), reusable_pages("vm.page_reusable_count"),
+            free_target("vm.vm_page_free_target"), file_minimum("vm.vm_page_filecache_min");
+    uint64_t free = 0, file = 0, purgeable = 0, reusable = 0, target = 0, minimum = 0;
     if (!free_pages.read(free) || !file_pages.read(file) || !purgeable_pages.read(purgeable) ||
-            !reusable_pages.read(reusable)) {
+            !reusable_pages.read(reusable) || !free_target.read(target) || !file_minimum.read(minimum)) {
         return false;
     }
-    bytes = (free + file + purgeable + reusable) * uint64_t(vm_kernel_page_size);
+    bytes = ((free > target ? free - target : 0) + (file > minimum ? file - minimum : 0) + purgeable + reusable) *
+            uint64_t(vm_kernel_page_size);
+    return true;
+}
+
+bool physical(uint64_t & bytes) {
+    uint64_t value = 0;
+    size_t size = sizeof(value);
+    if (sysctlbyname("hw.memsize", &value, &size, nullptr, 0) != 0 || size != sizeof(value) || !value) { return false; }
+    bytes = value;
     return true;
 }
 

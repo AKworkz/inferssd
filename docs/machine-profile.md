@@ -82,9 +82,7 @@ memory, the available memory) to choose:
 - the starting estimates the engine uses to place experts between the CPU and
   the GPU (it refines them as it runs);
 - `vram.budget = 0` when the engine has CUDA and no CUDA GPU is usable, and on
-  macOS the host memory budget from the runtime policy and a host margin of a
-  quarter of the machine's memory (`host.headroom_mib`), since macOS compresses
-  the cold pages of a RAM cache that leaves less free;
+  macOS the host memory budget from the runtime policy;
 - with an engine that has CUDA and one usable CUDA GPU, which prompt passes the CPU prefills
   (`prefill.cpu_max_tokens`, the longest pass the CPU prefills faster than the
   GPU graph reading the same experts; a tie goes to the graph, which warms the
@@ -184,8 +182,8 @@ its GGUF headers that the framework keeps. A token's time is the sum of:
 - the experts the RAM cache misses, read from the models' drive at the rate a
   launch takes for the engine's reads.
 
-Memory available now, less the host margin a launch keeps (a quarter of memory
-on macOS), holds the dense weights first, and what does not fit is read from the
+Memory available now, as the engine measures it, less the host margin a launch
+keeps, holds the dense weights first, and what does not fit is read from the
 drive each token; the RAM cache gets the rest and finds an expert as often as the
 share of all experts that fits, as if routing were uniform. GPU time, prefetch
 and the skew of real routing are not measured, so an estimate is a guide: on an

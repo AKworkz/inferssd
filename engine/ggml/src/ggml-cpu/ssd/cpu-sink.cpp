@@ -1718,21 +1718,24 @@ struct kimi_cpu_sink {
     }
     // Room for an allocation outside the expert caches (llama_host_reserve, compute buffers): `host` bytes of host
     // memory and `device` bytes of GPU memory, which count only where the GPU shares the DRAM, beside the pages the
-    // ledger holds for an open prefill. No run is in flight: the caller holds run_mutex and has drained the prefetch.
+    // ledger holds for an open prefill. The caches give back what both terms ask; the run needs the allocation, so
+    // only a limit it would not fit refuses it. No run is in flight: the caller holds run_mutex and has drained the
+    // prefetch.
     bool make_room(uint64_t host, uint64_t device) {
         const uint64_t extra = cache.ledger.dram_bytes(host, device);
         // nothing comes out of this DRAM (device memory of a discrete GPU) and no prefill holds room
         if (!extra && !cache.ledger.state().prefill_pages) { return true; }
         refresh_floor("make_room");
         const auto room = cache.ledger.make_room(extra);
-        if (!room.fits()) {
+        const bool fits = room.within_limits(extra);
+        if (!fits) {
             ++ledger_refusals;
-            std::fprintf(stderr, "[kimi_host_ledger] event=refused extra=%llu term=%s cgroup_shortage=%llu system_shortage=%llu available=%llu floor=%llu\n",
-                    (unsigned long long) extra, ssd::host::binding_term(room), (unsigned long long) room.cgroup_shortage,
-                    (unsigned long long) room.system_shortage, (unsigned long long) room.available,
+            std::fprintf(stderr, "[kimi_host_ledger] event=refused extra=%llu term=limits limits_shortage=%llu limits_readable=%d available=%llu floor=%llu\n",
+                    (unsigned long long) extra, (unsigned long long) room.limits_shortage,
+                    int(room.limits != ssd::host::room_unreadable), (unsigned long long) room.available,
                     (unsigned long long) room.floor);
         }
-        return room.fits();
+        return fits;
     }
     // Room for a prefill, before it allocates anything (kimi_cpu_sink_cache_prefill_room): the ledger holds `pages`
     // for the file pages of the weight rows its graph gathers until the first decode token, and makes room for its

@@ -208,7 +208,7 @@ int main(int argc, char ** argv) {
         std::vector<reservation> tickets; tickets.reserve(64); bool exhausted = false;
         for (size_t i = 0; i < 64; ++i) {
             error[0] = '\0'; reservation ticket(llama_ssd_host_reserve(ctx.get(), chunk, error, sizeof(error)));
-            if (!ticket) { require(std::strstr(error, "host budget refused"), "pending fill failed outside budget admission"); exhausted = true; break; }
+            if (!ticket) { require(std::strstr(error, "host memory limit refused"), "pending fill failed outside the limit"); exhausted = true; break; }
             tickets.push_back(std::move(ticket));
         }
         require(exhausted && !tickets.empty(), "finite real pending budget not observed");

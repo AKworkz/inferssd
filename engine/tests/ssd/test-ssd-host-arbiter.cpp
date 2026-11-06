@@ -133,16 +133,21 @@ static void holds_and_pending() {
     a->clear_prefill_pages(); require(b->state().all_prefill_pages == 2*GiB, "A cleared B hold");
     b->set_prefill_pages(GiB); b->set_prefill_pages(GiB);
     require(b->state().all_prefill_pages == GiB, "repeated hold added");
-    b->set_prefill_pages(9*GiB); require(!b->take(1) && b->state().prefill_pages == 9*GiB, "refusal lost prefill hold");
+    b->set_prefill_pages(9*GiB);
+    require(!b->take(1, 0, requester::ram_cache, false, allocation_class::tracked) && b->state().prefill_pages == 9*GiB,
+        "refusal lost prefill hold");
+    // A hold sizes the caches; an allocation the run needs goes ahead within the limits.
+    { auto needed = b->take(1); require(bool(needed), "a prefill hold refused an allocation the run needs"); }
     require(bool(b->take(0)), "a shortage refused a take of nothing");
     b->clear_prefill_pages(); f.limit = 2*GiB; f.current = 0; f.available = 2*GiB;
     auto t = a->take(GiB); require(bool(t), "first take failed");
-    require(!b->take(GiB), "unmaterialized allocation granted twice");
+    require(!b->take(GiB, 0, requester::ram_cache, false, allocation_class::tracked) && !b->take(GiB + 1),
+        "unmaterialized allocation granted twice");
     require(a->state().pending_bytes == GiB && a->state().granted == GiB, "pending/grant not published");
     allocation_ticket moved = std::move(t); require(!t && bool(moved), "ticket move failed");
     moved.cancel(); moved.commit(); require(a->state().pending_bytes == 0 && a->state().granted == 0, "cancel did not roll back");
     auto committed = b->take(GiB); f.current = GiB; f.available = GiB; committed.commit();
-    require(!a->take(GiB) && b->state().pending_bytes == 0 && b->state().granted == GiB, "commit lost OS accounting");
+    require(!a->take(GiB + 1) && b->state().pending_bytes == 0 && b->state().granted == GiB, "commit lost OS accounting");
     a->set_prefill_pages(UINT64_MAX); require(!b->take(1), "saturated holds admitted");
     a->clear_prefill_pages(); a->close(); require(b->state().all_prefill_pages == 0, "close left peer hold");
     must_throw([&] { a->measure(0); }, "closed client remained live");
@@ -152,7 +157,8 @@ static void races_and_reclaim() {
     auto owner = std::make_shared<test_owner>(f.reader()); auto a = owner->make_client(), b = owner->make_client();
     a->configure(config(true)); b->configure(config(true));
     barrier ready(2), held(2); std::atomic<unsigned> granted{0};
-    auto run = [&](checked_client & client) { ready.wait(); auto t = client.take(GiB); granted += bool(t); held.wait(); };
+    // Two of these exceed the limit itself, so neither rule admits both.
+    auto run = [&](checked_client & client) { ready.wait(); auto t = client.take(GiB + MiB); granted += bool(t); held.wait(); };
     std::thread ta(run, std::ref(*a)), tb(run, std::ref(*b)); ta.join(); tb.join();
     require(granted == 1 && a->state().pending_bytes == 0, "barrier race over-admitted");
     require(!a->take(UINT64_MAX, 1), "DRAM overflow admitted");
@@ -446,10 +452,13 @@ static void reclaim_order() {
         require(bool(t) && calls == std::vector<std::string>({ "collect", "tier" }) && tier_bytes == checkpoint &&
             u->state().granted == checkpoint, "unified: a take did not drain deferred uploads and then reclaim the tier");
         t.cancel();
-        // A live layer: the tier refuses without blocking, the RAM cache cannot cover the rest, the answer is no.
+        // A live layer: the tier refuses without blocking and the RAM cache cannot cover the rest. The run needs the
+        // allocation and the cgroup holds it, so it still goes ahead below the floor.
         calls.clear(); tier_live = true; m.available = 2*GiB; m.current = 0;
-        require(!u->take(checkpoint) && calls == std::vector<std::string>({ "collect", "tier", "cache" }),
-            "unified: a refused tier reclaim was not reported");
+        auto below = u->take(checkpoint);
+        require(bool(below) && calls == std::vector<std::string>({ "collect", "tier", "cache" }),
+            "unified: a take below the floor did not ask every cache or was refused within the limit");
+        below.cancel();
         tier_live = false;
     }
     // An open prefill's pages: the tier keeps them free beside the allocation.
@@ -477,6 +486,36 @@ static void reclaim_order() {
         require(bool(t) && calls == std::vector<std::string>({ "collect", "tier" }) && m.available >= 812*MiB + checkpoint + full,
             "boost: a take did not make room for the boost");
     }
+}
+// An allocation outside the caches is one the run needs. Once the caches have given back what they hold, it goes
+// ahead below the floor and the reserve, with MemAvailable short, and with no finite limit at all: only a limit it
+// would not fit refuses it. The caches' own growth stays within both terms.
+static void needed_allocations() {
+    machine m; m.limit = 8*GiB; m.current = 6*GiB; m.available = 256*MiB; // the system term is short of its floor
+    auto owner = std::make_shared<test_owner>(m.reader());
+    auto c = owner->make_client(); c->configure(config(false));
+    const auto r = c->measure(GiB);
+    require(!r.fits() && r.limits == room_ok && !r.limits_shortage && r.within_limits(GiB),
+        "needed: the limits did not hold what the terms refuse");
+    auto needed = c->take(GiB);
+    require(bool(needed), "needed: an allocation the run needs was held to the floor");
+    needed.cancel();
+    require(!c->take(GiB, 0, requester::ram_cache, false, allocation_class::tracked),
+        "needed: the RAM cache grew below the floor");
+    // Past the limit itself it is refused, and the error says which rule did.
+    auto past = c->raw->take(2*GiB + 1);
+    require(!past && past.code == ssd::status::resource && past.error == "host memory limit refused" &&
+        past.value.observation().limits_shortage == 1, "needed: an allocation past the limit was admitted or misreported");
+    // Reclaimable file pages are room under the limit, as in the envelope.
+    m.file_pages = GiB;
+    auto files_room = c->take(2*GiB + 512*MiB);
+    require(bool(files_room), "needed: the limit counted reclaimable file pages as use");
+    files_room.cancel();
+    // No finite limit and no memory available: nothing refuses it.
+    m.limit = 0; m.available = 0; m.file_pages = 0;
+    auto unbounded = c->take(4*GiB);
+    require(bool(unbounded) && c->measure(4*GiB).limits == room_ok,
+        "needed: an allocation the run needs was refused without a finite limit");
 }
 // The margin learns untracked growth within a decode token on unified memory and never shrinks. An interval begins
 // after a boundary resized the caches and ends at the next boundary before it resizes anything.
@@ -533,7 +572,8 @@ int main() {
     try {
         serial_equivalence(); holds_and_pending(); races_and_reclaim(); process_reserves_and_rollback();
         interval_isolation_and_close(); close_waits_for_reclaimer();
-        result_errors_and_tracked_allocations(); unified_device_held(); reclaim_order(); margin_learning();
-        std::cout << "host arbiter: serial equations, holds, atomic tickets, reclaim order, margin learning, interval, close and unified device gates passed\n";
+        result_errors_and_tracked_allocations(); unified_device_held(); reclaim_order(); needed_allocations();
+        margin_learning();
+        std::cout << "host arbiter: serial equations, holds, atomic tickets, reclaim order, needed allocations, margin learning, interval, close and unified device gates passed\n";
     } catch (const std::exception & error) { std::cerr << error.what() << '\n'; return 1; }
 }
