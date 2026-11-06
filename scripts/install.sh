@@ -60,7 +60,9 @@ EOF
     trap 'if [ "$complete" != yes ]; then rm -rf -- "$release"; fi' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    git clone --depth 1 --branch "${INFERSSD_REF:-$DEFAULT_REF}" \
+    # Every commit but no file contents, a few megabytes more than one commit: the engine's
+    # build number is the branch's commit count and its day the commit's, read from the clone.
+    git clone --filter=blob:none --single-branch --branch "${INFERSSD_REF:-$DEFAULT_REF}" \
         https://github.com/wici-ai/inferssd.git "$release/source"
     # The GPU backend for this machine's GPUs, by the table the launch reads.
     backend=$(PYTHONPATH="$release/source/framework/src" python3 -m inferssd.machine.backend)

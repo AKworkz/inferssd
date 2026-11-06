@@ -11,6 +11,9 @@ A descriptor is ordinary JSON. Relative paths resolve against its own directory:
   "schema": "inferssd-engine 1",
   "binary": "bin/inferssd-server",
   "revision": "the-deployed-source-revision",
+  "build": 202,
+  "date": "2026-11-06",
+  "branch": "main",
   "templates": {
     "dsv": "templates/deepseek-ai-DeepSeek-V4.1.jinja",
     "muse": "templates/muse-spark.jinja"
@@ -24,6 +27,17 @@ A descriptor is ordinary JSON. Relative paths resolve against its own directory:
   }
 }
 ```
+
+`revision`, `build`, `date` and `branch` say which source the engine was built
+from: the commit, the branch's commit count up to it, the commit's day (UTC) and
+the branch. `scripts/engine-resources.py` reads them from the checkout's Git
+metadata, so a local build and the installer's build record them the same way;
+`inferssd --version --json` reports them, and `--version` alone adds them to its
+line as `v<build>.<mmdd>.<commit>`. A shallow clone counts only the commits it
+has, so the installer clones with `--filter=blob:none`; a source archive has no
+Git metadata, and the four are `"unknown"` and `null`. The WiCi AI desktop app
+names the engine by this label and decides on its own, by `build`, whether an
+engine is one it works with; the engine does not know the app.
 
 Use `darwin` for an Apple Silicon deployment and `windows` for a Windows one.
 `gpu_backends` lists the GPU backends the engine was built with, of `CUDA`,

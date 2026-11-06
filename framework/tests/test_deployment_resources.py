@@ -144,3 +144,28 @@ def test_a_cuda_tier_setting_needs_an_engine_with_cuda(tmp_path, platform):
     else:
         with pytest.raises(ValueError, match="vram.max_slots .* configures the CUDA expert tier"):
             resolve(inputs, launch, adapter, out, platform)
+
+
+def test_descriptor_carries_the_build_it_was_made_from(tmp_path):
+    path = tmp_path / "engine.json"
+    base = {
+        "schema": "inferssd-engine 1",
+        "binary": "repo/bin/server",
+        "templates": {"muse": "repo/engine/models/templates/muse-spark.jinja"},
+        "capabilities": {"settings": "inferssd-settings 1", "telemetry": 1},
+        "revision": "fixture",
+    }
+    made = {"build": 202, "date": "2026-11-06", "branch": "main"}
+    path.write_text(json.dumps({**base, **made}))
+    resources = read_resources(path)
+    assert (resources.build, resources.date, resources.branch) == (202, "2026-11-06", "main")
+    # A descriptor from before the fields, or from a source archive: nothing known.
+    path.write_text(json.dumps(base))
+    resources = read_resources(path)
+    assert (resources.build, resources.date, resources.branch) == (None, None, None)
+    path.write_text(json.dumps({**base, "build": None, "date": None, "branch": None}))
+    assert read_resources(path).build is None
+    for bad in ({"build": 0}, {"build": "202"}, {"build": True}, {"date": ""}, {"branch": 7}):
+        path.write_text(json.dumps({**base, **bad}))
+        with pytest.raises(ValueError):
+            read_resources(path)
