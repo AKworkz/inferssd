@@ -92,10 +92,14 @@ struct tier {
     // Decode jobs computed from host memory (kimi_vram_host_api): in place where the device reads host pages through
     // its page tables (ATS); on a discrete GPU after a copy from page-locked memory into device memory, the expert's
     // admission reservation or a host scratch slot. device[] is what the engine reads; start/end time the copy.
-    bool host_readable=false,layer_input_ready=false,host_queued=false;
+    bool host_readable=false,layer_input_ready=false;
     struct host_task { kimi_vram_host_job job; const void * device[3]; int scratch; cudaEvent_t start,end; };
-    std::vector<host_task> host_pending;std::vector<kimi_vram_host_job> host_done;std::vector<float> host_down;
     double resident_us_per_expert=0,host_us_per_expert=0;uint64_t host_jobs=0,host_batches=0;
+    // A decode layer's engine calls, its residents' (launch_activation) and each batch of its host jobs' (launch_host):
+    // the sink's thread launches them and finish collects them. A call takes the engine's rows [first, first + count),
+    // and start and end time it on the engine's stream; call_events are free ones.
+    struct engine_call { void * engine; int first,count; cudaEvent_t start,end; bool host; std::vector<host_task> tasks; };
+    std::vector<engine_call> calls;std::vector<cudaEvent_t> call_events;
     static constexpr size_t host_scratch_slots=2;
     char * host_scratch=nullptr;std::vector<uint8_t> host_scratch_busy;bool host_scratch_wanted=false,host_scratch_failed=false;
     cudaStream_t host_copy_stream=nullptr;std::vector<cudaEvent_t> host_events; // free timing events, two a copied job
@@ -144,7 +148,7 @@ struct tier {
     const vram_format_compute_api * format_api=nullptr;bool format_mode=false;
     int n_experts=0;kimi_vram_activation activation={};
     std::thread worker;std::mutex mutex;std::condition_variable cv;
-    bool stopping=false,queued=false,prefill_queued=false,done=true;
+    bool stopping=false,prefill_queued=false,done=true;
     // format: the expert's own (its layer's), whose role bytes the copy takes
     struct upload_job { size_t request; int slot; const void * data[3]; bool borrow; const expert_format * format; };
     std::deque<upload_job> upload_jobs;
@@ -296,6 +300,7 @@ struct tier {
             if(seed_stream)cuda_check(cudaStreamDestroy(seed_stream));
             if(host_copy_stream)cuda_check(cudaStreamDestroy(host_copy_stream));
             for(cudaEvent_t e:host_events)cuda_check(cudaEventDestroy(e));
+            for(cudaEvent_t e:call_events)cuda_check(cudaEventDestroy(e));
             if(dma_start)cuda_check(cudaEventDestroy(dma_start));
             if(dma_end)cuda_check(cudaEventDestroy(dma_end));
             for(cudaEvent_t e:group_dma)cuda_check(cudaEventDestroy(e));
@@ -477,7 +482,7 @@ struct tier {
         if((table && (table->in_flight || table->lease_generation || table->native_pinned())) || live_ready_generation ||
                 prefill_live)return true;
         std::lock_guard<std::mutex> lock(mutex);
-        return !done || queued || prefill_queued || !upload_jobs.empty() || !pending_uploads.empty();
+        return !done || prefill_queued || !upload_jobs.empty() || !pending_uploads.empty();
     }
     bool quiescent(){
         if(!table || busy())return false;
@@ -1015,7 +1020,7 @@ struct tier {
             // the slots leave under the tier's lock: a probe copy into one (host_registered) holds it until done
             char * scratch=nullptr;
             {std::lock_guard<std::mutex> jobs(mutex);
-                if(!done || queued || prefill_queued || !upload_jobs.empty())
+                if(!done || prefill_queued || !upload_jobs.empty())
                     throw std::runtime_error("prefill scratch release has pending work");
                 scratch=prefill_transient_arena;prefill_transient_arena=nullptr;}
             cuda_check(cudaSetDevice(device));cuda_check(free_dram(scratch,prefill_transient_bytes));
@@ -1046,6 +1051,7 @@ struct tier {
     }
     void drain(){
         std::unique_lock<std::mutex> lock(mutex);cv.wait(lock,[&]{return done;});lock.unlock();
+        if(!calls.empty()){cuda_check(cudaSetDevice(device));for(const auto & c:calls)wait_event(c.end);}
         if(upload_stream){const auto t=clock_type::now();cuda_check(cudaSetDevice(device));cuda_check(cudaStreamSynchronize(upload_stream));upload_wait_us+=micros(t);}
         if(host_copy_stream){cuda_check(cudaSetDevice(device));cuda_check(cudaStreamSynchronize(host_copy_stream));}
     }
@@ -1078,9 +1084,7 @@ struct tier {
         {std::lock_guard<std::mutex> lock(mutex);prefill_launched=false;}
         prefill_routes.clear();prefill_weights.clear();prefill_output.clear();prefill_transient.clear();prefill_job_stats={};
         work.clear();output_rows.clear();
-        {std::lock_guard<std::mutex> lock(mutex);
-            for(auto & task:host_pending)return_host_events(task);
-            host_pending.clear();host_done.clear();host_down.clear();host_queued=false;layer_input_ready=false;}
+        {std::lock_guard<std::mutex> lock(mutex);release_calls();layer_input_ready=false;}
         free_host_scratch();publish_storage();
         if(memory_trace)memory_sample("after_release",micros(release_start));
     }
@@ -1125,72 +1129,25 @@ struct tier {
         }
         if(decode)adopt_next_decode=false;
     }
+    // Grouped prefill and the uploads that are not deferred; a decode layer's engine calls are the sink's thread's.
     void worker_loop(){
         std::unique_lock<std::mutex> lock(mutex);
         for(;;){
-            cv.wait(lock,[&]{return queued || prefill_queued || host_queued || !upload_jobs.empty() || stopping;});if(stopping)return;
-            const bool grouped=prefill_queued;
-            const bool compute=queued || grouped;upload_job upload={};
-            // Host-memory jobs run after the layer's resident batch, at most one engine batch at a time.
-            const bool host=!compute && host_queued;std::vector<host_task> batch;
+            cv.wait(lock,[&]{return prefill_queued || !upload_jobs.empty() || stopping;});if(stopping)return;
+            const bool grouped=prefill_queued;upload_job upload={};
             if(grouped){prefill_queued=false;if(timing)handoff_us+=micros(launch_time);}
-            else if(compute){queued=false;if(timing)handoff_us+=micros(launch_time);}
-            else if(host){
-                const size_t n=std::min<size_t>(16,host_pending.size());
-                batch.assign(host_pending.begin(),host_pending.begin()+n);host_pending.erase(host_pending.begin(),host_pending.begin()+n);
-                host_queued=!host_pending.empty();
-            }
             else{upload=upload_jobs.front();upload_jobs.pop_front();}
             lock.unlock();
-            auto t=clock_type::now();std::string error_text;std::vector<float> batch_down;
+            const auto t=clock_type::now();std::string error_text;
             try{
                 cuda_check(cudaSetDevice(device));
-                if(grouped){run_prefill_worker();}
-                else if(compute){char error[512]={};int rc=
-                    format_api->compute(now().engine,work.data(),int(work.size()),input.data(),input.size(),&activation,down.data(),error,sizeof(error));
-                    if(rc)throw std::runtime_error(error);}
-                else if(host){
-                    std::vector<vram_compute_expert> experts;experts.reserve(batch.size());
-                    // A discrete GPU's jobs read device memory once their copies are done; the call is timed from there.
-                    for(const auto & task:batch){if(task.end)cuda_check(cudaEventSynchronize(task.end));experts.push_back({task.device[0],task.device[1],task.device[2]});}
-                    t=clock_type::now();
-                    batch_down.resize(batch.size()*size_t(latent));
-                    char error[512]={};
-                    if(format_api->compute(now().engine,experts.data(),int(experts.size()),input.data(),input.size(),&activation,batch_down.data(),error,sizeof(error)))
-                        throw std::runtime_error(error);
-                }
-                else copy_upload(upload);
+                if(grouped)run_prefill_worker();else copy_upload(upload);
             }
             catch(const std::exception & e){error_text=e.what();}
             lock.lock();
-            if(compute){
-                const double us=micros(t);compute_us+=us;
-                // Measured GPU cost of a resident expert, for the sink's CPU/GPU choice (decode batches only).
-                if(!grouped && !work.empty()){const double x=us/double(work.size());
-                    resident_us_per_expert=resident_us_per_expert>0?0.9*resident_us_per_expert+0.1*x:x;
-                    resident_calls.add(double(work.size()),us);}
-            }
-            if(host){
-                for(auto & task:batch){
-                    float ms=0;
-                    if(task.start && error_text.empty() && cudaEventElapsedTime(&ms,task.start,task.end)==cudaSuccess){
-                        const double mb=double(now().bytes)/1e6;host_copy_bytes+=double(now().bytes);host_copy_us+=1e3*ms;locked_copies.add(mb,1e3*double(ms));}
-                    if(task.scratch>=0 && size_t(task.scratch)<host_scratch_busy.size())host_scratch_busy[size_t(task.scratch)]=0;
-                    return_host_events(task);
-                }
-            }
-            if(host && error_text.empty()){
-                const double us=micros(t),x=us/double(batch.size());compute_us+=us;
-                host_us_per_expert=host_us_per_expert>0?0.9*host_us_per_expert+0.1*x:x;
-                host_calls.add(double(batch.size()),us);
-                for(const auto & task:batch)host_done.push_back(task.job);
-                host_down.insert(host_down.end(),batch_down.begin(),batch_down.end());
-                host_jobs+=batch.size();++host_batches;
-            }
-            if(!error_text.empty()){if(failure.empty())failure=error_text;queued=false;upload_jobs.clear();
-                for(auto & task:host_pending){if(task.scratch>=0 && size_t(task.scratch)<host_scratch_busy.size())host_scratch_busy[size_t(task.scratch)]=0;return_host_events(task);}
-                host_pending.clear();host_queued=false;}
-            done=!queued && !prefill_queued && !host_queued && upload_jobs.empty();cv.notify_all();
+            if(grouped)compute_us+=micros(t);
+            if(!error_text.empty()){if(failure.empty())failure=error_text;upload_jobs.clear();}
+            done=!prefill_queued && upload_jobs.empty();cv.notify_all();
         }
     }
 
@@ -1557,16 +1514,15 @@ struct tier {
             cv.notify_all();
         }
     }
-    // The worker and the upload thread run on the CPUs of the sink thread that waits for them, the coordinator of
-    // its calls (set_thread_cpus), and share its core with it; until it places them they keep the CPUs of the thread
-    // that started them. Left where the scheduler put them, decode steps 129-256 were 9 % slower on a DGX Spark.
-    // Logged at their start and at each placement (cpus > 1: not on one core).
+    // The worker and the upload thread run on the CPUs the sink gives them (set_thread_cpus): the process's other than
+    // those of its coordinator, which launches a decode layer's engine calls itself and polls through the layer. Until
+    // it sets them they keep the CPUs of the thread that started them. Logged at their start and at each placement.
     ssd::platform::cpu_list thread_cpus;
     void place_threads(){
         if(!worker.joinable())return; // placed when they start
         for(std::thread * t:{&worker,&upload_thread})
             if(t->joinable() && !ssd::platform::pin_thread(t->native_handle(),thread_cpus)) // none yet: a no-op
-                throw std::runtime_error("GPU tier threads could not be placed on the sink coordinator's CPUs");
+                throw std::runtime_error("GPU tier threads could not be placed on the CPUs the sink gave them");
         ssd::platform::cpu_list cpus=thread_cpus;
         if(cpus.empty())ssd::platform::current_thread_cpus(cpus); // their starter's, which they inherit
         std::fprintf(stderr,"[kimi_vram_tier] event=threads cpus=%zu first_cpu=%d\n",cpus.size(),cpus.empty()?-1:cpus.front());
@@ -1671,8 +1627,9 @@ struct tier {
             // the generic engine serves every format the CUDA backend has a matrix-vector kernel for, and refuses the
             // others when it is created
             format_api=kimi_vram_generic_format_compute_get_api();
-            if(!format_api || format_api->version!=3 || format_api->size!=sizeof(*format_api) || !format_api->create ||
-                    !format_api->destroy || !format_api->compute || !format_api->device_scratch_bytes || !format_api->host_scratch_bytes)
+            if(!format_api || format_api->version!=4 || format_api->size!=sizeof(*format_api) || !format_api->create ||
+                    !format_api->destroy || !format_api->compute || !format_api->device_scratch_bytes || !format_api->host_scratch_bytes ||
+                    !format_api->launch || !format_api->host_rows)
                 throw std::runtime_error("explicit-format VRAM engine ABI mismatch");
             for(auto & x:formats){
                 if(x.engine)continue;
@@ -1760,8 +1717,8 @@ struct tier {
         if(bytes!=size_t(latent)*sizeof(float))throw std::runtime_error("VRAM input bytes");
         if(a->kind!=KIMI_VRAM_ACTIVATION_SITU && a->kind!=KIMI_VRAM_ACTIVATION_SWIGLU_CLAMP && a->kind!=KIMI_VRAM_ACTIVATION_SWIGLU)
             throw std::runtime_error("VRAM activation kind");
-        std::lock_guard<std::mutex> lock(mutex);if(!done)throw std::runtime_error("GPU job already outstanding");
-        work.clear();output_rows.clear();failure.clear();host_done.clear();host_down.clear();
+        {std::lock_guard<std::mutex> lock(mutex);if(!calls.empty())throw std::runtime_error("GPU job already outstanding");failure.clear();}
+        work.clear();output_rows.clear();
         for(size_t j=0;j<table->hits.size();++j){
             int slot=table->hits[j];if(slot<0)continue;
             work.push_back(roles_at(slot_base(size_t(slot)),now()));output_rows.push_back(j);
@@ -1771,9 +1728,72 @@ struct tier {
         layer_input_ready=true;
         input.assign(static_cast<const uint8_t *>(q),static_cast<const uint8_t *>(q)+bytes);activation=*a;
         if(work.empty())return;
-        down.resize(work.size()*size_t(latent));done=false;queued=true;
-        if(timing){launch_time=clock_type::now();++launches;}
-        cv.notify_all();
+        if(timing)++launches;
+        launch_call(work,nullptr,false,{});
+    }
+    // Queues an engine call over the layer's next rows, after `ready` (null: at once), and returns. A refused launch
+    // fails the layer at finish, which collects the calls launched before it.
+    void launch_call(const std::vector<vram_compute_expert> & experts,cudaEvent_t ready,bool host,std::vector<host_task> tasks){
+        engine_call c{now().engine,calls.empty()?0:calls.back().first+calls.back().count,int(experts.size()),
+            take_event(),take_event(),host,std::move(tasks)};
+        char error[512]={};
+        if(format_api->launch(c.engine,experts.data(),c.count,c.first,input.data(),input.size(),&activation,ready,c.start,
+                c.end,error,sizeof(error))){
+            std::lock_guard<std::mutex> lock(mutex);return_call(c);if(failure.empty())failure=error;
+            return;
+        }
+        calls.push_back(std::move(c));
+    }
+    cudaEvent_t take_event(){
+        if(call_events.empty()){cudaEvent_t e=nullptr;cuda_check(cudaSetDevice(device));cuda_check(cudaEventCreate(&e));return e;}
+        cudaEvent_t e=call_events.back();call_events.pop_back();return e;
+    }
+    // The sink's thread polls through a layer: it yields its CPU between looks rather than sleep.
+    static void wait_event(cudaEvent_t e){
+        for(;;){
+            const cudaError_t rc=cudaEventQuery(e);
+            if(rc==cudaSuccess)return;
+            if(rc!=cudaErrorNotReady)cuda_check(rc);
+            std::this_thread::yield();
+        }
+    }
+    // The layer's calls are done (drain): each one's time on the engine's stream is a sample of the measured lines
+    // the sink plans with (costs2), its host jobs' copies those of the copy rate.
+    void collect_calls(){
+        std::lock_guard<std::mutex> lock(mutex);
+        for(const auto & c:calls){
+            float ms=0;cuda_check(cudaEventElapsedTime(&ms,c.start,c.end));
+            const double us=1e3*double(ms),x=us/double(c.count);compute_us+=us;
+            if(!c.host){
+                // Measured GPU cost of a resident expert, for the sink's CPU/GPU choice.
+                resident_us_per_expert=resident_us_per_expert>0?0.9*resident_us_per_expert+0.1*x:x;
+                resident_calls.add(double(c.count),us);
+                continue;
+            }
+            for(const auto & task:c.tasks){
+                if(!task.start)continue;
+                float copy_ms=0;cuda_check(cudaEventElapsedTime(&copy_ms,task.start,task.end));
+                const double mb=double(now().bytes)/1e6;host_copy_bytes+=double(now().bytes);host_copy_us+=1e3*copy_ms;
+                locked_copies.add(mb,1e3*double(copy_ms));
+            }
+            host_us_per_expert=host_us_per_expert>0?0.9*host_us_per_expert+0.1*x:x;
+            host_calls.add(double(c.count),us);
+            host_jobs+=size_t(c.count);++host_batches;
+        }
+    }
+    // mutex held: the events and scratch slots of a call, and of its host jobs, go back.
+    void return_call(engine_call & c){
+        for(auto & task:c.tasks){
+            if(task.scratch>=0 && size_t(task.scratch)<host_scratch_busy.size())host_scratch_busy[size_t(task.scratch)]=0;
+            return_host_events(task);
+        }
+        for(cudaEvent_t e:{c.start,c.end})if(e)call_events.push_back(e);
+        c.start=c.end=nullptr;
+    }
+    // mutex held, the calls done
+    void release_calls(){
+        for(auto & c:calls)return_call(c);
+        calls.clear();
     }
     void admit(const kimi_vram_request & r,const void * const * data,bool borrow){
         if(!active || !table || !table->in_flight)return;
@@ -1812,12 +1832,12 @@ struct tier {
         std::vector<host_task> tasks(static_cast<size_t>(count));
         for(int i=0;i<count;++i)tasks[size_t(i)]={jobs[i],{jobs[i].role[0],jobs[i].role[1],jobs[i].role[2]},-1,nullptr,nullptr};
         if(!host_readable && !copy_host_jobs(tasks))return;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            if(!failure.empty())throw std::runtime_error(failure);
-            host_pending.insert(host_pending.end(),tasks.begin(),tasks.end());host_queued=true;done=false;
-        }
-        cv.notify_all();*accepted=1;
+        {std::lock_guard<std::mutex> lock(mutex);if(!failure.empty())throw std::runtime_error(failure);}
+        std::vector<vram_compute_expert> experts;
+        for(const auto & task:tasks)experts.push_back({task.device[0],task.device[1],task.device[2]});
+        // On a discrete GPU the jobs read device memory once their copies, in order on the host copy stream, are done.
+        const cudaEvent_t ready=host_readable?nullptr:tasks.back().end;
+        launch_call(experts,ready,true,std::move(tasks));*accepted=1;
     }
     // A discrete GPU: every role page-locked, a device target for each job (its admission reservation, else a free
     // scratch slot), then the copies on the host copy stream, timed by a pair of events. False, with nothing copied,
@@ -1997,20 +2017,23 @@ struct tier {
         if(!active || !table || !table->in_flight)return;
         const auto finish_start=timing?clock_type::now():clock_type::time_point{};
         drain();if(timing)finish_drain_us+=micros(finish_start);
+        collect_calls();
         if(!failure.empty())throw std::runtime_error(failure);
         memory_sample();
         for(size_t j:pending_uploads)table->publish(j);
         pending_uploads.clear();
-        if(!work.empty() && (!output || row_stride<size_t(latent)))throw std::runtime_error("VRAM output geometry");
-        for(size_t i=0;i<work.size();++i){size_t row=output_rows[i];float weight=table->requests[row].weight;
-            for(int col=0;col<latent;++col){volatile float scaled=down[i*latent+col]*weight;output[row*row_stride+col]=scaled;}
+        if(!calls.empty() && (!output || row_stride<size_t(latent)))throw std::runtime_error("VRAM output geometry");
+        // A call's rows: the residents' in output_rows' order, a host batch's in its jobs' order.
+        for(const auto & c:calls){
+            const float * rows=format_api->host_rows(c.engine)+size_t(c.first)*size_t(latent);
+            for(int i=0;i<c.count;++i){
+                const size_t row=c.host?size_t(c.tasks[size_t(i)].job.row):output_rows[size_t(i)];
+                const float weight=c.host?c.tasks[size_t(i)].job.weight:table->requests[row].weight;
+                for(int col=0;col<latent;++col){volatile float scaled=rows[size_t(i)*latent+col]*weight;output[row*row_stride+col]=scaled;}
+            }
         }
-        if(!host_done.empty() && (!output || row_stride<size_t(latent)))throw std::runtime_error("VRAM output geometry");
-        for(size_t i=0;i<host_done.size();++i){const size_t row=size_t(host_done[i].row);const float weight=host_done[i].weight;
-            for(int col=0;col<latent;++col){volatile float scaled=host_down[i*latent+col]*weight;output[row*row_stride+col]=scaled;}
-        }
-        host_done.clear();host_down.clear();layer_input_ready=false;
-        {std::lock_guard<std::mutex> lock(mutex);std::fill(host_scratch_busy.begin(),host_scratch_busy.end(),0);}
+        layer_input_ready=false;
+        {std::lock_guard<std::mutex> lock(mutex);release_calls();std::fill(host_scratch_busy.begin(),host_scratch_busy.end(),0);}
         table->finish();work.clear();output_rows.clear();
     }
     void prepare_prefill(const kimi_vram_request * r,int count,const kimi_vram_expert_format * f,int * slots){

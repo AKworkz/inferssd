@@ -31,13 +31,15 @@ int main(){
     require(t.table->global_pool && t.table->slots.size()==2 && t.table->half_life==2,"pool options or budget not applied");
     upload(0);upload(1);t.finish(out.data(),256);
     t.begin(17,2,true);lifecycle_prepare(t,requests,1,slots);
-    require(slots[0]>=0,"warm layer1 copy missing");const int a_slot=slots[0];t.finish(out.data(),256);
+    require(slots[0]>=0,"warm layer1 copy missing");const int a_slot=slots[0];
+    // CUDA loads a kernel's module at its first launch, which waits for the device: one launch before a call is held.
+    lifecycle_launch(t,input);t.finish(out.data(),256);
     lifecycle_prepare(t,requests+2,1,slots);
     const int b_slot=t.table->admissions[0];
     require(b_slot>=0 && b_slot!=a_slot,"cross-layer LRU chose wrong victim");upload(2);t.finish(out.data(),256);
     bytes_equal(a_slot,0);bytes_equal(b_slot,2);
 
-    vram_format_compute_api instrumented={};real_compute=t.format_api;instrumented=*real_compute;instrumented.compute=blocked_compute;t.format_api=&instrumented;
+    vram_format_compute_api instrumented={};real_compute=t.format_api;instrumented=*real_compute;instrumented.launch=blocked_launch;t.format_api=&instrumented;
     struct cleanup { ~cleanup(){unblock();} } cleanup_on_error;
     t.begin(17,3,true);lifecycle_prepare(t,requests+2,2,slots);
     require(slots[0]==b_slot && slots[1]<0 && t.table->admissions[1]==a_slot,"global hit/admission mapping differs");

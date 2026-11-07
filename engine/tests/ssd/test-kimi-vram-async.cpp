@@ -1,6 +1,7 @@
 #include "explicit-fixture-inputs.h"
-// CUDA transport lifecycle test. A blocked compute callback makes borrowed
-// source lifetime observable, independently of GPU/CPU scheduling speed.
+// CUDA transport lifecycle test. A launch the device holds until the test lets
+// it go makes borrowed source lifetime observable, independently of GPU/CPU
+// scheduling speed.
 #include "gpu-services.h"
 #include "vram-tier.cpp"
 #include "test-kimi-vram-format-fixture.h"
@@ -11,14 +12,25 @@ std::mutex barrier_mutex;
 std::condition_variable barrier_cv;
 bool entered = false, proceed = false, inject_error = false;
 const vram_format_compute_api * real_compute = nullptr;
-int blocked_compute(void * p,const vram_compute_expert * w,int n,const void * q,size_t bytes,
-                    const kimi_vram_activation * activation,float * out,char * error,size_t size) {
-    {
-        std::unique_lock<std::mutex> lock(barrier_mutex); entered = true; barrier_cv.notify_all();
-        barrier_cv.wait(lock,[] { return proceed; });
-    }
+// A launched call waits on the device for a host function of a gate stream, which returns once `proceed` is set.
+cudaStream_t gate_stream = nullptr;
+cudaEvent_t gate_event = nullptr;
+void CUDART_CB gate_host(void *) {
+    std::unique_lock<std::mutex> lock(barrier_mutex); barrier_cv.wait(lock,[] { return proceed; });
+}
+int blocked_launch(void * p,const vram_compute_expert * w,int n,int first,const void * q,size_t bytes,
+                   const kimi_vram_activation * activation,CUevent_st * ready,CUevent_st * start,CUevent_st * end,
+                   char * error,size_t size) {
+    { std::lock_guard<std::mutex> lock(barrier_mutex); entered = true; barrier_cv.notify_all(); }
     if (inject_error) { std::snprintf(error,size,"injected worker error"); return 1; }
-    return real_compute->compute(p,w,n,q,bytes,activation,out,error,size);
+    if (!gate_stream) {
+        cuda_check(cudaStreamCreateWithFlags(&gate_stream,cudaStreamNonBlocking));
+        cuda_check(cudaEventCreateWithFlags(&gate_event,cudaEventDisableTiming));
+    }
+    if (ready) { cuda_check(cudaStreamWaitEvent(gate_stream,ready,0)); }
+    cuda_check(cudaLaunchHostFunc(gate_stream,gate_host,nullptr));
+    cuda_check(cudaEventRecord(gate_event,gate_stream));
+    return real_compute->launch(p,w,n,first,q,bytes,activation,gate_event,start,end,error,size);
 }
 int assertions = 0;
 void require(bool ok,const char * what) { ++assertions; if(!ok)throw std::runtime_error(what); }
@@ -44,18 +56,19 @@ int main() {
     int slots[2]={};std::vector<float> out(512);
     auto warm=[&]{t.begin(17,1,true);lifecycle_prepare(t,requests,1,slots);t.admit(requests[0],data,true);t.finish(out.data(),256);};
     warm();
-    real_compute=t.format_api;instrumented=*real_compute;instrumented.compute=blocked_compute;
+    // CUDA loads a kernel's module at its first launch, which waits for the device: one launch before a call is held.
+    t.begin(17,1,true);lifecycle_prepare(t,requests,1,slots);lifecycle_launch(t,input);t.finish(out.data(),256);
+    real_compute=t.format_api;instrumented=*real_compute;instrumented.launch=blocked_launch;
     t.format_api=&instrumented;
     t.begin(17,2,true);lifecycle_prepare(t,requests,2,slots);
     require(slots[0]>=0 && slots[1]<0,"mixed hit/admission not exercised");
     const int destination=t.table->admissions[1];
     lifecycle_launch(t,input);
-    {std::unique_lock<std::mutex> lock(barrier_mutex);require(barrier_cv.wait_for(lock,std::chrono::seconds(5),[]{return entered;}),"worker did not enter");}
+    {std::unique_lock<std::mutex> lock(barrier_mutex);require(barrier_cv.wait_for(lock,std::chrono::seconds(5),[]{return entered;}),"launch did not enter");}
     t.admit(requests[1],data,true);
-    // Compute is still blocked. admit must have returned with source ownership
+    // Compute is still held. admit must have returned with source ownership
     // held, without either publishing a hit or copying through the CPU thread.
     require(!proceed && t.pending_uploads.size()==1 && !t.table->slots[destination].valid,"borrowed upload was published early");
-    {std::lock_guard<std::mutex> lock(t.mutex);require(t.upload_jobs.size()==1 && !t.done,"borrowed upload did not queue");}
     kimi_vram_ready_lease lease={};int ready[2]={};
     rejected([&]{t.acquire_ready(17,requests,2,&lease,ready);});
     unblock();t.finish(out.data(),256);
@@ -76,9 +89,10 @@ int main() {
     {
         std::lock_guard<std::mutex> lock(barrier_mutex);entered=proceed=false;inject_error=true;
     }
-    t.begin(17,2,true);lifecycle_prepare(t,requests,2,slots);lifecycle_launch(t,input);
-    {std::unique_lock<std::mutex> lock(barrier_mutex);require(barrier_cv.wait_for(lock,std::chrono::seconds(5),[]{return entered;}),"error worker did not enter");}
-    t.admit(requests[1],data,true);unblock();char error[512]={};
+    // A launch refused after a borrowed upload was queued fails the layer at finish, which leaves no borrowed work live.
+    t.begin(17,2,true);lifecycle_prepare(t,requests,2,slots);t.admit(requests[1],data,true);lifecycle_launch(t,input);
+    {std::unique_lock<std::mutex> lock(barrier_mutex);require(barrier_cv.wait_for(lock,std::chrono::seconds(5),[]{return entered;}),"error launch did not enter");}
+    unblock();char error[512]={};
     require(api_finish(&t,out.data(),256,error,sizeof(error))!=0 && std::strstr(error,"injected worker error"),"worker failure was hidden");
     require(!t.arena && !t.table && t.done && t.pending_uploads.empty() && t.upload_jobs.empty(),"error returned with borrowed work live");
     t.format_api=real_compute;

@@ -63,9 +63,10 @@ struct sink_vram {
     const kimi_vram_host_api * host_api = nullptr;
     uint64_t host_experts = 0;
     const kimi_vram_policy_api * policy_api = nullptr; // optional: miss cost, host demand and floor, host reclaim
-    // The CPUs the tier's threads were given (policy set_thread_cpus): those of the run's coordinator, which waits for
-    // them. Read at the first layer on the tier after each begin, once ggml has placed the graph's threads.
-    ssd::platform::cpu_list thread_cpus, coordinator_cpus;
+    // The CPUs the tier's threads were given (policy set_thread_cpus): the process's other than those of the run's
+    // coordinator, read at the first layer on the tier after each begin, once ggml has placed the graph's threads. The
+    // process's are read when the sink starts, before ggml places any thread (Linux reads the calling thread's mask).
+    ssd::platform::cpu_list thread_cpus, coordinator_cpus, process_cpus;
     bool placement_due = true;
     // The routed layers as the tier is given them (kimi_vram_expert_format): their IDs in the cache's priority order
     // and, once every one has the expert types recorded at load (record_expert_types), each one's types; without them
@@ -89,6 +90,7 @@ struct sink_vram {
     };
 
     void initialize(bool ready_first, const sink_configuration & configuration) {
+        if (!ssd::platform::process_cpus(process_cpus)) { process_cpus.clear(); }
         const bool use_locations = !configuration.production && configuration.policy.vram_locations;
         uint64_t bytes = configuration.policy.vram_budget;
         if (!configuration.production) {
@@ -236,18 +238,26 @@ struct sink_vram {
     void check(int result, const char * error) {
         if (result) { throw std::runtime_error(std::string("GPU tier: ") + error); }
     }
-    // The tier's threads on the CPUs of this thread, the coordinator, when they changed since the last placement.
+    // The tier's threads copy and wait beside this thread, the coordinator, which launches a decode layer's engine calls
+    // itself and polls through the layer: they take the process's other CPUs, where it does not wait behind them (all
+    // of them when none is left, its own when the process's are unknown). Set again when the coordinator's change.
     void place_threads() {
         if (!placement_due || !policy_api) { return; }
         std::string why;
         if (!ssd::platform::current_thread_cpus(coordinator_cpus, &why)) {
             throw std::runtime_error("GPU tier thread placement: " + why);
         }
-        if (coordinator_cpus != thread_cpus) {
+        ssd::platform::cpu_list cpus;
+        for (int cpu : process_cpus) {
+            if (std::find(coordinator_cpus.begin(), coordinator_cpus.end(), cpu) == coordinator_cpus.end()) {
+                cpus.push_back(cpu);
+            }
+        }
+        if (cpus.empty()) { cpus = process_cpus.empty() ? coordinator_cpus : process_cpus; }
+        if (cpus != thread_cpus) {
             char error[512] = {};
-            check(policy_api->set_thread_cpus(context, coordinator_cpus.data(), int(coordinator_cpus.size()),
-                error, sizeof(error)), error);
-            thread_cpus = coordinator_cpus;
+            check(policy_api->set_thread_cpus(context, cpus.data(), int(cpus.size()), error, sizeof(error)), error);
+            thread_cpus = cpus;
         }
         placement_due = false;
     }

@@ -55,6 +55,7 @@ struct generic_engine {
     size_t down_stride = 0;
     size_t q8_bytes = 0;
     cudaStream_t stream = nullptr;
+    // A call's input row is staged at its first row: calls in flight at once do not share it.
     float * device_input = nullptr;
     float * device_up_gate = nullptr;
     float * device_hidden = nullptr;
@@ -93,12 +94,12 @@ struct generic_engine {
         try {
             cuda_check(cudaSetDevice(device), "cudaSetDevice");
             cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreate");
-            cuda_check(cudaMalloc(reinterpret_cast<void **>(&device_input), size_t(latent) * sizeof(float)), "cudaMalloc input");
+            cuda_check(cudaMalloc(reinterpret_cast<void **>(&device_input), size_t(max_hits) * latent * sizeof(float)), "cudaMalloc input");
             cuda_check(cudaMalloc(reinterpret_cast<void **>(&device_up_gate), size_t(2 * max_hits) * hidden * sizeof(float)), "cudaMalloc up/gate");
             cuda_check(cudaMalloc(reinterpret_cast<void **>(&device_hidden), size_t(max_hits) * hidden * sizeof(float)), "cudaMalloc hidden");
             cuda_check(cudaMalloc(reinterpret_cast<void **>(&device_down), size_t(max_hits) * latent * sizeof(float)), "cudaMalloc down");
             if (q8_bytes) { cuda_check(cudaMalloc(&device_q8, q8_bytes), "cudaMalloc Q8_1"); }
-            cuda_check(cudaMallocHost(reinterpret_cast<void **>(&host_input), size_t(latent) * sizeof(float)), "cudaMallocHost input");
+            cuda_check(cudaMallocHost(reinterpret_cast<void **>(&host_input), size_t(max_hits) * latent * sizeof(float)), "cudaMallocHost input");
             cuda_check(cudaMallocHost(reinterpret_cast<void **>(&host_down), size_t(max_hits) * latent * sizeof(float)), "cudaMallocHost down");
         } catch (...) {
             close();
@@ -141,21 +142,21 @@ struct generic_engine {
     }
 
     size_t device_bytes() const {
-        return (device_input ? size_t(latent) * sizeof(float) : 0) +
+        return (device_input ? size_t(max_hits) * latent * sizeof(float) : 0) +
             (device_up_gate ? size_t(2 * max_hits) * hidden * sizeof(float) : 0) +
             (device_hidden ? size_t(max_hits) * hidden * sizeof(float) : 0) +
             (device_down ? size_t(max_hits) * latent * sizeof(float) : 0) + (device_q8 ? q8_bytes : 0);
     }
 
     size_t host_bytes() const {
-        return (host_input ? size_t(latent) * sizeof(float) : 0) +
+        return (host_input ? size_t(max_hits) * latent * sizeof(float) : 0) +
             (host_down ? size_t(max_hits) * latent * sizeof(float) : 0);
     }
 
-    void run(const vram_compute_expert * experts, int count, const void * input, size_t input_bytes,
-            const kimi_vram_activation & activation, float * output) {
+    void check(const vram_compute_expert * experts, int count, int first, const void * input, size_t input_bytes,
+            const kimi_vram_activation & activation) const {
         if (closed || poisoned) { throw std::runtime_error("generic VRAM engine is closed"); }
-        if (!experts || !input || !output || count < 1 || count > max_hits ||
+        if (!experts || !input || count < 1 || first < 0 || count > max_hits - first ||
                 input_bytes != size_t(latent) * sizeof(float)) {
             throw std::runtime_error("generic VRAM engine input shape");
         }
@@ -171,41 +172,69 @@ struct generic_engine {
         } else if (activation.kind != KIMI_VRAM_ACTIVATION_SWIGLU) {
             throw std::runtime_error("generic VRAM engine activation kind");
         }
-
-        const auto start = clock_type::now();
-        std::memcpy(host_input, input, input_bytes);
-        cuda_check(cudaSetDevice(device), "cudaSetDevice");
-        cuda_check(cudaMemcpyAsync(device_input, host_input, input_bytes, cudaMemcpyHostToDevice, stream), "generic input H2D");
         for (int i = 0; i < count; ++i) {
             if (!experts[i].up || !experts[i].gate || !experts[i].down) {
                 throw std::runtime_error("generic VRAM engine null resident weight");
             }
-            if (!mmvq(up_type, experts[i].up, hidden, latent, up_stride,
-                    device_input, device_q8, device_up_gate + size_t(2 * i) * hidden, stream) ||
-                !mmvq(up_type, experts[i].gate, hidden, latent, up_stride,
-                    device_input, device_q8, device_up_gate + size_t(2 * i + 1) * hidden, stream)) {
+        }
+    }
+
+    // Queues a call on the stream over rows [first, first + count): its input, the chains, and its down rows' copy
+    // into host_down.
+    void enqueue(const vram_compute_expert * experts, int count, int first, const void * input, size_t input_bytes,
+            const kimi_vram_activation & activation) {
+        float * staged = host_input + size_t(first) * latent;
+        float * row_input = device_input + size_t(first) * latent;
+        std::memcpy(staged, input, input_bytes);
+        cuda_check(cudaSetDevice(device), "cudaSetDevice");
+        cuda_check(cudaMemcpyAsync(row_input, staged, input_bytes, cudaMemcpyHostToDevice, stream), "generic input H2D");
+        for (int i = first; i < first + count; ++i) {
+            const auto & e = experts[i - first];
+            if (!mmvq(up_type, e.up, hidden, latent, up_stride,
+                    row_input, device_q8, device_up_gate + size_t(2 * i) * hidden, stream) ||
+                !mmvq(up_type, e.gate, hidden, latent, up_stride,
+                    row_input, device_q8, device_up_gate + size_t(2 * i + 1) * hidden, stream)) {
                 throw std::runtime_error("VRAM expert up/gate MMVQ launch failed");
             }
         }
         const int rows = count * hidden;
-        generic_activate<<<(rows + 255) / 256, 256, 0, stream>>>(device_up_gate, device_hidden,
-            count, hidden, activation.kind, activation.situ_beta, activation.situ_linear_beta,
-            activation.swiglu_limit);
+        generic_activate<<<(rows + 255) / 256, 256, 0, stream>>>(device_up_gate + size_t(2 * first) * hidden,
+            device_hidden + size_t(first) * hidden, count, hidden, activation.kind, activation.situ_beta,
+            activation.situ_linear_beta, activation.swiglu_limit);
         cuda_check(cudaGetLastError(), "generic activation launch");
-        for (int i = 0; i < count; ++i) {
-            if (!mmvq(down_type_, experts[i].down, latent, hidden, down_stride,
+        for (int i = first; i < first + count; ++i) {
+            if (!mmvq(down_type_, experts[i - first].down, latent, hidden, down_stride,
                     device_hidden + size_t(i) * hidden, device_q8,
                     device_down + size_t(i) * latent, stream)) {
                 throw std::runtime_error("VRAM expert down MMVQ launch failed");
             }
         }
-        const size_t output_bytes = size_t(count) * latent * sizeof(float);
-        cuda_check(cudaMemcpyAsync(host_down, device_down, output_bytes, cudaMemcpyDeviceToHost, stream), "generic output D2H");
-        cuda_check(cudaStreamSynchronize(stream), "generic compute synchronize");
-        std::memcpy(output, host_down, output_bytes);
+        cuda_check(cudaMemcpyAsync(host_down + size_t(first) * latent, device_down + size_t(first) * latent,
+            size_t(count) * latent * sizeof(float), cudaMemcpyDeviceToHost, stream), "generic output D2H");
         ++calls;
         hits += uint64_t(count);
+    }
+
+    void run(const vram_compute_expert * experts, int count, const void * input, size_t input_bytes,
+            const kimi_vram_activation & activation, float * output) {
+        check(experts, count, 0, input, input_bytes, activation);
+        if (!output) { throw std::runtime_error("generic VRAM engine input shape"); }
+        const auto start = clock_type::now();
+        enqueue(experts, count, 0, input, input_bytes, activation);
+        cuda_check(cudaStreamSynchronize(stream), "generic compute synchronize");
+        std::memcpy(output, host_down, size_t(count) * latent * sizeof(float));
         total_us += std::chrono::duration<double, std::micro>(clock_type::now() - start).count();
+    }
+
+    void launch(const vram_compute_expert * experts, int count, int first, const void * input, size_t input_bytes,
+            const kimi_vram_activation & activation, cudaEvent_t ready, cudaEvent_t start, cudaEvent_t end) {
+        check(experts, count, first, input, input_bytes, activation);
+        if (!start || !end) { throw std::runtime_error("generic VRAM engine launch without its events"); }
+        cuda_check(cudaSetDevice(device), "cudaSetDevice");
+        if (ready) { cuda_check(cudaStreamWaitEvent(stream, ready, 0), "generic launch wait"); }
+        cuda_check(cudaEventRecord(start, stream), "generic launch start");
+        enqueue(experts, count, first, input, input_bytes, activation);
+        cuda_check(cudaEventRecord(end, stream), "generic launch end");
     }
 };
 
@@ -226,12 +255,11 @@ void destroy(void * context) {
     delete static_cast<generic_engine *>(context);
 }
 
-int compute(void * context, const vram_compute_expert * experts, int hits,
-        const void * input, size_t input_bytes, const kimi_vram_activation * activation,
-        float * output, char * error, size_t error_size) {
+// A failed call leaves its stream and scratch unknown: the engine closes and refuses every later call.
+template <class F> int guarded(void * context, char * error, size_t error_size, F && call) {
     try {
-        if (!context || !activation) { throw std::runtime_error("null generic VRAM compute argument"); }
-        static_cast<generic_engine *>(context)->run(experts, hits, input, input_bytes, *activation, output);
+        if (!context) { throw std::runtime_error("null generic VRAM engine"); }
+        call(*static_cast<generic_engine *>(context));
         return 0;
     } catch (const std::exception & e) {
         if (context) {
@@ -252,6 +280,28 @@ int compute(void * context, const vram_compute_expert * experts, int hits,
     }
 }
 
+int compute(void * context, const vram_compute_expert * experts, int hits,
+        const void * input, size_t input_bytes, const kimi_vram_activation * activation,
+        float * output, char * error, size_t error_size) {
+    return guarded(context, error, error_size, [&](generic_engine & engine) {
+        if (!activation) { throw std::runtime_error("null generic VRAM compute argument"); }
+        engine.run(experts, hits, input, input_bytes, *activation, output);
+    });
+}
+
+int launch(void * context, const vram_compute_expert * experts, int hits, int first,
+        const void * input, size_t input_bytes, const kimi_vram_activation * activation,
+        CUevent_st * ready, CUevent_st * start, CUevent_st * end, char * error, size_t error_size) {
+    return guarded(context, error, error_size, [&](generic_engine & engine) {
+        if (!activation) { throw std::runtime_error("null generic VRAM launch argument"); }
+        engine.launch(experts, hits, first, input, input_bytes, *activation, ready, start, end);
+    });
+}
+
+const float * host_rows(void * context) {
+    return context ? static_cast<generic_engine *>(context)->host_down : nullptr;
+}
+
 size_t device_bytes(void * context) {
     return context ? static_cast<generic_engine *>(context)->device_bytes() : 0;
 }
@@ -263,7 +313,7 @@ size_t host_bytes(void * context) {
 
 extern "C" const vram_format_compute_api * kimi_vram_generic_format_compute_get_api() {
     static const vram_format_compute_api api = {
-        3, sizeof(vram_format_compute_api), create, destroy, compute, device_bytes, host_bytes
+        4, sizeof(vram_format_compute_api), create, destroy, compute, device_bytes, host_bytes, launch, host_rows
     };
     return &api;
 }

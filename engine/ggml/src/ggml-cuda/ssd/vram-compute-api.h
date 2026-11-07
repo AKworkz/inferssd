@@ -3,16 +3,25 @@
 #include <stdint.h>
 #include "ggml-ssd/gpu/kimi-vram-tier-api.h"
 struct vram_compute_expert { const void * up; const void * gate; const void * down; };
+struct CUevent_st;
 // Decode engine of the tier (generic-compute-adapter.cu): an f32 input row, up and gate, the activation and down over
 // up to max_hits experts of one format on the CUDA backend's matrix-vector kernels; returns unweighted down rows.
+// compute runs a call and waits for it (grouped prefill's one-token passes, on the tier's worker). launch queues one
+// on the engine's stream and returns (a decode layer's, on the sink's thread): its experts take the engine's rows
+// [first, first + hits), which no other call in flight shares; the stream waits for `ready` first (null: no wait),
+// records `start` and `end` around the call, and its down rows are in host_rows() once `end` has completed.
 struct vram_format_compute_api {
-    uint32_t version, size; // 3
+    uint32_t version, size; // 4
     void * (*create)(int device, int latent, int hidden, int max_hits, int weight_type, int down_type, char *, size_t);
     void (*destroy)(void *);
     int (*compute)(void *, const vram_compute_expert *, int hits, const void * input, size_t input_bytes,
                    const kimi_vram_activation * activation, float * host_down, char * error, size_t error_size);
     size_t (*device_scratch_bytes)(void *);
     size_t (*host_scratch_bytes)(void *);
+    int (*launch)(void *, const vram_compute_expert *, int hits, int first, const void * input, size_t input_bytes,
+                  const kimi_vram_activation * activation, struct CUevent_st * ready, struct CUevent_st * start,
+                  struct CUevent_st * end, char * error, size_t error_size);
+    const float * (*host_rows)(void *); // [max_hits][latent]
 };
 typedef const vram_format_compute_api * (*vram_format_compute_get_api_fn)();
 // Engine of grouped prefill for any expert format the CUDA backend multiplies (group-compute-adapter.cu). Per layer, the
@@ -24,7 +33,6 @@ typedef const vram_format_compute_api * (*vram_format_compute_get_api_fn)();
 // loads every kernel a pass runs, so no device memory is taken between it and release, which gives the buffers back
 // (before decode grows the tier). The kernels stay loaded for the process: the first reserve of a type and shape takes
 // their device memory for good, and meanwhile a scratch of one matrix and its operands, which it frees.
-struct CUevent_st;
 struct vram_group_activation {
     struct kimi_vram_activation base;
     const float * post_norm;    // latent weights of the per-expert post norm, or null; copied by begin_layer
