@@ -1216,6 +1216,52 @@ void ggml_cuda_op_mul_mat_vec_q(
 #ifdef GGML_SSD_CUDA_EXECUTOR
 extern "C" bool ggml_cuda_moe_stream_mmvf_dev(
     int, const void *, int64_t, int64_t, size_t, const float *, float *, int64_t, cudaStream_t);
+// n rows of ne00 floats, one after another, quantized to Q8_1 as a product against src0_type weights takes them: each
+// row padded to MATRIX_ROW_PADDING.
+extern "C" bool ggml_cuda_moe_stream_mmvq_quantize_dev(
+    int src0_type_int,
+    const float *d_src1_f32,
+    int64_t ne00,
+    int64_t n,
+    void *d_src1_q8,
+    cudaStream_t stream) {
+    if (!d_src1_f32 || !d_src1_q8 || ne00 <= 0 || n <= 0) {
+        return false;
+    }
+    quantize_row_q8_1_cuda(d_src1_f32, nullptr, d_src1_q8, (ggml_type) src0_type_int,
+            ne00, ne00, n * ne00, n * ne00, GGML_PAD(ne00, MATRIX_ROW_PADDING), n, 1, 1, stream);
+    return cudaGetLastError() == cudaSuccess;
+}
+
+// d_dst (ne01 floats) = d_src0 (ne01 rows of ne00 values, nb01 bytes apart) times one row that
+// ggml_cuda_moe_stream_mmvq_quantize_dev quantized.
+extern "C" bool ggml_cuda_moe_stream_mmvq_q8_dev(
+    int src0_type_int,
+    const void *d_src0,
+    int64_t ne01,
+    int64_t ne00,
+    size_t nb01,
+    const void *d_src1_q8,
+    float *d_dst,
+    cudaStream_t stream) {
+    const ggml_type t0 = (ggml_type) src0_type_int;
+    if (!d_src0 || !d_src1_q8 || !d_dst || ne01 <= 0 || ne00 <= 0) {
+        return false;
+    }
+
+    ggml_cuda_mm_fusion_args_device fusion_local{};
+    const int stride_row_x = nb01 / ggml_type_size(t0);
+    const int stride_col_y = GGML_PAD(ne00, MATRIX_ROW_PADDING) / QK8_1;
+
+    mul_mat_vec_q_switch_type(
+        d_src0, t0, (const char *) d_src1_q8, nullptr, fusion_local, d_dst,
+        ne00, ne01, 1, stride_row_x, stride_col_y, ne01,
+        1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 0, stream);
+
+    return cudaGetLastError() == cudaSuccess;
+}
+
 extern "C" bool ggml_cuda_moe_stream_mmvq_dev(
     int src0_type_int,
     const void *d_src0,
@@ -1230,28 +1276,8 @@ extern "C" bool ggml_cuda_moe_stream_mmvq_dev(
     if (t0 == GGML_TYPE_BF16 || t0 == GGML_TYPE_F16) {
         return ggml_cuda_moe_stream_mmvf_dev(src0_type_int, d_src0, ne01, ne00, nb01, d_src1_f32, d_dst, 1, stream);
     }
-    if (!d_src0 || !d_src1_f32 || !d_src1_q8 || !d_dst || ne01 <= 0 || ne00 <= 0) {
-        return false;
-    }
-
-    const int64_t src1_padded = GGML_PAD(ne00, MATRIX_ROW_PADDING);
-    quantize_row_q8_1_cuda(d_src1_f32, nullptr, d_src1_q8, t0,
-            ne00, ne00, ne00, ne00, src1_padded, 1, 1, 1, stream);
-    if (cudaGetLastError() != cudaSuccess) {
-        return false;
-    }
-
-    ggml_cuda_mm_fusion_args_device fusion_local{};
-    const int stride_row_x = nb01 / ggml_type_size(t0);
-    const int stride_col_y = src1_padded / QK8_1;
-
-    mul_mat_vec_q_switch_type(
-        d_src0, t0, (const char *) d_src1_q8, nullptr, fusion_local, d_dst,
-        ne00, ne01, 1, stride_row_x, stride_col_y, ne01,
-        1, 1, 1, 1, 1, 1,
-        1, 1, 1, 1, 1, 0, stream);
-
-    return cudaGetLastError() == cudaSuccess;
+    return ggml_cuda_moe_stream_mmvq_quantize_dev(src0_type_int, d_src1_f32, ne00, 1, d_src1_q8, stream) &&
+        ggml_cuda_moe_stream_mmvq_q8_dev(src0_type_int, d_src0, ne01, ne00, nb01, d_src1_q8, d_dst, stream);
 }
 
 // The weight types ggml_cuda_moe_stream_mmvq_dev computes: the quantized ones of mul_mat_vec_q_switch_type (against

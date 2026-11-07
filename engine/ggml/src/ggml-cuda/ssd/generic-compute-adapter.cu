@@ -16,8 +16,6 @@
 #include <string>
 
 namespace {
-using mmvq_fn = bool (*)(int, const void *, int64_t, int64_t, size_t,
-                         const float *, void *, float *, cudaStream_t);
 using clock_type = std::chrono::steady_clock;
 
 void cuda_check(cudaError_t rc, const char * operation) {
@@ -26,8 +24,10 @@ void cuda_check(cudaError_t rc, const char * operation) {
     }
 }
 
+bool is_float(int type) { return type == GGML_TYPE_BF16 || type == GGML_TYPE_F16; }
+
 size_t q8_1_bytes(int columns) {
-    constexpr int row_padding = 512;
+    constexpr int row_padding = 512; // MATRIX_ROW_PADDING, as ggml_cuda_moe_stream_mmvq_quantize_dev pads rows
     const size_t padded = (size_t(columns) + row_padding - 1) / row_padding * row_padding;
     return padded / QK8_1 * sizeof(block_q8_1);
 }
@@ -52,7 +52,6 @@ struct generic_engine {
     int up_type = GGML_TYPE_COUNT;
     int down_type_ = GGML_TYPE_COUNT;
     size_t up_stride = 0;
-    size_t down_stride = 0;
     size_t q8_bytes = 0;
     cudaStream_t stream = nullptr;
     // A call's input row is staged at its first row: calls in flight at once do not share it.
@@ -60,10 +59,9 @@ struct generic_engine {
     float * device_up_gate = nullptr;
     float * device_hidden = nullptr;
     float * device_down = nullptr;
-    void * device_q8 = nullptr;
+    void * device_q8 = nullptr; // the operand of the products being queued: the stream runs one call after another
     float * host_input = nullptr;
     float * host_down = nullptr;
-    mmvq_fn mmvq = nullptr;
     uint64_t calls = 0;
     uint64_t hits = 0;
     double total_us = 0.0;
@@ -75,13 +73,11 @@ struct generic_engine {
         if (weight_type == GGML_TYPE_IQ2_XXS && down_type == GGML_TYPE_Q2_K) {
             throw std::runtime_error("IQ2_XXS/Q2_K expert format is retired");
         }
-        auto is_float = [](int type) { return type == GGML_TYPE_BF16 || type == GGML_TYPE_F16; };
         const bool floating = is_float(weight_type) && is_float(down_type);
         if (latent <= 0 || hidden <= 0 || latent > 16384 || hidden > 16384 ||
                 latent % 256 || hidden % 256 || max_hits < 1 || max_hits > 16) {
             throw std::runtime_error("unsupported generic VRAM expert geometry");
         }
-        mmvq = ggml_cuda_moe_stream_mmvq_dev;
         const auto supports = ggml_cuda_moe_stream_mmvq_supports;
         if (!supports(weight_type) || !supports(down_type)) {
             throw std::runtime_error(std::string("GPU expert layer: no CUDA matrix-vector kernel for ") +
@@ -89,8 +85,8 @@ struct generic_engine {
         }
         up_type = weight_type; down_type_ = down_type;
         up_stride = ggml_row_size(ggml_type(up_type), latent);
-        down_stride = ggml_row_size(ggml_type(down_type_), hidden);
-        q8_bytes = floating ? 0 : std::max(q8_1_bytes(latent), q8_1_bytes(hidden));
+        q8_bytes = std::max(is_float(up_type) ? 0 : q8_1_bytes(latent),
+            is_float(down_type_) ? 0 : size_t(max_hits) * q8_1_bytes(hidden));
         try {
             cuda_check(cudaSetDevice(device), "cudaSetDevice");
             cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "cudaStreamCreate");
@@ -179,8 +175,32 @@ struct generic_engine {
         }
     }
 
-    // Queues a call on the stream over rows [first, first + count): its input, the chains, and its down rows' copy
-    // into host_down.
+    // The operand of products of `type` weights against n rows of `columns` floats, one after another: the rows
+    // themselves for floating weights, else the rows quantized to Q8_1 into device_q8.
+    const void * operand(int type, const float * rows, int columns, int n) {
+        if (is_float(type)) { return rows; }
+        if (!ggml_cuda_moe_stream_mmvq_quantize_dev(type, rows, columns, n, device_q8, stream)) {
+            throw std::runtime_error("VRAM expert operand quantize launch failed");
+        }
+        return device_q8;
+    }
+
+    // dst (rows floats) = weights (rows of `columns` values of `type`) times row k of an operand.
+    void product(int type, const void * weights, int rows, int columns, const void * x, int k, float * dst) {
+        const size_t row_bytes = ggml_row_size(ggml_type(type), columns);
+        const bool ok = is_float(type) ?
+            ggml_cuda_moe_stream_mmvf_dev(type, weights, rows, columns, row_bytes,
+                static_cast<const float *>(x) + size_t(k) * columns, dst, 1, stream) :
+            ggml_cuda_moe_stream_mmvq_q8_dev(type, weights, rows, columns, row_bytes,
+                static_cast<const char *>(x) + size_t(k) * q8_1_bytes(columns), dst, stream);
+        if (!ok) { throw std::runtime_error("VRAM expert product launch failed"); }
+    }
+
+    // Queues a call on the stream over rows [first, first + count): its input; each expert's up and gate against the
+    // input, quantized once, in one product where gate follows up (as in a tier slot); the activation; each expert's
+    // down against its row, the rows quantized at once; and its down rows' copy into host_down. Every output row is
+    // what the matrix-vector kernel gives that row alone: one product over more rows, or one quantization for more
+    // products, changes no bit.
     void enqueue(const vram_compute_expert * experts, int count, int first, const void * input, size_t input_bytes,
             const kimi_vram_activation & activation) {
         float * staged = host_input + size_t(first) * latent;
@@ -188,13 +208,15 @@ struct generic_engine {
         std::memcpy(staged, input, input_bytes);
         cuda_check(cudaSetDevice(device), "cudaSetDevice");
         cuda_check(cudaMemcpyAsync(row_input, staged, input_bytes, cudaMemcpyHostToDevice, stream), "generic input H2D");
-        for (int i = first; i < first + count; ++i) {
-            const auto & e = experts[i - first];
-            if (!mmvq(up_type, e.up, hidden, latent, up_stride,
-                    row_input, device_q8, device_up_gate + size_t(2 * i) * hidden, stream) ||
-                !mmvq(up_type, e.gate, hidden, latent, up_stride,
-                    row_input, device_q8, device_up_gate + size_t(2 * i + 1) * hidden, stream)) {
-                throw std::runtime_error("VRAM expert up/gate MMVQ launch failed");
+        const void * x = operand(up_type, row_input, latent, 1);
+        for (int i = 0; i < count; ++i) {
+            const auto & e = experts[i];
+            float * up_gate = device_up_gate + size_t(2 * (first + i)) * hidden;
+            if (e.gate == static_cast<const char *>(e.up) + size_t(hidden) * up_stride) {
+                product(up_type, e.up, 2 * hidden, latent, x, 0, up_gate);
+            } else {
+                product(up_type, e.up, hidden, latent, x, 0, up_gate);
+                product(up_type, e.gate, hidden, latent, x, 0, up_gate + hidden);
             }
         }
         const int rows = count * hidden;
@@ -202,12 +224,9 @@ struct generic_engine {
             device_hidden + size_t(first) * hidden, count, hidden, activation.kind, activation.situ_beta,
             activation.situ_linear_beta, activation.swiglu_limit);
         cuda_check(cudaGetLastError(), "generic activation launch");
-        for (int i = first; i < first + count; ++i) {
-            if (!mmvq(down_type_, experts[i - first].down, latent, hidden, down_stride,
-                    device_hidden + size_t(i) * hidden, device_q8,
-                    device_down + size_t(i) * latent, stream)) {
-                throw std::runtime_error("VRAM expert down MMVQ launch failed");
-            }
+        const void * h = operand(down_type_, device_hidden + size_t(first) * hidden, hidden, count);
+        for (int i = 0; i < count; ++i) {
+            product(down_type_, experts[i].down, latent, hidden, h, i, device_down + size_t(first + i) * latent);
         }
         cuda_check(cudaMemcpyAsync(host_down + size_t(first) * latent, device_down + size_t(first) * latent,
             size_t(count) * latent * sizeof(float), cudaMemcpyDeviceToHost, stream), "generic output D2H");

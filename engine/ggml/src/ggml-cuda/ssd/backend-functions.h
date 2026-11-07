@@ -6,8 +6,10 @@
 // Private normal-link boundaries inside ggml-cuda. Definitions are backend
 // kernels/services in this same library, never runtime-discovered DSOs.
 extern "C" {
-bool ggml_cuda_moe_stream_mmvq_dev(int, const void *, int64_t, int64_t, size_t,
-    const float *, void *, float *, cudaStream_t);
+bool ggml_cuda_moe_stream_mmvf_dev(int, const void *, int64_t, int64_t, size_t,
+    const float *, float *, int64_t, cudaStream_t);
+bool ggml_cuda_moe_stream_mmvq_quantize_dev(int, const float *, int64_t, int64_t, void *, cudaStream_t);
+bool ggml_cuda_moe_stream_mmvq_q8_dev(int, const void *, int64_t, int64_t, size_t, const void *, float *, cudaStream_t);
 bool ggml_cuda_moe_stream_mmvq_supports(int);
 bool ggml_cuda_moe_stream_mm_supports(int);
 void * ggml_cuda_moe_stream_mm_create(int);

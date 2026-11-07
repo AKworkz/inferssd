@@ -98,7 +98,7 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `ggml/src/ggml-cuda/mmq.cu` | 54 | 3 |
 | `ggml/src/ggml-cuda/mmq.cuh` | 28 | 10 |
 | `ggml/src/ggml-cuda/mmvf.cu` | 22 | 0 |
-| `ggml/src/ggml-cuda/mmvq.cu` | 258 | 40 |
+| `ggml/src/ggml-cuda/mmvq.cu` | 284 | 40 |
 | `ggml/src/ggml-cuda/mmvq.cuh` | 12 | 0 |
 | `ggml/src/ggml-cuda/norm.cu` | 15 | 0 |
 | `ggml/src/ggml-cuda/quantize.cu` | 238 | 21 |
