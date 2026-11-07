@@ -349,7 +349,10 @@ json format_response_rerank(
 // other utils
 //
 
-std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int idx);
+// The n most likely tokens with their probabilities, most likely first, and the probability of `token` (left as it is
+// when the token has no logit): what a softmax over every logit in descending order gives them, bit for bit.
+std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int idx, size_t n, llama_token token,
+                                                      float & token_p);
 
 std::string safe_json_to_str(const json & data);
 

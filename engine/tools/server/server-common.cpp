@@ -1579,7 +1579,12 @@ json format_response_rerank(
 // other utils
 //
 
-std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int idx) {
+// Summed in descending order the softmax's total reaches 1 at its first term, the largest; a term under half an ulp of
+// the total then changes nothing, nor does any after it. Below max - 17.5 a term is expf() of less than -17.5, under
+// 2.6e-8, while half an ulp of 1 is 2^-24, about 6e-8: the total needs only the logits at or above that, sorted, and
+// the top n. Tokens of equal logit may come in another order than a sort of all of them gives.
+std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int idx, size_t n, llama_token token,
+                                                      float & token_p) {
     std::vector<llama_token_data> cur;
 
     const auto * logits = llama_get_logits_ith(ctx, idx);
@@ -1598,23 +1603,42 @@ std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int i
         }
     }
 
-    // sort tokens by logits
-    std::sort(cur.begin(), cur.end(), [](const llama_token_data & a, const llama_token_data & b) {
-        return a.logit > b.logit;
-    });
+    if (cur.empty()) {
+        return cur;
+    }
+    const auto by_logit = [](const llama_token_data & a, const llama_token_data & b) { return a.logit > b.logit; };
+    float max_l = cur[0].logit;
+    for (const auto & t : cur) {
+        max_l = std::max(max_l, t.logit);
+    }
+    const float floor_l = max_l - 17.5f;
+    auto head = std::partition(cur.begin(), cur.end(), [&](const llama_token_data & t) { return t.logit >= floor_l; });
+    if (size_t(head - cur.begin()) < n) {
+        head = cur.begin() + std::min(n, cur.size());
+        std::partial_sort(cur.begin(), head, cur.end(), by_logit);
+    } else {
+        std::sort(cur.begin(), head, by_logit);
+    }
 
     // apply softmax
-    float max_l = cur[0].logit;
     float cum_sum = 0.0f;
-    for (size_t i = 0; i < cur.size(); ++i) {
-        float p = expf(cur[i].logit - max_l);
-        cur[i].p = p;
+    for (auto it = cur.begin(); it != head; ++it) {
+        float p = expf(it->logit - max_l);
+        it->p = p;
         cum_sum += p;
     }
-    for (size_t i = 0; i < cur.size(); ++i) {
-        cur[i].p /= cum_sum;
+    for (auto it = cur.begin(); it != head; ++it) {
+        it->p /= cum_sum;
+    }
+    for (const auto & t : cur) {
+        if (t.id == token) {
+            float p = expf(t.logit - max_l);
+            token_p = p / cum_sum;
+            break;
+        }
     }
 
+    cur.erase(head, cur.end());
     return cur;
 }
 
