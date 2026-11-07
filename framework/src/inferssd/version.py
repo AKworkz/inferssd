@@ -2,7 +2,7 @@
 
 The build number is the branch's commit count and the day the commit's, both read from the clone
 by scripts/engine-resources.py at install time; together with the commit they name the engine as
-the app does, v<build>.<mmdd>.<commit>. Whether an engine is one the app works with is the app's
+the app does, <yymmdd>.<build>.<commit>. Whether an engine is one the app works with is the app's
 own call, by this build number.
 """
 
@@ -18,10 +18,10 @@ from inferssd.launch.resources import installed_resources
 
 
 def label(build: Optional[int], date: Optional[str], revision: Optional[str]) -> Optional[str]:
-    """v<build>.<mmdd>.<commit>, or None without a build number, a day and a commit."""
+    """<yymmdd>.<build>.<commit>, or None without a build number, a day and a commit."""
     if not build or not date or not revision or revision == "unknown" or len(date) < 10:
         return None
-    return f"v{build}.{date[5:7]}{date[8:10]}.{revision[:7]}"
+    return f"{date[2:4]}{date[5:7]}{date[8:10]}.{build}.{revision[:7]}"
 
 
 def report(environ: Mapping[str, str] = os.environ) -> dict[str, Any]:
@@ -55,6 +55,6 @@ def report(environ: Mapping[str, str] = os.environ) -> dict[str, Any]:
 
 
 def line(value: Mapping[str, Any]) -> str:
-    """The line for people: `inferssd 0.1.3 (v202.1106.03af979)`, the label when there is one."""
+    """The line for people: `inferssd 0.1.3 (261106.202.03af979)`, the label when there is one."""
     text = f"inferssd {value['version']}"
     return f"{text} ({value['label']})" if value.get("label") else text

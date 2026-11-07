@@ -33,7 +33,7 @@ from: the commit, the branch's commit count up to it, the commit's day (UTC) and
 the branch. `scripts/engine-resources.py` reads them from the checkout's Git
 metadata, so a local build and the installer's build record them the same way;
 `inferssd --version --json` reports them, and `--version` alone adds them to its
-line as `v<build>.<mmdd>.<commit>`. A shallow clone counts only the commits it
+line as `<yymmdd>.<build>.<commit>`. A shallow clone counts only the commits it
 has, so the installer clones with `--filter=blob:none`; a source archive has no
 Git metadata, and the four are `"unknown"` and `null`. The WiCi AI desktop app
 names the engine by this label and decides on its own, by `build`, whether an

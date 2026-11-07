@@ -53,7 +53,7 @@ def test_version_names_the_build_the_installer_recorded(capsys, monkeypatch, tmp
     monkeypatch.setenv("INFERSSD_RESOURCES", str(descriptor))
     assert main(["--version"]) == 0
     version = metadata.version("inferssd")
-    assert capsys.readouterr().out == f"inferssd {version} (v202.1106.03af979)\n"
+    assert capsys.readouterr().out == f"inferssd {version} (261106.202.03af979)\n"
     assert main(["--version", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "version": version,
@@ -61,7 +61,7 @@ def test_version_names_the_build_the_installer_recorded(capsys, monkeypatch, tmp
         "revision": revision,
         "date": "2026-11-06",
         "branch": "main",
-        "label": "v202.1106.03af979",
+        "label": "261106.202.03af979",
     }
 
 

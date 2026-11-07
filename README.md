@@ -104,8 +104,8 @@ See the [quick start](docs/quickstart.md#one-command-installation) for upgrades 
 ## Versions
 
 InferSSD has a release number, `0.1.3` in `framework/pyproject.toml`, and every build has a
-label of its own, `v<build>.<mmdd>.<commit>`: the branch's commit count up to the commit it was
-built from, that commit's day (UTC) and the commit. The installer records the three in
+label of its own, `<yymmdd>.<build>.<commit>`: the day (UTC) of the commit it was built from, the
+branch's commit count up to that commit, and the commit. The installer records the three in
 `engine-resources.json` beside the build, from the clone's Git metadata, and so does a local
 build that runs `scripts/engine-resources.py`; a source archive has no Git metadata and records
 none. `inferssd --version` prints the release and the label, `inferssd --version --json` every
@@ -113,9 +113,9 @@ field:
 
 ```sh
 $ inferssd --version
-inferssd 0.1.3 (v202.1106.03af979)
+inferssd 0.1.3 (261106.202.03af979)
 $ inferssd --version --json
-{"version": "0.1.3", "build": 202, "revision": "03af97…", "date": "2026-11-06", "branch": "main", "label": "v202.1106.03af979"}
+{"version": "0.1.3", "build": 202, "revision": "03af97…", "date": "2026-11-06", "branch": "main", "label": "261106.202.03af979"}
 ```
 
 The engine only says what it is. Whether a build is one it can work with is for whatever runs
