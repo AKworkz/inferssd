@@ -7,7 +7,6 @@ process RSS and system memory/compression/swap; it cannot promise a hard cap.
 from __future__ import annotations
 
 import re
-import resource
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -15,6 +14,9 @@ from typing import Any, Optional
 
 from inferssd.platform.captured_command import run_captured
 from inferssd.platform.policy import Policy
+
+if sys.platform != "win32":
+    import resource
 
 
 def command(argv: Sequence[str]) -> str:

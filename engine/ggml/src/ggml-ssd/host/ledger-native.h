@@ -5,20 +5,24 @@
 //
 // Room for `extra` more bytes is the smaller of two terms.
 //  - envelope, reported in the arbiter's cgroup fields: every finite limit on this process's memory keeps the
-//    reserve free after `extra`. Use is what the OS charges this process for its own memory (Windows commit,
-//    macOS phys_footprint), so the model's file mapping is not use on either OS.
+//    reserve free after `extra`. The model's file mapping is use on neither OS.
 //      Windows: the limits the process's job sets in its LimitFlags (a job alone is no limit: OpenSSH and
 //      terminals run processes in jobs without one): JOB_OBJECT_LIMIT_JOB_MEMORY against the job's commit,
-//      JOB_OBJECT_LIMIT_PROCESS_MEMORY against the process's PrivateUsage. Only the immediate job is visible; a
-//      limit set on the parent of a nested job is not.
-//      Both OSes: host.budget_mib against the process's use (Windows PrivateUsage, macOS phys_footprint). It
-//      applies beside a job limit, the tighter binding.
+//      JOB_OBJECT_LIMIT_PROCESS_MEMORY against the process's PrivateUsage. The kernel holds both against commit,
+//      which on a discrete GPU includes the device memory the process allocates: WDDM charges a device-local
+//      allocation to commit without taking host memory. Only the immediate job is visible; a limit set on the
+//      parent of a nested job is not.
+//      Both OSes: host.budget_mib against the process's host use: on Windows PrivateUsage less the video memory
+//      the process holds in the local segments of discrete adapters (D3DKMTQueryVideoMemoryInfo), on macOS
+//      phys_footprint, which on unified memory rightly counts the GPU's allocations. It applies beside a job
+//      limit, the tighter binding.
 //    With host.budget_mib 0 (the default) and no job limit, the limit is the machine's physical memory, the
 //    budget the framework passes by default, against the same use.
 //    A failed OS query leaves the term unreadable, and the RAM cache then admits nothing. The same limits, holding
 //    `extra` with no reserve beside it, are the limits of room.h.
 //  - system: memory available to a new allocation, less the floor and the open prefill's pages.
-//      Windows: min(ullAvailPhys, ullAvailPageFile), as commit is a hard limit there.
+//      Windows: min(ullAvailPhys, ullAvailPageFile plus what the paging files may still grow by), as commit
+//      is a hard limit there and a system-managed paging file grows on demand.
 //      macOS: what a new allocation takes before the kernel compresses or swaps anyone's anonymous memory, by its
 //      own live thresholds (sysctl): the free pages above its free target, the file-backed pages above its file
 //      cache minimum (vm_page_filecache_min, which it keeps), and the purgeable and reusable pages. The counterpart
@@ -55,8 +59,15 @@ struct envelopes {
 };
 
 namespace native {
-// What the OS charges this process for its own memory: Windows PrivateUsage, macOS phys_footprint.
+// This process's host memory: Windows PrivateUsage less device_commit, macOS phys_footprint.
 bool process_use(uint64_t & bytes);
+#if defined(_WIN32)
+// The process's commit (PrivateUsage), which the kernel holds against a job's memory limits.
+bool commit_use(uint64_t & bytes);
+// The video memory the process holds in the local segments of discrete adapters, which WDDM charges to its
+// commit. An adapter is discrete when it also has a non-local segment group; 0 without one.
+bool device_commit(uint64_t & bytes);
+#endif
 // Memory available to a new allocation (the system term before the floor).
 bool available(uint64_t & bytes);
 // The machine's physical memory.

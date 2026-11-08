@@ -66,6 +66,28 @@ def test_no_estimate_without_the_models_drive():
     assert value.detail == "the drive holding the model is not known"
 
 
+def test_qwen_estimate_uses_a_measured_rate_below_an_unreachable_knee():
+    c = load(Path(__file__).parent / "fixtures/machine/windows-x64-igpu.json")
+    storage = c["storage"][0]
+    storage["qd_cap"] = None
+    storage["knee"] = [{"bytes": 1 << 20, "qd": 32}]
+    template = next(row for row in storage["random_read"] if row["bytes"] == 1 << 20)
+    storage["random_read"] = [
+        dict(template, qd=qd, Bps=rate) for qd, rate in [(8, 6e9), (16, 7e9), (32, 9e9)]
+    ]
+    model = catalog.MODELS[2]
+    facts = RuntimeFacts(tuple(row["id"] for row in c["cpu"]["logical"]), (), 9 * GIB)
+    value = decode_estimate(
+        c, model.facts, model.dense_read_bytes, facts, "windows", storage["drive_key"]
+    )
+    assert value.tokens_per_second is not None and value.tokens_per_second > 0
+    assert "from the drive at 7.00 GB/s" in value.detail
+    storage["knee"][0]["qd"] = 8
+    assert value == decode_estimate(
+        c, model.facts, model.dense_read_bytes, facts, "windows", storage["drive_key"]
+    )
+
+
 def test_dense_weights_that_do_not_fit_are_read_from_the_drive():
     muse = catalog.MODELS[1]  # 21 GB of dense weights, more than the 16 GiB Mac has
     spilled = estimate(muse, available=9 * GIB)

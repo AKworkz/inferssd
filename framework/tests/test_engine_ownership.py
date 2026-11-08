@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +15,14 @@ from test_engine_runtime import policy, resolution
 from inferssd.engine import owned
 from inferssd.platform import worker
 from inferssd.platform.run_directory import reserve
+
+if sys.platform != "win32":
+    import fcntl
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX owned entry: the flock device lock, systemd scopes and process groups",
+)
 
 
 class Connection:

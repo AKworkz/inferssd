@@ -203,12 +203,13 @@ endif()
 
 if (GGML_CUDA)
     # ggml selects architectures in its own directory. The sibling native tools
-    # and tests also compile CUDA, so expose that language/toolkit at their
-    # common engine ancestor without changing the selected architectures.
+    # and tests also use CUDA, so expose the toolkit and those architectures at
+    # their common engine ancestor. The language is enabled only where CUDA is
+    # compiled: on Windows its platform module sets MSVC's link conventions for
+    # every language of the directory.
     if (TARGET ggml-cuda AND NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
         get_target_property(CMAKE_CUDA_ARCHITECTURES ggml-cuda CUDA_ARCHITECTURES)
     endif()
-    enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 endif()
 

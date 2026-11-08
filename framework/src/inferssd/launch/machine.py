@@ -36,7 +36,7 @@ from inferssd.machine.store import (
     save,
 )
 
-PROFILED = ("linux", "darwin")
+PROFILED = ("linux", "darwin", "windows")
 
 
 @dataclass(frozen=True)

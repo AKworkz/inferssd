@@ -4,10 +4,13 @@
 ``derive`` is a pure function of the machine characteristics, the model's
 header facts, the runtime facts and the platform. It chooses thread counts and
 CPU placement, placement cost priors, the host memory budget and margin, and,
-with a CUDA GPU on Linux, which prompt passes the GPU graph prefills and that a
-prompt is prefilled in one pass. The last two change the computation (GPU
-against CPU kernels, the pass shape) for speed; everything else keeps it
-bit-exact. The VRAM budget's behaviour stays as the engine has it.
+where the engine has a GPU expert tier, which prompt passes the GPU graph
+prefills and that a prompt is prefilled in one pass. The last two change the
+computation (GPU against CPU kernels, the pass shape) for speed; everything else
+keeps it bit-exact. The VRAM budget's behaviour stays as the engine has it.
+
+Which settings apply on a platform comes from the settings registry's scopes, so
+every platform runs this one derivation.
 """
 
 from __future__ import annotations
@@ -18,7 +21,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Optional, cast
 
-from inferssd.configuration.settings import PLATFORMS, Setting, Snapshot, parse, render, uncomment
+from inferssd.configuration.settings import (
+    PLATFORMS,
+    Setting,
+    Snapshot,
+    applies,
+    parse,
+    render,
+    schema,
+    uncomment,
+)
 from inferssd.launch.types import Threads
 from inferssd.machine.characteristics import GPU, Characteristics, ComputeRow, dumps
 from inferssd.strategy.inputs import ModelFacts, RuntimeFacts
@@ -89,6 +101,11 @@ def literal(item: Setting, platform: str) -> str:
     return body.partition("=")[2].strip(" \t\r\n")
 
 
+def offered(key: str, platform: str) -> bool:
+    """Whether the engine has the setting KEY on PLATFORM, by the registry's scope."""
+    return applies(schema()["properties"][key], platform)
+
+
 def engine_gpu_backends(
     known: Optional[Sequence[str]], characteristics: Optional[Characteristics]
 ) -> frozenset[str]:
@@ -129,9 +146,13 @@ def _unpinned(characteristics: Characteristics) -> list[ComputeRow]:
 
 
 def _measured_counts(
-    characteristics: Characteristics, model: ModelFacts, allowed: Sequence[int], notes: list[str]
+    characteristics: Characteristics,
+    model: ModelFacts,
+    allowed: Sequence[int],
+    notes: list[str],
+    measured_cap: Optional[int] = None,
 ) -> Threads:
-    """Without affinity: the measured thread counts that run the dominant format fastest.
+    """The measured unpinned thread counts that run the dominant format fastest.
 
     As where threads are pinned, each pool leaves a CPU to the sink's I/O thread.
     """
@@ -139,7 +160,7 @@ def _measured_counts(
     rows = [
         row
         for row in _unpinned(characteristics)
-        if row["format"].upper() == name and row["threads"] <= len(allowed)
+        if row["format"].upper() == name and row["threads"] <= (measured_cap or len(allowed))
     ]
     one = [
         (point["weight_Bps"], row["threads"])
@@ -212,6 +233,36 @@ def placement(
     slow = [cpu for cpu in allowed if cpu not in performance]
     count = min(MAX_THREADS, max(1, len(allowed) - 1))
     shape = f"{len(fast)} performance and {len(slow)} other" if fast and slow else "uniform"
+    if characteristics["identity"]["hard"]["platform"] == "windows" and allowed == sorted(logical):
+        rows = [
+            row
+            for row in _unpinned(characteristics)
+            if row["format"].upper() == model.dominant_format.upper() and row["threads"] <= count
+        ]
+        one = {row["threads"]: rate for row in rows for rate, _ in [_rates(row)] if rate}
+        if one and any(_rates(row)[1] for row in rows):
+            pools = _measured_counts(characteristics, model, allowed, [], measured_cap=count)
+            assert pools.decode is not None
+            why = f"{pools.decode} measured unpinned threads"
+            on_fast = (
+                pinned_rate(characteristics, model, fast)
+                if fast
+                and len(fast) <= count
+                and fast[-1] <= MAX_CPU
+                and fast == sorted(performance)
+                else None
+            )
+            if on_fast is not None and on_fast > one[pools.decode]:
+                why = (
+                    f"the performance cluster {span(fast)}, pinned ({on_fast / GB:.1f} against "
+                    f"{one[pools.decode] / GB:.1f} GB/s on {pools.decode} unpinned threads)"
+                )
+                pools = Threads(len(fast), pools.batch, (), tuple(fast))
+            reason = (
+                f"decode on {why}; prefill on {pools.batch} measured unpinned threads; no I/O CPU"
+            )
+            notes.append("threads: " + reason)
+            return pools, (), reason
     why = "one CPU cluster"
     if fast and slow:
         name = model.dominant_format.upper()
@@ -380,7 +431,8 @@ def drive_rate(
     looked up is a third of the mean expert read; the nearest measured size is
     taken on a log scale. The engine keeps up to IN_FLIGHT of those reads
     queued, so the rate is the best median between the size's knee and that
-    depth (or the reader's own cap).
+    depth (or the reader's own cap). When the knee is deeper than the cap,
+    use the best measured rate at a depth the reader can reach.
     """
     if key is None:
         return None, "the drive holding the model is not known"
@@ -391,10 +443,11 @@ def drive_rate(
     request = model.mean_expert_read_bytes / 3
     knee = min(entry["knee"], key=lambda row: (abs(math.log(row["bytes"] / request)), row["bytes"]))
     deepest = min(IN_FLIGHT, entry["qd_cap"] or IN_FLIGHT)
+    shallowest = knee["qd"] if knee["qd"] <= deepest else 1
     points = [
         row
         for row in entry["random_read"]
-        if row["bytes"] == knee["bytes"] and knee["qd"] <= row["qd"] <= deepest and row["Bps"] > 0
+        if row["bytes"] == knee["bytes"] and shallowest <= row["qd"] <= deepest and row["Bps"] > 0
     ]
     if not points:
         return None, f"no read rate of {size(knee['bytes'])} reads on {name} up to QD {deepest}"
@@ -403,9 +456,14 @@ def drive_rate(
     rate = best["Bps"] / GB
     if rate > COST_MAX:
         return None, f"a read rate of {rate} GB/s is beyond the cost term range"
+    selection = (
+        f"the best from its knee QD {knee['qd']} up to QD {deepest}"
+        if knee["qd"] <= deepest
+        else f"the best measured up to QD {deepest}, capped below its knee QD {knee['qd']}"
+    )
     return rate, (
         f"the drive {name} reads {rate:.2f} GB/s with {size(knee['bytes'])} reads at QD "
-        f"{best['qd']}, the best from its knee QD {knee['qd']} up to QD {deepest} "
+        f"{best['qd']}, {selection} "
         f"(a role read is {size(request)} on average)"
     )
 
@@ -643,7 +701,7 @@ def derive(
                 "prefill: one pass a prompt, -b and -ub as large as the context; a pass reads "
                 "every expert it routes to once"
             )
-    if platform in ("darwin", "windows") and runtime.memory_budget_bytes:
+    if offered("host.budget_mib", platform) and runtime.memory_budget_bytes:
         mib = runtime.memory_budget_bytes >> 20
         if mib:
             choices["host.budget_mib"] = (

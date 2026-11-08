@@ -302,9 +302,10 @@ class RuntimeFacts:
     cpus: tuple[int, ...]  # CPUs this process may run on
     gpus: Optional[tuple[GPUState, ...]]  # usable CUDA GPUs; None when they cannot be read
     # The launcher's view of the memory available now: MemAvailable within the
-    # room of every bounded cgroup (file cache counted as reclaimable), or on
-    # macOS the free, inactive and speculative pages. None when it cannot be
-    # read. The engine sizes its caches from its own reading at run time.
+    # room of every bounded cgroup (file cache counted as reclaimable), on
+    # macOS what an allocation takes before the kernel compresses anything, and
+    # on Windows the available physical memory. None when it cannot be read.
+    # The engine sizes its caches from its own reading at run time.
     available_bytes: Optional[int]
     memory_budget_bytes: Optional[int] = None  # the user's memory budget, when given
     # The GPU backends of the engine the launch starts, as its build names them; None when
@@ -513,13 +514,18 @@ def _available(host: Host, system: str) -> Optional[int]:
         except RuntimeError:
             return None
         return (max(0, free - target) + max(0, file - minimum) + purgeable + reusable) * page
+    if system == "windows":
+        try:
+            return host.windows().memory().available_bytes
+        except OSError:
+            return None
     return None
 
 
 def read_runtime(
     *, memory_budget_bytes: Optional[int] = None, host: Optional[Host] = None
 ) -> RuntimeFacts:
-    """Read this machine's runtime facts now (Linux and macOS)."""
+    """Read this machine's runtime facts now."""
     live: Host = host or NativeHost()
     system = live.platform()
     if system == "linux":
@@ -530,6 +536,10 @@ def read_runtime(
         # macOS has no affinity: every logical CPU is usable.
         cpus = cpu_list(f"0-{identity.sysctl_int(live, 'hw.logicalcpu') - 1}")
         gpus = ()
+    elif system == "windows":
+        # Group 0 logical processor indices, as the engine and its CPU masks number them.
+        cpus = live.windows().process_cpus()
+        gpus = _gpus(live)
     else:
         raise identity.UnsupportedPlatform(f"runtime facts are not read on {system} yet")
     return RuntimeFacts(tuple(cpus), gpus, _available(live, system), memory_budget_bytes)

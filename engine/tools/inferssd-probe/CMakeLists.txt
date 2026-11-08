@@ -4,11 +4,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(inferssd-ioreplay ioreplay.c)
     target_link_libraries(inferssd-ioreplay PRIVATE m)
     install(TARGETS inferssd-ioreplay RUNTIME)
-    if(GGML_CUDA)
-        add_executable(inferssd-memprobe memprobe.cu)
-        target_link_libraries(inferssd-memprobe PRIVATE CUDA::cudart)
-        install(TARGETS inferssd-memprobe RUNTIME)
-    endif()
+endif()
+
+# VRAM size and host-device transfer rates, on every OS with CUDA. CUDA is enabled in a
+# directory of its own: on Windows the CUDA platform module of CMake sets MSVC link flags
+# for the whole directory, which would break the clang links of the probes below.
+if(GGML_CUDA)
+    add_subdirectory(memprobe)
 endif()
 
 # Random-read bandwidth and latency through the engine's own read ring, on

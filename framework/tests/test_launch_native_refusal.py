@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import sys
 from functools import partial
 
 import pytest
@@ -50,6 +51,7 @@ def historical_engine(inputs, directory, port, observe, emit, platform="linux"):
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the Linux launcher's bash refusal")
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
 def test_native_refusal_matches_original_shell_boundary(case):
     old = observe(case)

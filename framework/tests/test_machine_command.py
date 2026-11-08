@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -144,7 +145,8 @@ def test_profile_does_not_look_for_probes_on_path(tmp_path, monkeypatch, environ
 
 
 def test_installed_resources_prefer_the_variable_over_the_current_release(tmp_path):
-    current = tmp_path / ".local/share/inferssd/current/engine-resources.json"
+    data = "AppData/Local/inferssd" if sys.platform == "win32" else ".local/share/inferssd"
+    current = tmp_path / data / "current/engine-resources.json"
     assert installed_resources({}, tmp_path) == current
     assert installed_resources({"INFERSSD_RESOURCES": ""}, tmp_path) == current
     assert installed_resources({"INFERSSD_RESOURCES": "/a.json"}, tmp_path) == Path("/a.json")

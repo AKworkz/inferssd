@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import resource
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,6 +13,13 @@ from inferssd.launch.live import Command, LiveArtifacts, NativeHost
 from inferssd.launch.resources import cmake_gpu_backends
 from inferssd.launch.types import Fact, LaunchInput
 from inferssd.platform import resources
+
+if sys.platform != "win32":
+    import resource
+
+posix = pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX resource envelopes: cgroup v2, rlimits, Darwin counters"
+)
 
 
 def linux_files(monkeypatch, budget):
@@ -38,6 +45,7 @@ def linux_files(monkeypatch, budget):
     return files
 
 
+@posix
 def test_linux_actual_budget_memlock_and_oom(tmp_path, monkeypatch):
     p = replace(policy(tmp_path, "linux"), minimum_memlock_bytes=4096)
     files = linux_files(monkeypatch, p.memory_budget_bytes)
@@ -50,6 +58,7 @@ def test_linux_actual_budget_memlock_and_oom(tmp_path, monkeypatch):
         runtime.sample(123)
 
 
+@posix
 @pytest.mark.parametrize(
     "file,value,error",
     [
@@ -71,11 +80,12 @@ def test_linux_negative_envelope(tmp_path, monkeypatch, file, value, error):
         runtime.sample(123)
 
 
+@posix
 @pytest.mark.parametrize(
-    "soft,minimum,accepted",
-    [(0, 4096, False), (4096, 4096, True), (resource.RLIM_INFINITY, 1 << 40, True)],
+    "soft,minimum,accepted", [(0, 4096, False), (4096, 4096, True), (None, 1 << 40, True)]
 )
 def test_memlock_finite_unlimited_insufficient(tmp_path, monkeypatch, soft, minimum, accepted):
+    soft = resource.RLIM_INFINITY if soft is None else soft
     p = replace(policy(tmp_path, "linux"), minimum_memlock_bytes=minimum)
     linux_files(monkeypatch, p.memory_budget_bytes)
     monkeypatch.setattr(resources.resource, "getrlimit", lambda _: (soft, resource.RLIM_INFINITY))
@@ -87,6 +97,7 @@ def test_memlock_finite_unlimited_insufficient(tmp_path, monkeypatch, soft, mini
             runtime.prepare()
 
 
+@posix
 def test_darwin_explicit_soft_budget_and_growth(tmp_path, monkeypatch):
     p = replace(policy(tmp_path), memory_budget_bytes=1 << 20, host_reserve_bytes=0)
     replies = {
@@ -171,6 +182,9 @@ class Host:
         return 1024
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="the Linux launcher's facts: /proc, nproc, stat -f"
+)
 def test_host_is_lazy_and_short_circuits_original_facts():
     host = Host()
     adapter = LiveArtifacts(

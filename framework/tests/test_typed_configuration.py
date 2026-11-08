@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,11 @@ from inferssd.telemetry.jsonl import effective_settings, read_events
 
 @pytest.fixture(scope="session")
 def native_contract(tmp_path_factory):
+    if sys.platform == "win32":
+        pytest.skip(
+            "compiled here with a POSIX c++ driver; the Windows engine build "
+            "runs it as ssd_settings_telemetry"
+        )
     root = Path(__file__).resolve().parents[2]
     binary = tmp_path_factory.mktemp("settings-native") / "contract"
     compiler = shutil.which("c++")

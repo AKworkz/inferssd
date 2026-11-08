@@ -50,7 +50,8 @@ Environment variables:
 | `QWEN_PREFILL_TOKENS` | Prefill length; the remaining tokens decode one at a time. |
 | `QWEN_WARMUP=1` | Decodes 24 tokens, then clears the model memory before the measured run. |
 | `QWEN_GPU_LAYERS` | Layers to offload (default 0). |
-| `QWEN_UBATCH` | Batch and ubatch size (default 64). |
+| `QWEN_UBATCH` | Microbatch size (default 64); the input batch capacity stays 64. |
+| `QWEN_LAST_LOGIT_ONLY=1` | Requests logits only for the last token of each input chunk. With chunk 48 and `QWEN_UBATCH=8`, intermediate prompt ubatches request no logits, as in a server prefill. |
 | `QWEN_ROUTE_AUDIT` | Path of a JSONL file that records each layer's selected experts and normalized weights. |
 
 Compile with `-DQWEN_INTERNAL -Isrc -lggml-base` to check model hparams, print

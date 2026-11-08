@@ -433,6 +433,18 @@ void llama_file::write_u32(uint32_t val) const { pimpl->write_u32(val); }
 // llama_mmap
 
 struct llama_mmap::impl {
+    static void align_range(size_t * first, size_t * last, size_t page_size) {
+        size_t offset_in_page = *first & (page_size - 1);
+        size_t offset_to_page = offset_in_page == 0 ? 0 : page_size - offset_in_page;
+        *first += offset_to_page;
+
+        *last = *last & ~(page_size - 1);
+
+        if (*last <= *first) {
+            *last = *first;
+        }
+    }
+
 #ifdef _POSIX_MAPPED_FILES
     std::vector<std::pair<size_t, size_t>> mapped_fragments;
     int fadvise_fd = -1;
@@ -476,18 +488,6 @@ struct llama_mmap::impl {
         }
 
         mapped_fragments.emplace_back(0, file->size());
-    }
-
-    static void align_range(size_t * first, size_t * last, size_t page_size) {
-        size_t offset_in_page = *first & (page_size - 1);
-        size_t offset_to_page = offset_in_page == 0 ? 0 : page_size - offset_in_page;
-        *first += offset_to_page;
-
-        *last = *last & ~(page_size - 1);
-
-        if (*last <= *first) {
-            *last = *first;
-        }
     }
 
     bool advise_random_fragment(size_t first, size_t last, size_t * len_out) {
@@ -659,10 +659,21 @@ struct llama_mmap::impl {
     }
 
     bool dontneed_fragment(size_t first, size_t last, size_t * len_out) {
-        GGML_UNUSED(first);
-        GGML_UNUSED(last);
+        SYSTEM_INFO system{};
+        GetSystemInfo(&system);
+        align_range(&first, &last, system.dwPageSize);
+        const size_t len = last - first;
         if (len_out) {
-            *len_out = 0;
+            *len_out = len;
+        }
+        if (len == 0) {
+            return true;
+        }
+        // Unlocking pages that are not locked removes them from the working set: a read-only view's pages go to
+        // the standby list, which counts as available memory, as madvise(MADV_DONTNEED) drops them on POSIX.
+        if (!VirtualUnlock((uint8_t *) addr + first, len) && GetLastError() != ERROR_NOT_LOCKED) {
+            LLAMA_LOG_WARN("warning: VirtualUnlock failed: %s\n", llama_format_win_err(GetLastError()).c_str());
+            return false;
         }
         return true;
     }

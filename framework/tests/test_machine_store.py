@@ -47,7 +47,7 @@ def test_default_locations(tmp_path):
 
 
 def test_default_location_follows_this_host(tmp_path):
-    system = "darwin" if sys.platform == "darwin" else "linux"
+    system = {"darwin": "darwin", "win32": "windows"}.get(sys.platform, "linux")
     assert default_path(environ={}, home=tmp_path) == default_path(system, {}, tmp_path)
 
 

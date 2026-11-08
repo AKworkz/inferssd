@@ -13,7 +13,7 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Optional, Protocol, TypedDict
+from typing import IO, Any, Optional, Protocol, TypedDict
 
 from .lease import LeaseServer
 from .process import Process
@@ -31,6 +31,31 @@ class GuardianEffects(Protocol):
     def file_identity(self, path: Path, hash_file: bool) -> Mapping[str, Any]: ...
 
 
+class Offer(Protocol):
+    """The guardian's side of the worker's lease, as LeaseServer provides it."""
+
+    @property
+    def path(self) -> str: ...
+    @property
+    def peer(self) -> Optional[Mapping[str, Any]]: ...
+
+    expected_pid: Optional[int]
+
+    def poll(self) -> None: ...
+    def close(self) -> None: ...
+
+
+class GuardianNative(Protocol):
+    """A platform's lease, worker start and stop signals, in place of the POSIX defaults."""
+
+    stop_signals: tuple[int, ...]
+
+    def lease(self, lock_fd: int) -> Any: ...
+    def spawn(
+        self, argv: list[str], environment: Mapping[str, str], log: IO[bytes], lease: Any
+    ) -> Process: ...
+
+
 def guard_worker(
     argv: Sequence[str],
     environment: Mapping[str, str],
@@ -43,12 +68,14 @@ def guard_worker(
     lease_unit: Optional[str] = None,
     interrupted: Optional[Callable[[], bool]] = None,
     request_stop: Optional[Callable[[int], None]] = None,
+    native: Optional[GuardianNative] = None,
 ) -> int:
     """Keep a second owner outside the worker's session until cleanup is proven.
 
     A killed controller disconnects the lease; the worker remains alive to clean
     its server/client groups. A killed worker leaves the controller holding the
     lease in quarantine. Never force-kill that cleanup guardian to meet a timeout.
+    Without native, the lease is a Unix socket and the worker starts in a session.
     """
     common = effects
     spawn_extras: _SpawnExtras = {"pass_fds": pass_fds} if pass_fds else {}
@@ -56,7 +83,12 @@ def guard_worker(
         Path(environment["INFERSSD_RUN_DIR"]),
         Path(environment["INFERSSD_WRAPPER_RECEIPT"]),
     )
-    lease = LeaseServer(lock_fd) if lease_unit is None else LeaseServer(lock_fd, lease_unit)
+    if native is not None:
+        lease: Offer = native.lease(lock_fd)
+    elif lease_unit is None:
+        lease = LeaseServer(lock_fd)
+    else:
+        lease = LeaseServer(lock_fd, lease_unit)
     identity = os.fstat(lock_fd)
     command = [
         *argv,
@@ -69,24 +101,31 @@ def guard_worker(
     ]
     common.save(out / "guardian-launch.json", {"argv": command})
     signals: list[int] = []
-    worker: Optional[subprocess.Popen[bytes]] = None
+    worker: Optional[Process] = None
     failure: Optional[str] = None
     asked_stop = False
     handlers = {
         s: signal.signal(s, lambda n, _f: signals.append(n))
-        for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        for s in (
+            (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+            if native is None
+            else native.stop_signals
+        )
     }
     deadline = None if deadline_s is None else time.monotonic() + deadline_s
     try:
         with (out / "guardian.log").open("xb") as log:
-            worker = subprocess.Popen(
-                command,
-                env=environment,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                **spawn_extras,
-            )
+            if native is None:
+                worker = subprocess.Popen(
+                    command,
+                    env=environment,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    **spawn_extras,
+                )
+            else:
+                worker = native.spawn(command, environment, log, lease)
         lease.expected_pid = worker.pid
         while worker.poll() is None:
             try:

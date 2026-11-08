@@ -7,7 +7,6 @@ both close their copies before the cooperating device lock can be released.
 from __future__ import annotations
 
 import array
-import fcntl
 import os
 import socket
 import struct
@@ -15,6 +14,9 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Optional, TypedDict
+
+if sys.platform != "win32":
+    import fcntl
 
 CORE_API_VERSION = 1
 

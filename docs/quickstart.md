@@ -3,10 +3,10 @@
 
 [Back to README](../README.md)
 
-Both platforms use the `main` branch of `wici-ai/inferssd`. Use the
+Every platform uses the `main` branch of `wici-ai/inferssd`. Use the
 [one-command installation](#one-command-installation), or build manually for
-**[Apple Silicon](#apple-silicon)** / **[Linux / NVIDIA](#linux--nvidia)** and
-[prepare a launch](#prepare-a-launch).
+**[Apple Silicon](#apple-silicon)** / **[Linux / NVIDIA](#linux--nvidia)** /
+**[Windows](#windows)** and [prepare a launch](#prepare-a-launch).
 
 ## Before you start
 
@@ -19,6 +19,12 @@ Both platforms use the `main` branch of `wici-ai/inferssd`. Use the
 
 ```sh
 curl -fsSL https://github.com/wici-ai/inferssd/releases/latest/download/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://github.com/wici-ai/inferssd/releases/latest/download/install.ps1 | iex
 ```
 
 A release's installer builds that release from source. The installer on `main`
@@ -36,7 +42,9 @@ the Xcode Command Line Tools must be installed. The engine is built for the mach
 needs `nvcc` on PATH, under `/usr/local/cuda`, or through `CUDACXX`; for an AMD or
 Intel GPU with Vulkan, when the Vulkan SDK's `glslc` is on PATH; and for the CPU
 alone otherwise.
-The [Linux runtime requirements](#linux-requirements) still apply.
+The [Linux runtime requirements](#linux-requirements) still apply. On Windows,
+see the [Windows requirements](#windows); there the installation root is
+`%LOCALAPPDATA%\inferssd` and the command is `inferssd.cmd` in its `bin` directory.
 
 CMake, Ninja, Hugging Face support and the framework are installed into a private
 virtual environment under `~/.local/share/inferssd/releases`. The installer
@@ -59,7 +67,7 @@ inferssd cli -hf mrfakename/DeepSeek-V4.1-Flash-1017-GGUF -p 'Explain MoE.' -n 2
 inferssd serve -m /path/on/ssd/model-00001-of-00010.gguf
 ```
 
-`-hf` accepts these two README repositories and their tested quantizations only;
+`-hf` accepts these repositories and their tested quantizations only;
 explicit `:Q8_0` and `:UD-Q4_K_XL` suffixes are accepted. It fetches repository
 metadata, pins the resolved commit, checks the complete shard set and disk space,
 then downloads just those GGUF files. It never downloads every quantization.
@@ -76,7 +84,8 @@ The source alias index references the GGUF payloads without an extra expert pack
 Both commands use the owned runtime, machine measurement, model profile
 selection and chat templates. They need no memory settings: the engine
 uses the memory it finds available and keeps its own margin for the host. The
-runtime enforces its Linux cgroup requirements.
+runtime enforces its Linux cgroup requirements; on Windows a job object holds the
+owned processes and their memory budget.
 
 Use `--context`, `--settings`, `--set`, `--machine` and `--reprofile` to override
 launch choices. `--resources` selects a manually built engine descriptor. The
@@ -132,6 +141,20 @@ A launch applies static typed settings on both platforms. Routed experts run on 
 ## Muse on Mac
 
 Use the same Metal build and point `-m` at the first Muse GGUF shard; the launch selects the `muse` profile from the GGUF's architecture. The deployment descriptor selects `engine/models/templates/muse-spark.jinja`, which replaces the chat template embedded in the GGUF. Keep the complete shard set and use a separate source index or matching pack for each checkpoint.
+
+## Windows
+
+Windows x64 needs Git, Python 3.9 or later, LLVM clang and the Visual Studio C++ build tools with a Windows SDK of 10.0.22000 or later, for the `IoRing` read path. With the [Vulkan SDK](https://vulkan.lunarg.com/) installed (`VULKAN_SDK` set) the engine can also use a GPU through Vulkan, an NVIDIA GPU included, and the installer builds it so when the machine has a GPU; without it the engine runs on the CPU. Windows runs the same `inferssd profile`, `inferssd cli` and `inferssd serve` as the other platforms.
+
+From a Visual Studio x64 developer prompt, with CMake and Ninja on PATH:
+
+```bat
+cmake --preset windows-llvm
+cmake --build build-windows-llvm --parallel 4 --target inferssd-server inferssd-cpuprobe inferssd-ssdprobe
+python scripts\engine-resources.py --build build-windows-llvm --output engine-resources.json
+```
+
+Add `-DGGML_VULKAN=ON` to the first command to build the Vulkan backend.
 
 ## Linux / NVIDIA
 

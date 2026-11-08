@@ -163,6 +163,11 @@ static void test_pin(const cpu_list & cpus) {
     }
     for (int cpu : { cpus.front(), cpus.back() }) {
         require(pin_current_thread({ cpu }), "pin the calling thread to CPU " + std::to_string(cpu));
+#if defined(_WIN32)
+        GROUP_AFFINITY hard = {};
+        require(GetThreadGroupAffinity(GetCurrentThread(), &hard) != 0 && hard.Group == 0 &&
+                hard.Mask == (KAFFINITY(1) << cpu), "a pin sets hard affinity even for a parked CPU");
+#endif
         require(runs_within({ cpu }), "the calling thread runs on CPU " + std::to_string(cpu));
         require(thread_cpus_now() == (affinity_supported() ? cpu_list{ cpu } : cpus),
                 "the calling thread reads its pin back as CPU " + std::to_string(cpu));

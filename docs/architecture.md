@@ -32,7 +32,9 @@ A GPU that shares host memory and has no CUDA tier takes the heavy experts of a 
 
 The sink's cost table chooses the experts, from the lines it measures while the pass runs, exactly as it does for the CUDA tier. The lane holds nothing across layers, so decode stays on the CPU, where one row per expert favours it, and the host budget is unchanged. A pass limited by the drive moves little: its compute is already hidden behind its reads.
 
-`vram.budget = 0` keeps every expert on the CPU. A pass whose working memory the host budget refuses stays on the CPU by itself. A CPU row and a lane row of one expert differ by about 1%, because the CPU quantizes its input and hidden rows to 8 bits and the lane multiplies floats, and the plan depends on measured times. So a reply can differ between two runs of one prompt where the lane is in use.
+The first successful graph containing a new weight-format pair, geometry, activation kind or exact expert row count stays out of the steady cost fit. Its execution time and expert/route counts remain in the request's measurements; later graphs of warmed shapes supply fit observations.
+
+`vram.budget = 0` keeps every expert on the CPU. A pass whose working memory the host budget refuses stays on the CPU by itself. The lane supplies F32 input tensors to ggml, but quantized weight kernels may quantize the input and hidden activations internally for integer dot products. CPU and lane rows can differ with the backend's precision, and the plan depends on measured times, so a reply can differ between runs where the lane is in use.
 
 ## Threads
 

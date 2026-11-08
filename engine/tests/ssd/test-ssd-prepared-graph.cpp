@@ -10,6 +10,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <vector>
 
@@ -31,12 +32,12 @@ struct separate_domain {
         type.iface.alloc_buffer = [](ggml_backend_buffer_type_t type, size_t size) -> ggml_backend_buffer_t {
             auto & domain = *static_cast<separate_domain *>(type->context);
             if (domain.fail_allocation) { return nullptr; }
-            void * data = nullptr;
-            if (posix_memalign(&data, 64, size ? size : 64)) { return nullptr; }
+            void * data = ::operator new(size ? size : 64, std::align_val_t(64), std::nothrow);
+            if (!data) { return nullptr; }
             ++domain.allocations;
             ggml_backend_buffer_i methods = {};
             methods.get_base = [](ggml_backend_buffer_t buffer) { return buffer->context; };
-            methods.free_buffer = [](ggml_backend_buffer_t buffer) { std::free(buffer->context); };
+            methods.free_buffer = [](ggml_backend_buffer_t buffer) { ::operator delete(buffer->context, std::align_val_t(64)); };
             methods.set_tensor = [](ggml_backend_buffer_t, ggml_tensor * tensor, const void * data, size_t offset, size_t bytes) {
                 std::memcpy(static_cast<char *>(tensor->data) + offset, data, bytes);
             };

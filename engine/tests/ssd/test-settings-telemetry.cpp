@@ -3,15 +3,20 @@
 #include "settings/settings.h"
 #include "telemetry/telemetry.h"
 
+#include <cassert>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <random>
+#include <thread>
+
+#ifndef _WIN32
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <cassert>
 #include <csignal>
-#include <fstream>
-#include <iostream>
-#include <thread>
+#endif
 
 int main(int argc, char ** argv) {
     if (argc == 3 && std::string(argv[1]) == "--events") {
@@ -135,9 +140,12 @@ int main(int argc, char ** argv) {
     const auto help_text = help();
     assert(help_text && help_text.value.find("--ssd-host-budget-mib") != std::string::npos);
 
-    char directory[] = "/tmp/ssdash-config-test-XXXXXX";
-    assert(mkdtemp(directory));
-    const std::string path = std::string(directory) + "/events.jsonl";
+    std::random_device    entropy;
+    std::filesystem::path directory;
+    do {
+        directory = std::filesystem::temp_directory_path() / ("ssdash-config-test-" + std::to_string(entropy()));
+    } while (!std::filesystem::create_directory(directory));
+    const std::string path = (directory / "events.jsonl").string();
     auto              sink = ssd::telemetry::writer::open(path);
     assert(sink);
     assert(!ssd::telemetry::writer::open(path));
@@ -162,15 +170,21 @@ int main(int argc, char ** argv) {
     }
     assert(sink.value->flush());
     sink.value.reset();
-    std::ifstream file(path);
-    std::string   line;
-    uint64_t      sequence = 0;
-    while (std::getline(file, line)) {
-        const auto node = ssd::json::parse(line);
-        assert(node.value.object.at("v").text == "1" && node.value.object.at("seq").text == std::to_string(sequence++));
+    uint64_t sequence = 0;
+    {
+        std::ifstream file(path);
+        std::string   line;
+        while (std::getline(file, line)) {
+            const auto node = ssd::json::parse(line);
+            assert(node.value.object.at("v").text == "1" &&
+                   node.value.object.at("seq").text == std::to_string(sequence++));
+        }
     }
     assert(sequence == 401);
-    const std::string failed_path = std::string(directory) + "/write-failure.jsonl";
+#ifndef _WIN32
+    // A write the OS refuses, from a file size limit (which Windows does not have), in a child process so the limit
+    // and the SIGXFSZ disposition stay there.
+    const std::string failed_path = (directory / "write-failure.jsonl").string();
     const pid_t       child       = fork();
     assert(child >= 0);
     if (!child) {
@@ -192,8 +206,7 @@ int main(int argc, char ** argv) {
     }
     int status = 0;
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
-    unlink(failed_path.c_str());
-    unlink(path.c_str());
-    rmdir(directory);
+#endif
+    std::filesystem::remove_all(directory);
     std::cout << "settings/telemetry contracts passed\n";
 }

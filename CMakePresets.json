@@ -146,6 +146,35 @@
             "GGML_CUDA_KIMI_VRAM_TIER": "ON",
             "LLAMA_SSD_STORE": "ON"
         }
+    },
+    {
+        "name": "windows-llvm",
+        "displayName": "InferSSD Windows x64 (LLVM clang)",
+        "inherits": [
+            "base",
+            "x64-windows-llvm",
+            "release"
+        ],
+        "cacheVariables": {
+            "GGML_NATIVE": "ON",
+            "GGML_OPENMP": "OFF",
+            "LLAMA_BUILD_SERVER": "ON",
+            "LLAMA_BUILD_TESTS": "ON",
+            "GGML_CUDA": "OFF",
+            "LLAMA_OPENSSL": "OFF",
+            "LLAMA_SSD_STORE": "ON"
+        }
+    },
+    {
+        "name": "windows-cuda",
+        "displayName": "InferSSD Windows x64 (LLVM clang, CUDA)",
+        "inherits": [
+            "windows-llvm"
+        ],
+        "cacheVariables": {
+            "GGML_CUDA": "ON",
+            "GGML_CUDA_KIMI_VRAM_TIER": "ON"
+        }
     }
   ]
 }

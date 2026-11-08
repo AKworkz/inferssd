@@ -11,9 +11,11 @@ import uuid
 from pathlib import Path
 
 from inferssd.app.hub import download, selection
+from inferssd.configuration.settings import host_platform
 from inferssd.launch import typed_command
 from inferssd.launch.resources import data_directory, installed_resources, read_resources
 from inferssd.platform.captured_command import run_captured
+from inferssd.platform.windows import win32
 
 
 def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -56,6 +58,8 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
 
 
 def physical_memory() -> int:
+    if sys.platform == "win32":
+        return win32.system_memory()["physical_total_bytes"]
     if sys.platform == "darwin":
         result = run_captured(["sysctl", "-n", "hw.memsize"], timeout=10)
         result.check_returncode()
@@ -69,7 +73,7 @@ def physical_memory() -> int:
 def default_policy(state: Path) -> dict[str, object]:
     """The whole machine: the engine uses what is available and keeps its own margin."""
     return {
-        "platform": sys.platform,
+        "platform": host_platform(),
         "lock_path": str(state / "runtime.lock"),
         "stop_path": str(state / "runtime.stop"),
         "memory_budget_bytes": physical_memory(),
@@ -82,8 +86,6 @@ def run(args: argparse.Namespace) -> int:
     from inferssd.app.chat import chat
     from inferssd.engine.command import run_native
 
-    if sys.platform not in ("linux", "darwin"):
-        raise ValueError("cli and serve currently support Linux CUDA and Apple Silicon macOS")
     if not 1 <= args.port <= 65535 or args.context < 1:
         raise ValueError("port must be 1..65535; context must be positive")
     if args.command == "cli" and args.max_tokens < 1:
@@ -92,9 +94,12 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError("choose --machine or --reprofile")
     resources = args.resources or installed_resources()
     if not resources.is_file():
-        raise ValueError("engine not installed; run scripts/install.sh or pass --resources FILE")
+        raise ValueError(
+            "engine not installed; run the installer (see docs/quickstart.md) "
+            "or pass --resources FILE"
+        )
     deployment = read_resources(resources)
-    if deployment.platform is not None and deployment.platform != sys.platform:
+    if deployment.platform is not None and deployment.platform != host_platform():
         raise ValueError("engine resources target a different platform")
     if not Path(deployment.binary).is_file() or not os.access(deployment.binary, os.X_OK):
         raise ValueError("engine server is missing or not executable; rerun the installer")
@@ -105,7 +110,7 @@ def run(args: argparse.Namespace) -> int:
     state.mkdir(parents=True, exist_ok=True)
     policy_path = state / ("policy-" + uuid.uuid4().hex + ".json")
     # Keep the policy alongside launch receipts for reproducibility.
-    policy_path.write_text(json.dumps(default_policy(state), indent=2) + "\n")
+    policy_path.write_text(json.dumps(default_policy(state), indent=2) + "\n", encoding="utf-8")
     if args.hf_repo:
         selection(args.hf_repo)
         model = download(args.hf_repo, args.revision, args.model_dir.expanduser().resolve())

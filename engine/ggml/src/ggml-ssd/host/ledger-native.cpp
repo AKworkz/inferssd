@@ -8,6 +8,11 @@
 #endif
 #include <windows.h>
 #include <psapi.h>
+#include <winternl.h>
+
+#include <algorithm>
+#include <string>
+#include <vector>
 #elif defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/vm_page_size.h>
@@ -20,7 +25,108 @@ namespace ssd { namespace host { namespace native {
 
 #if defined(_WIN32)
 
-bool process_use(uint64_t & bytes) {
+namespace {
+
+template<class F> bool resolve(HMODULE module, const char * name, F & function) {
+    // Through void (*)(), the generic function pointer type, as GetProcAddress results are meant to be cast.
+    function = reinterpret_cast<F>(reinterpret_cast<void (*)()>(GetProcAddress(module, name)));
+    return function != nullptr;
+}
+
+// D3DKMT as gdi32 exports it and the WDK's d3dkmthk.h declares it; DXGI's QueryVideoMemoryInfo calls it.
+using kmt_handle = UINT;
+struct kmt_adapter_info { kmt_handle adapter; LUID luid; ULONG sources; BOOL precise_present_regions; };
+struct kmt_enum_adapters2 { ULONG count; kmt_adapter_info * adapters; };
+struct kmt_close_adapter { kmt_handle adapter; };
+enum kmt_segment_group : int { kmt_local = 0, kmt_non_local = 1 };
+struct kmt_video_memory_info {
+    HANDLE process; // null: this process
+    kmt_handle adapter;
+    kmt_segment_group group;
+    UINT64 budget, current_usage, current_reservation, available_for_reservation;
+    UINT physical_adapter;
+};
+
+// The adapters whose local segments are not host memory: those that also have a non-local segment group, the
+// system memory a discrete GPU maps. A unified (integrated) adapter has the local group only, and its segments
+// are host memory. Opened once and kept open; an adapter added later is not seen.
+struct discrete_adapters {
+    LONG (APIENTRY * query)(kmt_video_memory_info *) = nullptr;
+    std::vector<kmt_handle> handles;
+    discrete_adapters() {
+        LONG (APIENTRY * enumerate)(kmt_enum_adapters2 *) = nullptr;
+        LONG (APIENTRY * close)(const kmt_close_adapter *) = nullptr;
+        const HMODULE gdi = LoadLibraryW(L"gdi32.dll");
+        if (!gdi || !resolve(gdi, "D3DKMTEnumAdapters2", enumerate) || !resolve(gdi, "D3DKMTCloseAdapter", close) ||
+                !resolve(gdi, "D3DKMTQueryVideoMemoryInfo", query)) {
+            query = nullptr;
+            return;
+        }
+        kmt_enum_adapters2 list{};
+        if (enumerate(&list) != 0) { return; }
+        std::vector<kmt_adapter_info> found(list.count);
+        list.adapters = found.data();
+        if (enumerate(&list) != 0) { return; }
+        found.resize(list.count);
+        for (const kmt_adapter_info & adapter : found) {
+            kmt_video_memory_info non_local{};
+            non_local.adapter = adapter.adapter;
+            non_local.group = kmt_non_local;
+            if (query(&non_local) == 0 && non_local.budget > 0) {
+                handles.push_back(adapter.adapter);
+                continue;
+            }
+            const kmt_close_adapter closing{adapter.adapter};
+            (void) close(&closing);
+        }
+    }
+};
+const discrete_adapters & discrete() {
+    static const discrete_adapters adapters;
+    return adapters;
+}
+
+// What the paging files may still grow by, each up to its maximum size and its volume's free space: a
+// system-managed paging file starts small, and the commit limit grows with it on demand.
+uint64_t paging_growth() {
+    using query_fn = LONG (NTAPI *)(ULONG, PVOID, ULONG, PULONG);
+    static const query_fn query = [] {
+        query_fn function = nullptr;
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        return ntdll && resolve(ntdll, "NtQuerySystemInformation", function) ? function : nullptr;
+    }();
+    if (!query) { return 0; }
+    // SYSTEM_PAGEFILE_INFORMATION_EX (class 144): SYSTEM_PAGEFILE_INFORMATION, then the minimum and maximum
+    // sizes. Sizes are in pages.
+    struct entry { ULONG next, total, in_use, peak; UNICODE_STRING name; ULONG minimum, maximum; };
+    alignas(entry) unsigned char buffer[4096];
+    ULONG length = 0;
+    if (query(144, buffer, ULONG(sizeof(buffer)), &length) != 0 || length < sizeof(entry)) { return 0; }
+    SYSTEM_INFO system{};
+    GetSystemInfo(&system);
+    uint64_t growth = 0;
+    for (size_t at = 0; at + sizeof(entry) <= length;) {
+        const entry & e = *reinterpret_cast<const entry *>(buffer + at);
+        uint64_t more = e.maximum > e.total ? uint64_t(e.maximum - e.total) * system.dwPageSize : 0;
+        // The name is an NT path such as \??\C:\pagefile.sys; that volume's free space bounds the growth.
+        const std::wstring name(e.name.Buffer ? e.name.Buffer : L"", e.name.Length / sizeof(wchar_t));
+        if (more && name.size() > 6 && name.compare(0, 4, L"\\??\\") == 0 && name[5] == L':') {
+            const std::wstring root = name.substr(4, 2) + L"\\";
+            ULARGE_INTEGER space{};
+            if (GetDiskFreeSpaceExW(root.c_str(), &space, nullptr, nullptr)) {
+                more = std::min<uint64_t>(more, uint64_t(space.QuadPart));
+            }
+        }
+        growth += more;
+        if (!e.next) { break; }
+        at += e.next;
+    }
+    return growth;
+}
+
+} // namespace
+
+bool commit_use(uint64_t & bytes) {
     PROCESS_MEMORY_COUNTERS_EX counters{};
     counters.cb = sizeof(counters);
     if (!GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&counters),
@@ -31,12 +137,33 @@ bool process_use(uint64_t & bytes) {
     return true;
 }
 
+bool device_commit(uint64_t & bytes) {
+    const discrete_adapters & adapters = discrete();
+    bytes = 0;
+    for (const kmt_handle adapter : adapters.handles) {
+        kmt_video_memory_info local{};
+        local.adapter = adapter;
+        local.group = kmt_local;
+        if (adapters.query(&local) != 0) { return false; }
+        bytes += local.current_usage;
+    }
+    return true;
+}
+
+bool process_use(uint64_t & bytes) {
+    uint64_t commit = 0, device = 0;
+    if (!commit_use(commit) || !device_commit(device)) { return false; }
+    bytes = commit > device ? commit - device : 0;
+    return true;
+}
+
 bool available(uint64_t & bytes) {
     MEMORYSTATUSEX status{};
     status.dwLength = sizeof(status);
     if (!GlobalMemoryStatusEx(&status)) { return false; }
-    // Physical memory alone overstates room when the commit limit binds first.
-    bytes = std::min<uint64_t>(status.ullAvailPhys, status.ullAvailPageFile);
+    // Commit is a hard limit, so room is the smaller of the physical memory available and the commit a new
+    // allocation can still get: what is free under the commit limit now plus what the paging files may grow by.
+    bytes = std::min<uint64_t>(status.ullAvailPhys, status.ullAvailPageFile + paging_growth());
     return true;
 }
 
@@ -58,9 +185,10 @@ bool job_limits(envelopes & out) {
         return false;
     }
     const DWORD flags = limits.BasicLimitInformation.LimitFlags;
+    // The kernel holds both limits against commit, the device memory WDDM charges included.
     if (flags & JOB_OBJECT_LIMIT_PROCESS_MEMORY) {
         uint64_t used = 0;
-        if (!process_use(used)) { return false; }
+        if (!commit_use(used)) { return false; }
         out.push({"job process", uint64_t(limits.ProcessMemoryLimit), used});
     }
     if (flags & JOB_OBJECT_LIMIT_JOB_MEMORY) {

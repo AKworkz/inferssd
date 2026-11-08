@@ -2,14 +2,18 @@
 #include "ssd/telemetry.h"
 
 #include <cassert>
-#include <csignal>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <new>
+#include <random>
+#ifndef _WIN32
+#include <csignal>
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 static bool fail_next_allocation = false;
 void * operator new(std::size_t size) {
@@ -26,10 +30,13 @@ static std::string read(const std::string & path) {
 }
 
 int main() {
-    char directory[] = "/tmp/ssdash-context-telemetry-XXXXXX";
-    assert(mkdtemp(directory));
-    const std::string first = std::string(directory) + "/first.jsonl";
-    const std::string second = std::string(directory) + "/second.jsonl";
+    std::random_device entropy;
+    std::filesystem::path directory;
+    do {
+        directory = std::filesystem::temp_directory_path() / ("ssdash-context-telemetry-" + std::to_string(entropy()));
+    } while (!std::filesystem::create_directory(directory));
+    const std::string first = (directory / "first.jsonl").string();
+    const std::string second = (directory / "second.jsonl").string();
     auto a = ssd::telemetry::writer::open(first);
     auto b = ssd::telemetry::writer::open(second);
     assert(a && b);
@@ -78,9 +85,11 @@ int main() {
     assert(!allocation.graph(true, 1, 0, 0));
     assert(right.good());
 
+#ifndef _WIN32
     // The failure is caused by a real FILE flush, in a separate process so the
     // resource limit and SIGXFSZ disposition cannot affect another test/context.
-    const std::string failed_path = std::string(directory) + "/failed.jsonl";
+    // Windows has no file size limit to cause it.
+    const std::string failed_path = (directory / "failed.jsonl").string();
     const pid_t child = fork();
     assert(child >= 0);
     if (child == 0) {
@@ -96,6 +105,7 @@ int main() {
     }
     int status;
     assert(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+#endif
     a.value.reset(); b.value.reset();
-    unlink(first.c_str()); unlink(second.c_str()); unlink(failed_path.c_str()); rmdir(directory);
+    std::filesystem::remove_all(directory);
 }

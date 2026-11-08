@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,7 @@ def test_linux_expected_cases_and_partial_outputs():
     assert fresh[0]["artifacts"] == fresh[1]["artifacts"] == fresh[2]["artifacts"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the macOS launcher")
 @pytest.mark.parametrize("case", MAC_CASES, ids=lambda case: case["name"])
 def test_original_mac_launcher_observation(case):
     golden = json.loads((FIXTURES / "launch-mac-goldens.json").read_text())

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import ast
+import os
 import stat
+import sys
 from pathlib import Path
 
 import pytest
@@ -37,6 +39,9 @@ echo "Pages inactive:                            50."
 echo "Pages occupied by compressor:              10."
 """
 REPORT_LOCALE = '#!/bin/sh\necho "$LC_ALL"\n'
+# The same report from a tool that runs on every platform.
+PRINT_LOCALE = [sys.executable, "-c", "import os; print(os.environ.get('LC_ALL', ''))"]
+posix_tools = pytest.mark.skipif(sys.platform == "win32", reason="macOS sysctl, vm_stat; systemctl")
 
 
 def install(directory: Path, name: str, body: str) -> None:
@@ -47,13 +52,14 @@ def install(directory: Path, name: str, body: str) -> None:
 
 @pytest.fixture
 def german(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin:/bin")
+    monkeypatch.setenv("PATH", os.pathsep.join((str(tmp_path), "/usr/bin", "/bin")))
     monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
     monkeypatch.setenv("LC_NUMERIC", "de_DE.UTF-8")
     monkeypatch.setenv("LANG", "de_DE.UTF-8")
     return tmp_path
 
 
+@posix_tools
 def test_darwin_memory_counters_read_swap_under_a_decimal_comma_locale(german: Path) -> None:
     install(german, "sysctl", SYSCTL)
     install(german, "vm_stat", VM_STAT)
@@ -77,23 +83,24 @@ def test_darwin_memory_counters_read_swap_under_a_decimal_comma_locale(german: P
 @pytest.mark.parametrize(
     "report",
     [
-        lambda: run_captured(["probe-locale"], timeout=10).stdout,
-        lambda: IdentityHost().command(["probe-locale"]).stdout,
-        lambda: NativeHost().command(["probe-locale"]).stdout,
-        lambda: resources.command(["probe-locale"]),
+        lambda: run_captured(PRINT_LOCALE, timeout=10).stdout,
+        lambda: IdentityHost().command(PRINT_LOCALE).stdout,
+        lambda: NativeHost().command(PRINT_LOCALE).stdout,
+        lambda: resources.command(PRINT_LOCALE),
     ],
     ids=["helper", "machine-identity", "launch", "resources"],
 )
 def test_every_command_host_runs_tools_in_the_c_locale(german: Path, report) -> None:
-    install(german, "probe-locale", REPORT_LOCALE)
     assert report().strip() == "C"
 
 
+@posix_tools
 def test_systemctl_runs_in_the_c_locale(german: Path) -> None:
     install(german, "systemctl", REPORT_LOCALE)
     assert worker.systemctl("unit.scope", True, "show").stdout.strip() == "C"
 
 
+@posix_tools
 def test_physical_memory_reads_sysctl_through_the_runner(
     german: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -106,19 +113,17 @@ def test_run_captured_keeps_the_rest_of_the_environment(
     german: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("INFERSSD_TEST_VALUE", "kept")
-    install(german, "probe-environment", '#!/bin/sh\necho "$INFERSSD_TEST_VALUE"\n')
-    assert run_captured(["probe-environment"], timeout=10).stdout.strip() == "kept"
+    report = [sys.executable, "-c", "import os; print(os.environ['INFERSSD_TEST_VALUE'])"]
+    assert run_captured(report, timeout=10).stdout.strip() == "kept"
 
 
 def test_run_captured_replaces_bytes_that_are_not_utf8(german: Path) -> None:
-    install(german, "probe-bytes", "#!/bin/sh\nprintf 'caf\\351'\n")
-    assert run_captured(["probe-bytes"], timeout=10).stdout == "caf\ufffd"
+    write = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'caf\\xe9')"]
+    assert run_captured(write, timeout=10).stdout == "caf\ufffd"
 
 
 def test_probe_runner_uses_the_c_locale_in_its_given_environment(german: Path) -> None:
-    install(german, "probe-locale", REPORT_LOCALE)
-    environment = {"PATH": f"{german}:/usr/bin:/bin", "LC_ALL": "de_DE.UTF-8"}
-    assert run_process(["probe-locale"], 10, environment).stdout.strip() == "C"
+    assert run_process(PRINT_LOCALE, 10, {"LC_ALL": "de_DE.UTF-8"}).stdout.strip() == "C"
 
 
 def captures_output(call: ast.Call) -> bool:
@@ -140,7 +145,7 @@ def captures_output(call: ast.Call) -> bool:
 def test_every_captured_command_goes_through_the_runner() -> None:
     package = Path(inferssd.__file__).parent
     capturing = {
-        str(path.relative_to(package))
+        path.relative_to(package).as_posix()
         for path in package.rglob("*.py")
         for node in ast.walk(ast.parse(path.read_text()))
         if isinstance(node, ast.Call) and captures_output(node)

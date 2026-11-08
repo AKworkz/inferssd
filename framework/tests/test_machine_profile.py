@@ -8,6 +8,7 @@ import json
 import os
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -436,6 +437,7 @@ def test_smt_siblings_and_cores(tmp_path):
     ]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a fake macOS machine: POSIX paths")
 def test_darwin_profile_end_to_end(tmp_path):
     models = tmp_path / "models"
     files = shards(models, [2 * GIB])

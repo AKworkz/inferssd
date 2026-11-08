@@ -33,7 +33,7 @@ class LocalFiles:
     @overload
     def open(self, path: str, mode: Literal["r", "w"] = "r") -> TextIO: ...
     def open(self, path: str, mode: str = "r") -> Any:
-        return open(path, mode)
+        return open(path, mode, encoding=None if "b" in mode else "utf-8")
 
     def map_read(self, fd: int, length: int, *, access: int) -> mmap.mmap:
         return mmap.mmap(fd, length, access=access)

@@ -2,3 +2,11 @@
 # Git's pack-file delta compression still works (byte-level), but this prevents
 # git diff from printing the entire minified file on every change.
 engine/tools/server/public/index.html -diff
+
+# Reference receipts hash these files byte for byte, including their LF endings.
+framework/tests/fixtures/** text eol=lf
+framework/tests/observe_*reference.py text eol=lf
+framework/tests/launch_numeric_cases.py text eol=lf
+
+# Benchmark prompt digests also bind the original LF bytes.
+bench/prompts/*.txt text eol=lf

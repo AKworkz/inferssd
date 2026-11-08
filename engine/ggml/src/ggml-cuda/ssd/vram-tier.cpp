@@ -28,9 +28,6 @@ extern "C" const ssd::gpu::transport_v1 * ggml_backend_cuda_ssd_transport_v1();
 #include <mutex>
 #include <thread>
 #include <string>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <map>
 #include <set>
 

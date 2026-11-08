@@ -3837,7 +3837,8 @@ static bool same_bits(const std::vector<float> & a, const std::vector<float> & b
 // SiLU-gated experts as qwen4exp routes them (separate up/gate/down, softmax top-10, sum-normalized weights)
 // through sink nodes on a ggml threadpool of 1, 2, an odd count and all CPUs, against reference_swiglu_graph,
 // compared with memcmp: two chained decode layers with a dense op between, and grouped prefills. Shapes: the model's
-// (Q8_0, 2560 -> 640 -> 2560, 512 experts, of which the fixture holds 12), a narrow Q8_0 one for prefills of 2 to
+// (Q8_0 or mixed IQ1_S/IQ4_NL, 2560 -> 640 -> 2560, 512 experts, of which the fixture holds 12),
+// a narrow Q8_0 one for prefills of 2 to
 // 2048 tokens, and a BF16 one whose hidden width of 70 leaves a scalar tail at every fixed vector width.
 static void swiglu_tests(fixture_inputs & inputs, int depth) {
     const kimi_cpu_sink_activation swiglu = { KIMI_CPU_SINK_ACTIVATION_SWIGLU, 0.0f, 0.0f, 0.0f, nullptr, 0.0f };
@@ -3847,15 +3848,16 @@ static void swiglu_tests(fixture_inputs & inputs, int depth) {
     constexpr int nslots = 10;
     struct shape {
         const char * name;
-        ggml_type type;
+        ggml_type type, down_type;
         int latent, hidden, experts;
         std::vector<int32_t> stored;
         std::vector<int> prefill_tokens;
     };
     const std::vector<shape> shapes = {
-        { "q8_0_model", GGML_TYPE_Q8_0, 2560, 640, 512, { 0, 7, 64, 129, 200, 255, 256, 333, 400, 450, 501, 511 }, { 2, 65 } },
-        { "q8_0_narrow", GGML_TYPE_Q8_0, 256, 96, 48, {}, { 2, 64, 65, 300, 2048 } },
-        { "bf16_tail", GGML_TYPE_BF16, 64, 70, 24, {}, { 2, 65, 300 } },
+        { "q8_0_model", GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 2560, 640, 512, { 0, 7, 64, 129, 200, 255, 256, 333, 400, 450, 501, 511 }, { 2, 65 } },
+        { "iq1_s_iq4_nl_model", GGML_TYPE_IQ1_S, GGML_TYPE_IQ4_NL, 2560, 640, 512, { 0, 7, 64, 129, 200, 255, 256, 333, 400, 450, 501, 511 }, { 2, 65 } },
+        { "q8_0_narrow", GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 256, 96, 48, {}, { 2, 64, 65, 300, 2048 } },
+        { "bf16_tail", GGML_TYPE_BF16, GGML_TYPE_BF16, 64, 70, 24, {}, { 2, 65, 300 } },
     };
     std::mt19937 rng(20261028);
     std::normal_distribution<float> sample(0.0f, 0.3f);
@@ -3874,7 +3876,7 @@ static void swiglu_tests(fixture_inputs & inputs, int depth) {
     };
     for (const auto & s : shapes) {
         fixture f;
-        f.type = f.down_type = s.type; f.latent = s.latent; f.hidden = s.hidden; f.experts = s.experts; f.stored = s.stored;
+        f.type = s.type; f.down_type = s.down_type; f.latent = s.latent; f.hidden = s.hidden; f.experts = s.experts; f.stored = s.stored;
         make_synthetic(f, 20261028);
         tensors meta1(f, 1), meta2(f, 2);
         std::vector<float> x(f.latent);

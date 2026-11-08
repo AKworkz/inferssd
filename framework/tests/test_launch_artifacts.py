@@ -2,6 +2,7 @@
 
 import hashlib
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ def forbidden(*args, **kwargs):
     raise AssertionError("No subprocess or engine is allowed in this test")
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the Linux launcher's POSIX paths")
 @pytest.mark.parametrize("record", GOLDENS, ids=lambda r: r["case"]["name"])
 def test_typed_artifact_chain(record, tmp_path):
     base = tmp_path.resolve()

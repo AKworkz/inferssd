@@ -583,8 +583,7 @@ size_t device_bytes(void * context) { return context ? static_cast<group_engine 
 size_t host_bytes(void * context) { return context ? static_cast<group_engine *>(context)->host_bytes() : 0; }
 } // namespace
 
-extern "C" __attribute__((visibility("default")))
-const vram_group_compute_api * kimi_vram_group_compute_get_api() {
+extern "C" const vram_group_compute_api * kimi_vram_group_compute_get_api() {
     static const vram_group_compute_api api = {
         3, sizeof(vram_group_compute_api), create, destroy, reserve, release, input_rows, begin_layer, compute,
         finish_layer, geometry, device_bytes, host_bytes

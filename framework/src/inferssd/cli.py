@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import sys
 from collections.abc import Sequence
@@ -15,7 +16,16 @@ from inferssd.machine.command import run as run_profile
 from inferssd.version import line, report
 
 
+def utf8_output() -> None:
+    """Write UTF-8 on Windows too, where the console code page may be a legacy one (GBK)."""
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            if isinstance(stream, io.TextIOWrapper):
+                stream.reconfigure(encoding="utf-8")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    utf8_output()
     arguments = list(sys.argv[1:] if argv is None else argv)
     # The version, before any command: a line for people, or with --json every field for the app.
     if arguments and arguments[0] == "--version" and set(arguments[1:]) <= {"--json"}:

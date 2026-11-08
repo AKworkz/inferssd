@@ -1,6 +1,9 @@
 """Typed preparation/ownership contracts; synthetic metadata is not GPU evidence."""
 
 import json
+import os
+import re
+import sys
 from dataclasses import asdict, replace
 from functools import partial
 from pathlib import Path
@@ -44,13 +47,13 @@ def setup(tmp_path, platform="linux", automatic=False):
     settings.write_text(text)
     spec = LaunchSpec(str(model), 8080, str(settings), (("prefetch.depth", "2"),), str(binary))
     host = {
-        "platform_system": "Linux" if platform == "linux" else "Darwin",
+        "platform_system": {"linux": "Linux", "darwin": "Darwin", "windows": "Windows"}[platform],
         "platform_machine": "arm64",
         "euid": 0,
         "cgroup_v2": True,
         "gpu_available": True,
         "gpu_processes": "",
-        "engine_gpu_backends": ["CUDA"] if platform == "linux" else ["Metal"],
+        "engine_gpu_backends": ["Metal"] if platform == "darwin" else ["CUDA"],
     }
     inputs = LaunchInput(str(root), (("PATH", "/bin"), ("PRIVATE_TOKEN", "never-persist")))
     out = tmp_path / "run"
@@ -66,6 +69,14 @@ def setup(tmp_path, platform="linux", automatic=False):
         inputs, host, run=indexer, replace=lambda a, b: Path(a).replace(b), python="metadata-python"
     )
     return inputs, spec, host, adapter, out, seen
+
+
+def session(variables, home):
+    """VARIABLES as this process's whole environment, for a user whose home is HOME.
+
+    POSIX finds the home directory without the environment; Windows reads USERPROFILE.
+    """
+    return {**dict(variables), "USERPROFILE": str(home)}
 
 
 def resolve(inputs, spec, adapter, out, platform="linux", configured=None):
@@ -136,7 +147,9 @@ def test_repo_adapter_prefers_preset_build_directories(tmp_path, platform, prese
 )
 def test_repo_adapter_reports_the_preset_build_when_none_exists(tmp_path, platform, first):
     inputs, spec, _, adapter, out, _ = setup(tmp_path, platform)
-    missing = "missing server executable: .*/" + first + "/bin/inferssd-server"
+    missing = "missing server executable: .*" + re.escape(
+        os.sep + os.path.join(first, "bin", "inferssd-server")
+    )
     with pytest.raises(ValueError, match=missing):
         resolve(inputs, replace(spec, binary=None), adapter, out, platform)
 
@@ -268,7 +281,7 @@ def test_typed_command_prepares_native_file_without_executing_or_recording_secre
     facts = tmp_path / "facts.json"
     facts.write_text(json.dumps(host))
     receipt = tmp_path / "resolution.json"
-    monkeypatch.setattr("os.environ", dict(inputs.environment))
+    monkeypatch.setattr("os.environ", session(inputs.environment, tmp_path))
     assert (
         main(
             [
@@ -322,7 +335,7 @@ def test_omitted_output_directory_creates_a_new_run_directory(tmp_path, monkeypa
     work = tmp_path / "work"
     work.mkdir()
     monkeypatch.chdir(work)
-    monkeypatch.setattr("os.environ", dict(inputs.environment))
+    monkeypatch.setattr("os.environ", session(inputs.environment, tmp_path))
     command = [
         "--dry-run",
         "--platform",
@@ -434,14 +447,16 @@ def test_decode_cpus_pin_only_the_decode_pool(tmp_path):
 
 
 def test_prompt_cache_on_disk_per_model(tmp_path):
-    inputs, spec, _, adapter, out, _ = setup(tmp_path)
-    result = resolve(inputs, spec, adapter, out)
+    # The cache is named from the model's path, which follows this host's conventions.
+    platform = "windows" if sys.platform == "win32" else "linux"
+    inputs, spec, _, adapter, out, _ = setup(tmp_path, platform)
+    result = resolve(inputs, spec, adapter, out, platform)
     assert result.argv[result.argv.index("--cache-ram") + 1] == "0"
     assert "--cache-disk" not in result.argv
     second = tmp_path / "second"
     second.mkdir()
     cache = str(tmp_path / "prompts")
-    result = resolve(inputs, replace(spec, prompt_cache=cache), adapter, second)
+    result = resolve(inputs, replace(spec, prompt_cache=cache), adapter, second, platform)
     argv = list(result.argv)
     assert argv[argv.index("--cache-disk") + 1] == str(Path(cache) / "model")
     assert argv[argv.index("--cache-disk-mib") + 1] == "16384" and "--cache-ram" not in argv

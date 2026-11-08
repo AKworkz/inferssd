@@ -43,7 +43,7 @@ class NativeEffects:
         self.reservation = reserve(path)
 
     def open_log(self, path: str) -> TextIO:
-        return open(path, "x")
+        return open(path, "x", encoding="utf-8")
 
     def clock(self) -> float:
         return time.time()

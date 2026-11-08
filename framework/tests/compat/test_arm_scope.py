@@ -2,8 +2,12 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
+
+import pytest
 
 ARM = Path(__file__).resolve().parents[1] / "fixtures/adaptive/arm.sh"
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="arm.sh: bash, ss and systemd scopes")
 
 
 def test_busy_port_never_launches_or_signals(tmp_path):

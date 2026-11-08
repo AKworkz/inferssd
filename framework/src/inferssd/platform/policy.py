@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Optional, cast
@@ -66,3 +67,13 @@ class Policy:
             runtime_seconds=cast(Optional[int], data.get("runtime_seconds")),
             cleanup_seconds=cast(int, data["cleanup_seconds"]),
         )
+
+
+def lock_held(path: str) -> BlockingIOError:
+    """The refusal of a launch whose device lock another owner holds."""
+    return BlockingIOError(
+        errno.EWOULDBLOCK,
+        f"the device lock {path} is held by another owned launch, or by one whose cleanup is "
+        "not confirmed yet; its run directory's guardian-quarantine.json or "
+        "worker-quarantine.json says why",
+    )

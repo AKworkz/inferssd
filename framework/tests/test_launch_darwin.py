@@ -3,6 +3,7 @@
 import copy
 import json
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from observe_launch_candidate import mac_candidate
 from observe_launch_reference import mac_case
 
 GOLDENS = json.loads((Path(__file__).parent / "fixtures/launch-mac-goldens.json").read_text())
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the macOS launch path")
 
 
 def original_cache_namespace(value):

@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import socket
-import stat
 import subprocess
 import sys
 import uuid
@@ -15,8 +13,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 from inferssd.launch.types import Resolution
+from inferssd.platform.host import (
+    Resources,
+    acquire_lock,
+    borrow_lock,
+    descriptor,
+    link,
+    spawn_detached,
+)
 from inferssd.platform.policy import Policy
-from inferssd.platform.resources import Resources
 from inferssd.platform.run_directory import Reservation
 from inferssd.platform.worker import cleanup_confirmed, save
 
@@ -25,9 +30,13 @@ SERVER_LOG_TAIL_BYTES = 64 * 1024
 
 
 def scope_command(resolution: Resolution, policy: Policy) -> tuple[list[str], Optional[str]]:
-    if policy.platform == "darwin":
+    if policy.platform in ("darwin", "windows"):
+        # The Windows guardian creates the job object that is the scope.
         if resolution.scope:
-            raise ValueError("Darwin launch must not carry a Linux scope")
+            raise ValueError(
+                {"darwin": "Darwin", "windows": "Windows"}[policy.platform]
+                + " launch must not carry a Linux scope"
+            )
         return [], None
     prefix = list(resolution.scope)
     if prefix[:2] not in (["systemd-run", "--scope"], ["systemd-run", "--user"]):
@@ -118,23 +127,15 @@ class OwnedProcess:
         child_end: Optional[socket.socket] = None
         try:
             if inherited_lock_fd is None:
-                self._lock = os.open(policy.lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+                self._lock = acquire_lock(policy.lock_path)
             else:
-                actual, expected = os.fstat(inherited_lock_fd), os.stat(policy.lock_path)
-                if not stat.S_ISREG(actual.st_mode) or (actual.st_dev, actual.st_ino) != (
-                    expected.st_dev,
-                    expected.st_ino,
-                ):
-                    raise ValueError("inherited lease differs from the existing device lock inode")
-                # dup retains the same flock open-file-description. Closing this
-                # owner's copy does not release the caller's batch lease.
-                self._lock = os.dup(inherited_lock_fd)
-            fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                # The caller's batch lease stays held when this owner's copy closes.
+                self._lock = borrow_lock(inherited_lock_fd, policy.lock_path)
             reservation.verify()
             save(path, specification)
-            self.connection, child_end = socket.socketpair()
+            self.connection, child_end = link()
             with (self.directory / "owner.log").open("xb") as log:
-                self.guardian = subprocess.Popen(
+                self.guardian = spawn_detached(
                     [
                         sys.executable,
                         "-I",
@@ -144,9 +145,9 @@ class OwnedProcess:
                         "--spec",
                         str(path),
                         "--controller-fd",
-                        str(child_end.fileno()),
+                        str(descriptor(child_end.fileno())),
                         "--lock-fd",
-                        str(self._lock),
+                        str(descriptor(self._lock)),
                     ],
                     env=worker_environment(dict(resolution.effective_environment)),
                     stdout=log,
@@ -168,7 +169,10 @@ class OwnedProcess:
 
     def state(self) -> dict[str, Any]:
         path = self.directory / "server-state.json"
-        return json.loads(path.read_text()) if path.exists() else {"pid": None, "returncode": None}
+        if not path.exists():
+            return {"pid": None, "returncode": None}
+        value: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        return value
 
     def poll(self) -> Optional[int]:
         assert self.guardian is not None
@@ -176,7 +180,10 @@ class OwnedProcess:
         if ended is not None:
             return ended
         receipt = self.directory / "ownership.json"
-        if receipt.exists() and json.loads(receipt.read_text()).get("status") == "failed":
+        if (
+            receipt.exists()
+            and json.loads(receipt.read_text(encoding="utf-8")).get("status") == "failed"
+        ):
             return 1
         value = self.state()["returncode"]
         return None if value is None else int(value)
@@ -205,7 +212,7 @@ class OwnedProcess:
         if self._lock is not None:
             os.close(self._lock)
             self._lock = None
-        receipt = json.loads((self.directory / "ownership.json").read_text())
+        receipt = json.loads((self.directory / "ownership.json").read_text(encoding="utf-8"))
         if ended != 0 or receipt.get("status") != "passed":
             reason = receipt.get("error") or f"guardian exited with {ended}"
             raise RuntimeError(

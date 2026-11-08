@@ -56,7 +56,16 @@ struct stage_state {
     }
 };
 
-double multiply(const float * weights, int rows, int columns, const float * x, std::vector<float> & out) {
+double multiply(ggml_type weight_type, const float * weights, int rows, int columns, const float * x,
+        std::vector<float> & out, bool quantize_activations = false) {
+    std::vector<float> quantized_x;
+    if (quantize_activations && ggml_is_quantized(weight_type)) {
+        std::vector<unsigned char> packed(ggml_row_size(GGML_TYPE_Q8_0, columns));
+        ggml_quantize_chunk(GGML_TYPE_Q8_0, x, packed.data(), 0, 1, columns, nullptr);
+        quantized_x.resize(columns);
+        dequantize_row_q8_0(reinterpret_cast<const block_q8_0 *>(packed.data()), quantized_x.data(), columns);
+        x = quantized_x.data();
+    }
     out.assign(size_t(rows), 0.0f);
     for (int r = 0; r < rows; ++r) {
         double sum = 0;
@@ -69,17 +78,17 @@ double multiply(const float * weights, int rows, int columns, const float * x, s
 // A pass's rows by hand, SwiGLU experts of these matrices.
 std::vector<float> swiglu_rows(const std::vector<std::vector<float>> & up, const std::vector<std::vector<float>> & gate,
         const std::vector<std::vector<float>> & down, const std::vector<float> & input, const std::vector<int32_t> & routes,
-        const std::vector<float> & route_weights) {
+        const std::vector<float> & route_weights, bool quantize_activations = false, ggml_type down_type = GGML_TYPE_Q8_0) {
     std::vector<float> rows(size_t(tokens) * latent, 0.0f), u, g, d, h(hidden);
     for (int token = 0; token < tokens; ++token) {
         const float * x = input.data() + size_t(token) * latent;
         for (int slot = 0; slot < nslots; ++slot) {
             const size_t route = size_t(token) * nslots + slot;
             if (routes[route] < 0) { continue; }
-            multiply(up[routes[route]].data(), hidden, latent, x, u);
-            multiply(gate[routes[route]].data(), hidden, latent, x, g);
+            multiply(GGML_TYPE_Q8_0, up[routes[route]].data(), hidden, latent, x, u, quantize_activations);
+            multiply(GGML_TYPE_Q8_0, gate[routes[route]].data(), hidden, latent, x, g, quantize_activations);
             for (int i = 0; i < hidden; ++i) { h[i] = g[i] / (1.0f + std::exp(-g[i])) * u[i]; }
-            multiply(down[routes[route]].data(), latent, hidden, h.data(), d);
+            multiply(down_type, down[routes[route]].data(), latent, hidden, h.data(), d, quantize_activations);
             for (int i = 0; i < latent; ++i) { rows[size_t(token) * latent + i] += d[i] * route_weights[route]; }
         }
     }
@@ -150,7 +159,7 @@ int main() {
     const float limit = 1.0f, beta = 1.5f, linear_beta = 2.0f;
     const auto norm_weights = normal(latent, 13);
     const float norm_eps = 1e-5f;
-    const auto by_hand = [&](int kind, bool norm = false) {
+    const auto by_hand = [&](int kind, bool norm = false, bool quantize_activations = false) {
         std::vector<float> rows(size_t(tokens) * latent, 0.0f), u, g, d, h(hidden);
         const auto silu = [](float v) { return v / (1.0f + std::exp(-v)); };
         for (int token = 0; token < tokens; ++token) {
@@ -158,14 +167,14 @@ int main() {
             for (int slot = 0; slot < nslots; ++slot) {
                 const size_t route = size_t(token) * nslots + slot;
                 if (routes[route] < 0) { continue; }
-                multiply(up[routes[route]].data(), hidden, latent, x, u);
-                multiply(gate[routes[route]].data(), hidden, latent, x, g);
+                multiply(GGML_TYPE_Q8_0, up[routes[route]].data(), hidden, latent, x, u, quantize_activations);
+                multiply(GGML_TYPE_Q8_0, gate[routes[route]].data(), hidden, latent, x, g, quantize_activations);
                 for (int i = 0; i < hidden; ++i) {
                     if (kind == KIMI_VRAM_ACTIVATION_SWIGLU) { h[i] = silu(g[i]) * u[i]; }
                     else if (kind == KIMI_VRAM_ACTIVATION_SWIGLU_CLAMP) { h[i] = silu(std::min(g[i], limit)) * std::clamp(u[i], -limit, limit); }
                     else { h[i] = beta * std::tanh(g[i] / beta) / (1.0f + std::exp(-g[i])) * linear_beta * std::tanh(u[i] / linear_beta); }
                 }
-                multiply(down[routes[route]].data(), latent, hidden, h.data(), d);
+                multiply(GGML_TYPE_Q8_0, down[routes[route]].data(), latent, hidden, h.data(), d, quantize_activations);
                 if (norm) {
                     double sum = 0;
                     for (int i = 0; i < latent; ++i) { d[i] *= norm_weights[i]; sum += double(d[i]) * d[i]; }
@@ -178,6 +187,7 @@ int main() {
         return rows;
     };
     const auto expected = by_hand(KIMI_VRAM_ACTIVATION_SWIGLU);
+    const auto expected_q8 = by_hand(KIMI_VRAM_ACTIVATION_SWIGLU, false, true);
 
     ssd::runtime_services services;
     services.gpu = provider;
@@ -207,9 +217,9 @@ int main() {
     if (!provider->prefill->transient_available(lane)) { fail("the pass's memory was not reserved"); }
 
     kimi_vram_prefill_launch options = { { KIMI_VRAM_ACTIVATION_SWIGLU, 0.0f, 0.0f, 0.0f }, nullptr, 0.0f, 1 };
-    const auto run = [&](stage_state * stage, std::vector<float> & output, kimi_vram_prefill_stats & stats) {
-        std::vector<kimi_vram_prefill_transient> transient(experts);
-        for (int e = 0; e < experts; ++e) {
+    const auto run = [&](stage_state * stage, std::vector<float> & output, kimi_vram_prefill_stats & stats, int count = experts) {
+        std::vector<kimi_vram_prefill_transient> transient(count);
+        for (int e = 0; e < count; ++e) {
             auto & t = transient[e];
             t.request_index = e;
             t.source = stage ? KIMI_VRAM_PREFILL_TRANSIENT_SSD : KIMI_VRAM_PREFILL_TRANSIENT_RAM;
@@ -220,42 +230,76 @@ int main() {
         }
         output.assign(size_t(tokens) * latent, 0.0f);
         if (provider->prefill->launch(lane, input.data(), size_t(latent) * sizeof(float), routes.data(), route_weights.data(), nslots, tokens,
-                transient.data(), experts, &options, error, sizeof(error))) { fail(error); }
+                transient.data(), count, &options, error, sizeof(error))) { fail(error); }
         return provider->prefill->finish(lane, output.data(), latent, &stats, error, sizeof(error));
     };
-    const auto compare_with = [&](const std::vector<float> & output, const std::vector<float> & wanted, const char * what) {
-        double difference = 0, norm = 0;
-        for (size_t i = 0; i < wanted.size(); ++i) {
-            const double delta = double(output[i]) - wanted[i];
-            difference += delta * delta;
-            norm += double(wanted[i]) * wanted[i];
-        }
-        const double relative = std::sqrt(difference / norm);
-        std::printf("%s: relative L2 %.3g\n", what, relative);
-        // A device's shader may decode the weights to 16-bit floats (Vulkan: 0.12% here). The CPU's own path quantizes
-        // its input and hidden rows to 8 bits, about 1% from this chain.
-        if (!(relative < 5e-3)) { fail("the lane's rows differ from the chain by hand"); }
+    const auto compare_with = [&](const std::vector<float> & output, const std::vector<float> & wanted,
+            const std::vector<float> & wanted_q8, const char * what) {
+        const auto relative_to = [&](const std::vector<float> & reference) {
+            double difference = 0, norm = 0;
+            for (size_t i = 0; i < reference.size(); ++i) {
+                const double delta = double(output[i]) - reference[i];
+                difference += delta * delta;
+                norm += double(reference[i]) * reference[i];
+            }
+            return std::sqrt(difference / norm);
+        };
+        const double floating = relative_to(wanted), quantized = relative_to(wanted_q8);
+        std::printf("%s: relative L2 floating %.3g, Q8 activations %.3g\n", what, floating, quantized);
+        // Quantized weight kernels may read floating activations or quantize each input/hidden row for integer dots.
+        // Both references use the stored, dequantized weights; unquantized weight formats never quantize activations.
+        if (!(std::min(floating, quantized) < 5e-3)) { fail("the lane's rows differ from the chain by hand"); }
     };
 
-    const auto compare = [&](const std::vector<float> & output, const char * what) { compare_with(output, expected, what); };
+    const auto compare = [&](const std::vector<float> & output, const char * what) { compare_with(output, expected, expected_q8, what); };
 
     std::vector<float> output;
     kimi_vram_prefill_stats stats = {};
+    {
+        const auto original_routes = routes;
+        for (int row_count : {2, 3, 9}) {
+            for (int token = 0; token < tokens; ++token) {
+                for (int slot = 0; slot < nslots; ++slot) {
+                    routes[size_t(token) * nslots + slot] = slot == 0 && token < row_count ? 0 : -1;
+                }
+            }
+            if (row_count == 2) {
+                stage_state failing_first;
+                failing_first.failing = 0;
+                if (!run(&failing_first, output, stats, 1)) { fail("the first failed read must fail the pass"); }
+                if (stats.host_fit_experts != 0 || stats.ssd_transient_experts != 0) { fail("failed work entered calibration"); }
+            }
+            if (run(nullptr, output, stats, 1)) { fail(error); }
+            const auto cold_output = output;
+            for (float value : output) { if (!std::isfinite(value)) { fail("cold graph output is not finite"); } }
+            if (stats.host_fit_experts != 0 || stats.host_fit_us != 0 || stats.ssd_transient_experts != 1 ||
+                    stats.ssd_transient_routes != uint64_t(row_count) || !(stats.total_worker_us > 0)) {
+                fail("cold work must execute and retain wall time without a fit observation");
+            }
+            if (run(nullptr, output, stats, 1)) { fail(error); }
+            if (output != cold_output) { fail("calibration changed the graph's output"); }
+            if (stats.host_fit_experts != 1 || !(stats.host_fit_us > 0) || stats.ssd_transient_routes != uint64_t(row_count)) {
+                fail("the next successful graph must enter calibration");
+            }
+            std::printf("CALIBRATION_SHAPE_PASS rows=%d cold_observations=0 warm_observations=1\n", row_count);
+        }
+        routes = original_routes;
+    }
     if (run(nullptr, output, stats)) { fail(error); }
     compare(output, "copied");
     if (stats.ssd_transient_experts != experts) { fail("an expert was not computed"); }
 
     options.activation = { KIMI_VRAM_ACTIVATION_SWIGLU_CLAMP, 0.0f, 0.0f, limit };
     if (run(nullptr, output, stats)) { fail(error); }
-    compare_with(output, by_hand(KIMI_VRAM_ACTIVATION_SWIGLU_CLAMP), "bounded");
+    compare_with(output, by_hand(KIMI_VRAM_ACTIVATION_SWIGLU_CLAMP), by_hand(KIMI_VRAM_ACTIVATION_SWIGLU_CLAMP, false, true), "bounded");
     options.activation = { KIMI_VRAM_ACTIVATION_SITU, beta, linear_beta, 0.0f };
     if (run(nullptr, output, stats)) { fail(error); }
-    compare_with(output, by_hand(KIMI_VRAM_ACTIVATION_SITU), "situ");
+    compare_with(output, by_hand(KIMI_VRAM_ACTIVATION_SITU), by_hand(KIMI_VRAM_ACTIVATION_SITU, false, true), "situ");
     options.activation = { KIMI_VRAM_ACTIVATION_SWIGLU, 0.0f, 0.0f, 0.0f };
     options.post_norm = norm_weights.data();
     options.post_norm_eps = norm_eps;
     if (run(nullptr, output, stats)) { fail(error); }
-    compare_with(output, by_hand(KIMI_VRAM_ACTIVATION_SWIGLU, true), "post norm");
+    compare_with(output, by_hand(KIMI_VRAM_ACTIVATION_SWIGLU, true), by_hand(KIMI_VRAM_ACTIVATION_SWIGLU, true, true), "post norm");
     options.post_norm = nullptr;
 
     if (provider->host->register_host(lane, weights.data, weights.bytes, error, sizeof(error))) {
@@ -310,7 +354,8 @@ int main() {
                     small_down_rows[e].data() + size_t(row) * hidden, hidden);
             }
         }
-        const auto small_expected = swiglu_rows(up, gate, small_down_rows, input, routes, route_weights);
+        const auto small_expected = swiglu_rows(up, gate, small_down_rows, input, routes, route_weights, false, GGML_TYPE_Q4_0);
+        const auto small_expected_q8 = swiglu_rows(up, gate, small_down_rows, input, routes, route_weights, true, GGML_TYPE_Q4_0);
         void * mixed = provider->settings->create(nullptr, &services, error, sizeof(error));
         if (!mixed) { fail(error); }
         const int32_t layer_ids[] = { 0, 1, 2 };
@@ -354,10 +399,10 @@ int main() {
         if (prepare_layer(0) != (refused == GGML_TYPE_COUNT)) { fail("the lane took a layer of a type the device refuses"); }
         if (!prepare_layer(1)) { fail("the layer after one the device cannot run did not get the lane"); }
         run_layer(small, small_bytes, output);
-        compare_with(output, small_expected, "layer of the smaller format");
+        compare_with(output, small_expected, small_expected_q8, "layer of the smaller format");
         if (!prepare_layer(2)) { fail("the layer of the larger format did not get the lane"); }
         run_layer(weights, expert_bytes, output);
-        compare_with(output, expected, "layer of the larger format after the smaller");
+        compare_with(output, expected, expected_q8, "layer of the larger format after the smaller");
         if (provider->elastic->phase_complete(mixed, 1, error, sizeof(error))) { fail(error); }
         provider->api->destroy(mixed);
     }

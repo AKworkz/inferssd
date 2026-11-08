@@ -23,6 +23,8 @@ jobs:
           sed -i "s/^DEFAULT_REF=main$/DEFAULT_REF=${GITHUB_REF_NAME}/" scripts/install.sh
           grep -qx "DEFAULT_REF=${GITHUB_REF_NAME}" scripts/install.sh
           sh -n scripts/install.sh
+          sed -i "s/^\$DefaultRef = 'main'\$/\$DefaultRef = '${GITHUB_REF_NAME}'/" scripts/install.ps1
+          grep -qx "\$DefaultRef = '${GITHUB_REF_NAME}'" scripts/install.ps1
       - name: Extract the release notes from the changelog
         run: |
           awk -v heading="## ${GITHUB_REF_NAME#v} " \
@@ -34,5 +36,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "$GITHUB_REF_NAME" scripts/install.sh \
+          gh release create "$GITHUB_REF_NAME" scripts/install.sh scripts/install.ps1 \
             --verify-tag --title "$GITHUB_REF_NAME" --notes-file release-notes.md

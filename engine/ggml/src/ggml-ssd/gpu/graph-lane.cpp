@@ -18,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -94,7 +95,7 @@ struct lane {
     bool format_known = false, usable = false;
     // Every format the layers declare (kimi_vram_expert_format), with the device's answer. A pass's working memory
     // holds copies of the largest expert of those it runs, whichever layer comes next.
-    struct known_format { ggml_type up, down; bool usable; };
+    struct known_format { ggml_type up, down; bool usable; std::set<std::pair<int, size_t>> warmed = {}; };
     std::vector<known_format> formats;
     size_t largest_expert = 0;
     bool pass_ready = false;  // this pass's working memory is there (reserve_pass): else every expert stays on the CPU
@@ -181,11 +182,11 @@ struct lane {
         format_known = true;
         const bool listed = f.layer_weight_types && f.layer_down_types && f.layers;
         for (int i = 0; listed && i < f.n_layers; ++i) { learn(ggml_type(f.layer_weight_types[i]), ggml_type(f.layer_down_types[i])); }
-        const known_format now = learn(ggml_type(f.weight_type), ggml_type(f.down_type));
+        const known_format & now = learn(ggml_type(f.weight_type), ggml_type(f.down_type));
         up_type = now.up; down_type = now.down; usable = now.usable;
     }
     // Whether the device can run a format at all, from its own answer about the chain's operations.
-    known_format learn(ggml_type up_type_, ggml_type down_type_) {
+    const known_format & learn(ggml_type up_type_, ggml_type down_type_) {
         for (const auto & known : formats) {
             if (known.up == up_type_ && known.down == down_type_) { return known; }
         }
@@ -210,7 +211,7 @@ struct lane {
         }
         formats.push_back(known);
         if (known.usable) { largest_expert = std::max(largest_expert, expert_bytes(up_type_, down_type_)); }
-        return known;
+        return formats.back();
     }
     // The fused operation where the device has it, else the same math from plain operations.
     ggml_tensor * activate(ggml_context * ctx, ggml_tensor * gate, ggml_tensor * up) const {
@@ -332,7 +333,27 @@ struct lane {
             }
         }
         const double add_us = elapsed_us(add_start);
-        fit.add(double(count), double(rows), compute_us);
+        // Pipeline compilation belongs to request time, not the steady per-route fit. The cached format's
+        // dimensions, activation and exact row count each omit their first successful graph only.
+        auto & known = *std::find_if(formats.begin(), formats.end(), [&](const known_format & f) {
+            return f.up == up_type && f.down == down_type;
+        });
+        size_t new_shapes = 0;
+        for (size_t i = 0; i < count; ++i) {
+            // The graph succeeded; failed reads/graphs never mark a shape warm. Counts are bounded by the ubatch.
+            new_shapes += known.warmed.emplace(activation.kind, experts[first + i].rows.size()).second;
+        }
+        if (!new_shapes) {
+            fit.add(double(count), double(rows), compute_us);
+            for (size_t i = 0; i < count; ++i) {
+                const double r = double(experts[first + i].rows.size());
+                stats.host_fit_experts += 1; stats.host_fit_routes += r; stats.host_fit_routes_sq += r * r;
+            }
+        } else {
+            std::fprintf(stderr, "[graph_lane] event=calibration_cold up=%s down=%s latent=%d hidden=%d "
+                "activation=%d new_shapes=%zu experts=%zu routes=%llu compute_us=%.3f\n", ggml_type_name(up_type),
+                ggml_type_name(down_type), latent, hidden, activation.kind, new_shapes, count, (unsigned long long) rows, compute_us);
+        }
         stats.engine_overhead_us += fill_us + add_us;
         stats.ssd_transient_experts += count;
         stats.ssd_transient_routes += rows;
@@ -377,11 +398,10 @@ struct lane {
         }
         double fixed = 0, route = 0;
         fit.line(fixed, route);
-        last_fixed_us = fixed; last_route_us = route;
-        for (const auto & expert : experts) {
-            const double r = double(expert.rows.size()), us = fixed + route * r;
-            stats.host_fit_experts += 1; stats.host_fit_routes += r; stats.host_fit_routes_sq += r * r;
-            stats.host_fit_us += us; stats.host_fit_route_us += r * us;
+        if (stats.host_fit_experts > 0) {
+            last_fixed_us = fixed; last_route_us = route;
+            stats.host_fit_us = fixed * stats.host_fit_experts + route * stats.host_fit_routes;
+            stats.host_fit_route_us = fixed * stats.host_fit_routes + route * stats.host_fit_routes_sq;
         }
         stats.total_worker_us = elapsed_us(start);
     }

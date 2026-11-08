@@ -20,11 +20,12 @@
 static void require(bool v, const char * msg) { if (!v) throw std::runtime_error(msg); }
 static std::vector<float> decode(llama_context * c, const std::vector<llama_token> & t, int lo, int hi, int chunk, int seq=0) {
     std::vector<float> out;
+    const bool last_only = std::getenv("QWEN_LAST_LOGIT_ONLY") != nullptr;
     for (int p=lo;p<hi;p+=chunk) {
         int n=std::min(chunk,hi-p);auto b=llama_batch_init(n,0,1);b.n_tokens=n;
-        for(int i=0;i<n;++i){ b.token[i]=t[p+i];b.pos[i]=p+i;b.n_seq_id[i]=1;b.seq_id[i][0]=seq;b.logits[i]=1; }
+        for(int i=0;i<n;++i){ b.token[i]=t[p+i];b.pos[i]=p+i;b.n_seq_id[i]=1;b.seq_id[i][0]=seq;b.logits[i]=!last_only || i==n-1; }
         int rc=llama_decode(c,b);llama_batch_free(b);require(rc==0,"decode failed");
-        for(int i=0;i<n;++i){ const float * l=llama_get_logits_ith(c,i);require(l,"missing logits");for(int j=0;j<256;++j){require(std::isfinite(l[j]),"nonfinite logits");out.push_back(l[j]);}}
+        for(int i=last_only?n-1:0;i<n;++i){ const float * l=llama_get_logits_ith(c,i);require(l,"missing logits");for(int j=0;j<256;++j){require(std::isfinite(l[j]),"nonfinite logits");out.push_back(l[j]);}}
     }
     return out;
 }
@@ -52,7 +53,7 @@ int main(int argc,char **argv){try{
     std::ofstream audit;
     if (const char * path=std::getenv("QWEN_ROUTE_AUDIT")) audit.open(path);
     auto cp=llama_context_default_params();cp.n_ctx=128;cp.n_batch=64;cp.n_ubatch=64;cp.n_seq_max=2;cp.kv_unified=true;cp.offload_kqv=false;cp.op_offload=false;cp.n_threads=2;cp.n_threads_batch=2;
-    if (const char * u=std::getenv("QWEN_UBATCH")) cp.n_batch=cp.n_ubatch=std::atoi(u);
+    if (const char * u=std::getenv("QWEN_UBATCH")) cp.n_ubatch=std::atoi(u);
     if (audit.is_open()) {
         cp.cb_eval_user_data=&audit;
         cp.cb_eval=[](ggml_tensor * tensor, bool ask, void * data) {

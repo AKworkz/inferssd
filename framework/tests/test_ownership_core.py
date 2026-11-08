@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import sys
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,11 +42,15 @@ def run_body(observer, module, case):
     return types.FunctionType(observer.__code__, namespace)(case)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups: killpg, SIGKILL")
 @pytest.mark.parametrize("case", GROUP_CASES, ids=lambda c: c["name"])
 def test_candidate_group_events(case):
     assert run_body(group_case, process, case) == group_case(case)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX lease: a descriptor passed over a Unix socket, flock"
+)
 @pytest.mark.parametrize("case", LEASE_CASES, ids=lambda c: c["name"])
 def test_candidate_lease_events(case):
     assert run_body(lease_case, lease, case) == lease_case(case)

@@ -8,6 +8,7 @@ import hashlib
 import os
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,7 @@ AGX_LISTING = """\
       "vendor-id" = <6b100000>
     }
 """
+LINUX_MACHINE = "a fake Linux machine: sysfs and procfs trees, POSIX paths"
 
 
 class FakeHost(NativeHost):
@@ -139,6 +141,8 @@ def ok(stdout):
 
 def linux_tree(root, *, capacities=(1024,) * 4, max_khz=None, smt=False, gpu=True):
     """A Linux machine: identity files, CPUs, one NVMe drive and the uname/nvidia-smi replies."""
+    if sys.platform == "win32":
+        pytest.skip(LINUX_MACHINE)
     count = len(capacities)
     write(root, "/etc/machine-id", "0123456789abcdef0123456789abcdef\n")
     write(root, "/etc/os-release", 'NAME="Ubuntu"\nPRETTY_NAME="Ubuntu 24.04.1 LTS"\n')
@@ -394,9 +398,9 @@ def test_gpu_core_count_tells_apple_variants_apart(tmp_path):
     assert same_hardware(saved, live) == ["gpus"]
 
 
-def test_windows_is_not_supported_yet(tmp_path):
-    with pytest.raises(UnsupportedPlatform, match="not supported on windows yet"):
-        live_identity(FakeHost(tmp_path, "windows"))
+def test_other_platforms_are_not_supported(tmp_path):
+    with pytest.raises(UnsupportedPlatform, match="not supported on freebsd yet"):
+        live_identity(FakeHost(tmp_path, "freebsd"))
 
 
 def test_drive_key_nvme_partition(tmp_path):
@@ -436,6 +440,7 @@ def test_drive_key_md_array_names_every_member(tmp_path):
     )
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason=LINUX_MACHINE)
 def test_disks_without_serial_keep_their_kernel_names(tmp_path):
     for index, name in enumerate(("vda", "vdb")):
         device = f"/sys/devices/pci0000:00/0000:00:0{index + 5}.0/virtio{index + 2}"
@@ -553,7 +558,7 @@ def test_darwin_drive_reports_unreadable_diskutil_output(tmp_path):
 
 
 def ended_process():
-    child = subprocess.Popen(["true"])
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
     child.wait()
     return child.pid
 
@@ -580,3 +585,14 @@ def test_only_test_files_of_ended_runs_are_cleared(tmp_path):
         (tmp_path / name).write_bytes(b"x")
     NativeHost().clear_test_files(str(tmp_path))
     assert sorted(os.listdir(tmp_path)) == sorted(names[2:])
+
+
+def test_memory_probe_wherever_cuda_runs():
+    from inferssd.machine.identity import probe_versions
+
+    cuda = [{"backend": "CUDA", "uuid": "GPU-1", "name": "GPU", "vram_bytes": 1}]
+    vulkan = [{"backend": "Vulkan", "uuid": "PCI-1", "name": "iGPU", "vram_bytes": 0}]
+    assert "memory" in probe_versions("linux", cuda)
+    assert "memory" in probe_versions("windows", cuda)
+    assert "memory" not in probe_versions("windows", vulkan)
+    assert "memory" not in probe_versions("linux", [])

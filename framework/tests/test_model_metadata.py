@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import posixpath
 import random
 import struct
 import subprocess
@@ -118,7 +119,7 @@ class Files:
         self.stdout, self.stderr = io.StringIO(), io.StringIO()
 
     def path(self, p):
-        return os.path.normpath(p if p.startswith("/") else "/case/" + p)
+        return posixpath.normpath(p if p.startswith("/") else "/case/" + p)
 
     def fail(self, op, p):
         if self.case.get("fault") == [op, p]:

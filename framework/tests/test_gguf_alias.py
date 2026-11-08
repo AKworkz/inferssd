@@ -8,6 +8,7 @@ import json
 import os
 import struct
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -434,6 +435,10 @@ def test_path_controls_missing_empty_and_alignment(tmp_path):
         m.build_rows([path], {"down"}, 256)
     with pytest.raises(RuntimeError, match="matched no files"):
         m.parse_model_paths([str(tmp_path / "missing*")])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows file names cannot hold tabs")
+def test_a_source_path_with_a_tab_is_refused(tmp_path):
     bad = tmp_path / "bad\tpath.gguf"
     fixture(bad)
     with pytest.raises(RuntimeError, match="tabs or newlines"):
@@ -448,6 +453,7 @@ def test_fifo_is_rejected_without_blocking(tmp_path):
         m.read_header(path)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows does not replace a file that is open")
 def test_source_replacement_during_header_read_is_refused(tmp_path, monkeypatch):
     path, other = tmp_path / "source.gguf", tmp_path / "replacement.gguf"
     fixture(path)

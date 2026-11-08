@@ -5,7 +5,9 @@
 #include "vram-tier.cpp"
 #include "test-kimi-vram-format-fixture.h"
 
+#include <fcntl.h>
 #include <functional>
+#include <unistd.h>
 
 namespace {
 int assertions = 0;

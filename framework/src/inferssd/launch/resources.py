@@ -11,14 +11,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from inferssd.configuration.settings import PLATFORMS
+from inferssd.configuration.settings import PLATFORMS, host_platform
 
 # A checkout's build directories, searched in this order: the presets first,
 # then the conventional ad hoc ones.
 BUILDS = {
     "linux": ("build-linux-cuda", "build-linux-cpu", "build"),
     "darwin": ("build-macos-metal", "build-mac", "build"),
-    "windows": ("build-x64-windows-llvm-release", "build"),
+    "windows": ("build-windows-llvm", "build-x64-windows-llvm-release", "build"),
 }
 # The machine probes by the name a resource descriptor's probes map gives them.
 PROBES = {"ssd": "inferssd-ssdprobe", "cpu": "inferssd-cpuprobe", "memory": "inferssd-memprobe"}
@@ -40,9 +40,20 @@ def cmake_gpu_backends(cache: str) -> tuple[str, ...]:
     )
 
 
-def data_directory(environ: Mapping[str, str] = os.environ, home: Optional[Path] = None) -> Path:
+def data_directory(
+    environ: Mapping[str, str] = os.environ,
+    home: Optional[Path] = None,
+    platform: Optional[str] = None,
+) -> Path:
     """Where the installer keeps the releases, the models and the launch state."""
-    return Path(environ.get("INFERSSD_HOME", (home or Path.home()) / ".local/share/inferssd"))
+    named = environ.get("INFERSSD_HOME")
+    if named:
+        return Path(named)
+    home = home or Path.home()
+    if (platform or host_platform()) == "windows":
+        local = environ.get("LOCALAPPDATA")
+        return (Path(local) if local else home / "AppData" / "Local") / "inferssd"
+    return home / ".local/share/inferssd"
 
 
 def installed_resources(

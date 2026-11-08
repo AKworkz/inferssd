@@ -63,3 +63,45 @@ jobs:
         run: cmake --preset linux-cuda -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.arch }} "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,$CUDA_DRIVER_LINK_DIR"
       - name: Build
         run: cmake --build build-linux-cuda --parallel 4 --target inferssd-server inferssd-memprobe kimi-vram-tier
+
+  windows-cuda-compile:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      CUDA_REDIST: 12.9.1
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: CUDA toolkit
+        # The compiler, runtime, CCCL and cuBLAS archives, each checked against NVIDIA's manifest.
+        shell: pwsh
+        run: |
+          $base = 'https://developer.download.nvidia.com/compute/cuda/redist/'
+          $manifest = Invoke-RestMethod "${base}redistrib_$env:CUDA_REDIST.json"
+          $root = Join-Path $env:RUNNER_TEMP 'cuda'
+          New-Item -ItemType Directory -Force $root | Out-Null
+          foreach ($name in 'cuda_nvcc', 'cuda_cudart', 'cuda_cccl', 'libcublas', 'cuda_nvtx', 'cuda_profiler_api') {
+            $part = $manifest.$name.'windows-x86_64'
+            $zip = Join-Path $env:RUNNER_TEMP (Split-Path $part.relative_path -Leaf)
+            # The server can end a large response early: resume until the archive is whole.
+            for ($i = 0; $i -lt 20 -and -not ((Test-Path $zip) -and (Get-Item $zip).Length -ge [int64]$part.size); $i++) {
+              curl.exe -sSL -C - -o $zip ($base + $part.relative_path)
+            }
+            if ((Get-FileHash -Algorithm SHA256 $zip).Hash -ne $part.sha256) { throw "$name does not match the manifest" }
+            tar -xf $zip -C $env:RUNNER_TEMP
+            if ($LASTEXITCODE) { throw "$name does not extract" }
+            $extracted = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileNameWithoutExtension($zip))
+            Copy-Item -Recurse -Force (Join-Path $extracted '*') $root
+          }
+          "CUDA_PATH=$root" >> $env:GITHUB_ENV
+      - name: Configure and build
+        # CUDA 12.9 needs the VS 2022-era host toolset, not the runner's default VS 2026 compiler.
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44 > nul || exit /b 1
+          set "PATH=%ProgramFiles%\LLVM\bin;%CUDA_PATH%\bin;%PATH%"
+          cmake --preset windows-cuda -DGGML_NATIVE=OFF -DCMAKE_CUDA_ARCHITECTURES=120a "-DCUDAToolkit_ROOT=%CUDA_PATH:\=/%" "-DCMAKE_CUDA_COMPILER=%CUDA_PATH:\=/%/bin/nvcc.exe" || exit /b 1
+          cmake --build build-windows-cuda --parallel 4 --target inferssd-server || exit /b 1

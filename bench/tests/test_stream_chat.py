@@ -16,13 +16,26 @@ import compare_outputs
 import stream_chat
 
 
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="no alarm signal")
 def test_whole_request_deadline_restores_the_signal_handler():
     previous = signal.getsignal(signal.SIGALRM)
     with pytest.raises(TimeoutError, match="whole request deadline"):
-        with stream_chat.deadline(0.02):
+        with stream_chat.alarm_deadline(0.02):
             time.sleep(0.2)
     assert signal.getsignal(signal.SIGALRM) == previous
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_the_timer_deadline_interrupts_the_main_thread_and_restores_sigint():
+    previous = signal.getsignal(signal.SIGINT)
+    with pytest.raises(TimeoutError, match="whole request deadline"):
+        with stream_chat.timer_deadline(0.02):
+            for _ in range(500):
+                time.sleep(0.01)
+    assert signal.getsignal(signal.SIGINT) == previous
+    with stream_chat.timer_deadline(5):
+        pass
+    assert signal.getsignal(signal.SIGINT) == previous
 
 
 def fixture(count=256):

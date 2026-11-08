@@ -123,10 +123,13 @@ def test_platform_options_default_to_this_host(monkeypatch, host, expected):
     assert parser.parse_args(words).platform == expected
 
 
-def test_windows_owned_execution_is_refused_before_any_effect(tmp_path, monkeypatch, capsys):
+def test_windows_owned_execution_reaches_the_owned_runtime(tmp_path, monkeypatch):
+    from inferssd.engine import command as engine
+
     monkeypatch.chdir(tmp_path)
+    calls = []
+    monkeypatch.setattr(engine, "run_native", lambda args, _: calls.append(args.platform) or 0)
     command = ["--execute", "--platform", "windows", "--model", "model.gguf"]
-    with pytest.raises(SystemExit) as error:
-        typed_command.main(command + ["--runtime-policy", "policy.json"])
-    assert error.value.code == 2 and "--dry-run" in capsys.readouterr().err
-    assert not list(tmp_path.iterdir())
+    command += ["--runtime-policy", "policy.json", "--output-dir", "run"]
+    assert typed_command.main(command) == 0
+    assert calls == ["windows"] and not list(tmp_path.iterdir())

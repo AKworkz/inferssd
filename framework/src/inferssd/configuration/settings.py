@@ -16,7 +16,9 @@ Value = Union[int, str, tuple[int, ...], tuple[str, ...], tuple[tuple[str, float
 
 def schema() -> dict[str, Any]:
     """Return a fresh schema generated from registry.def, including scopes/receipts."""
-    value: object = json.loads(files(__package__).joinpath("schema.json").read_text())
+    value: object = json.loads(
+        files(__package__).joinpath("schema.json").read_text(encoding="utf-8")
+    )
     if not isinstance(value, dict) or not isinstance(value.get("properties"), dict):
         raise ValueError("installed settings schema has no registry properties")
     if not value["properties"] or any(

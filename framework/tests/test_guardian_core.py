@@ -46,6 +46,7 @@ class DefaultPorts(WithoutTypes):
             "lease_unit",
             "interrupted",
             "request_stop",
+            "native",
         ):
             return ast.copy_location(
                 ast.parse("()" if node.id == "pass_fds" else "None").body[0].value, node

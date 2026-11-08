@@ -29,8 +29,10 @@ from inferssd.strategy.derive import (
     SERVER_ARGS,
     cpu_line,
     derive,
+    drive_rate,
     launch_conflicts,
     literal,
+    offered,
     prefill_split,
 )
 from inferssd.strategy.inputs import GPUState, RuntimeFacts, model_facts
@@ -151,6 +153,37 @@ def test_drive_rate_stays_within_the_readers_cap(models):
     assert "16 MiB reads at QD 8, the best from its knee QD 8 up to QD 8" in (
         s.settings["place.costs"].reason
     )
+
+
+@pytest.mark.parametrize("cap, expected_qd, expected_rate", [(None, 16, 7.0), (8, 4, 6.0)])
+def test_drive_rate_uses_measured_points_when_the_knee_exceeds_the_cap(
+    models, cap, expected_qd, expected_rate
+):
+    c = machine(X86)
+    storage = c["storage"][0]
+    storage["qd_cap"] = cap
+    storage["knee"] = [{"bytes": 4 << 20, "qd": 32}]
+    template = next(row for row in storage["random_read"] if row["bytes"] == 4 << 20)
+    storage["random_read"] = [
+        dict(template, qd=qd, Bps=rate)
+        for qd, rate in [(1, 3e9), (4, 6e9), (8, 5e9), (16, 7e9), (32, 9e9)]
+    ]
+    rate, why = drive_rate(c, models["dsv"], drive(c))
+    assert rate == expected_rate
+    assert f"4 MiB reads at QD {expected_qd}" in why
+    assert f"up to QD {cap or 24}, capped below its knee QD 32" in why
+    s = derive(c, models["dsv"], runtime(range(61)), "linux", model_drive_key=drive(c))
+    assert costs(s)["drive_gbps"] == expected_rate
+
+
+def test_an_unreachable_knee_still_needs_a_positive_admissible_measurement(models):
+    c = machine(X86)
+    storage = c["storage"][0]
+    storage["knee"] = [{"bytes": 4 << 20, "qd": 32}]
+    template = next(row for row in storage["random_read"] if row["bytes"] == 4 << 20)
+    storage["random_read"] = [dict(template, qd=16, Bps=0), dict(template, qd=32, Bps=9e9)]
+    rate, why = drive_rate(c, models["dsv"], drive(c))
+    assert rate is None and "no read rate of 4 MiB reads" in why
 
 
 def test_a_point_without_flops_is_dropped(models):
@@ -403,6 +436,12 @@ def test_the_cuda_budget_follows_the_engine_not_the_platform(models):
         facts = runtime(range(61), [gpu], backends=backends)
         s = derive(c, models["dsv"], facts, "linux", model_drive_key=drive(c))
         assert "vram.budget" not in s.settings and "vram.reserve_mib" not in s.settings
+    # A Windows engine with CUDA sizes its tier as a Linux one does.
+    c = machine(WINDOWS)
+    facts = runtime(range(8), backends=("CUDA",))
+    s = derive(c, models["dsv"], facts, "windows", model_drive_key=drive(c))
+    assert s.settings["vram.budget"].value_text == "0"
+    assert s.settings["vram.budget"].reason == "no CUDA GPU is usable now"
 
 
 def test_gpu_states_that_leave_the_vram_budget_alone(models):
@@ -535,3 +574,111 @@ def test_experts_mixing_formats_across_layers_use_the_gpu_tier(tmp_path, experts
     s = derive(c, mixed, runtime(range(61), [gpu]), "linux", model_drive_key=drive(c))
     assert "vram.budget" not in s.settings
     assert s.one_pass and "prefill.cpu_max_tokens" in s.settings
+
+
+WINDOWS = "windows-x64-igpu.json"  # 4 + 4 Intel cores with an integrated GPU, one NVMe drive
+
+
+def test_windows_runs_the_one_derivation(models):
+    c = machine(WINDOWS)
+    s = derive(
+        c,
+        models["dsv"],
+        runtime(range(8), budget=32 << 30),
+        "windows",
+        model_drive_key=drive(c),
+    )
+    # The registry's scopes decide: Windows has no GPU tier setting and has a host budget.
+    assert not any(key.startswith(("vram.", "prefill.")) for key in s.settings)
+    assert s.settings["host.budget_mib"].value_text == str(32 << 10)
+    assert "host.headroom_mib" not in s.settings
+    assert s.threads.batch == 4 and s.threads.decode_cpus in ((), (0, 1, 2, 3))
+    terms = costs(s)
+    assert "link_gbps" not in terms and terms["drive_gbps"] > 0
+    assert not s.one_pass
+
+
+@pytest.mark.parametrize(
+    "key,platform,expected",
+    [
+        # The CUDA tier's keys are on every platform; the engine's backends decide if they apply.
+        ("vram.max_slots", "linux", True),
+        ("vram.max_slots", "darwin", True),
+        ("vram.max_slots", "windows", True),
+        ("host.budget_mib", "linux", False),
+        ("host.budget_mib", "darwin", True),
+        ("host.budget_mib", "windows", True),
+    ],
+)
+def test_the_registry_decides_what_a_platform_derives(key, platform, expected):
+    assert offered(key, platform) is expected
+
+
+def test_windows_decode_goes_on_the_performance_cluster_when_it_streams_faster(models):
+    c = copy.deepcopy(machine(WINDOWS))
+    name = models["dsv"].dominant_format.upper()
+    for row in c["compute"]["cpu"]:
+        if row.get("cpus") == [0, 1, 2, 3] and row["format"].upper() == name:
+            row["points"][0]["weight_Bps"] = 200e9
+    s = derive(c, models["dsv"], runtime(range(8)), "windows", model_drive_key=drive(c))
+    assert s.threads.decode_cpus == (0, 1, 2, 3) and s.threads.decode == 4 and s.threads.batch == 4
+
+
+@pytest.mark.parametrize("full_rate", [0.3e9, 100e9])
+@pytest.mark.parametrize("fast_rate, pinned", [(55e9, True), (45e9, False)])
+def test_windows_chooses_measured_eligible_pools_and_keeps_their_placement(
+    models, full_rate, fast_rate, pinned
+):
+    c = machine(WINDOWS)
+    fast = [0, 1, 6, 7]
+    c["cpu"]["clusters"][0]["cpus"] = fast
+    c["cpu"]["clusters"][1]["cpus"] = [2, 3, 4, 5]
+    for row in c["cpu"]["logical"]:
+        row["cluster"] = int(row["id"] not in fast)
+    name = models["dsv"].dominant_format.upper()
+    template = next(row for row in c["compute"]["cpu"] if row["format"] == name)
+    c["compute"]["cpu"] = [
+        dict(
+            template,
+            threads=threads,
+            points=[
+                {"tokens": 1, "us": 1, "weight_Bps": rate},
+                {"tokens": 512, "us": 1, "flops": flops},
+            ],
+        )
+        for threads, rate, flops in [(1, 10e9, 100e9), (4, 50e9, 500e9), (8, full_rate, 1e12)]
+    ]
+    pin(c, fast, fast_rate, name)
+    pin(c, list(range(8)), 75e9, name)
+    s = derive(c, models["dsv"], runtime(range(8)), "windows", model_drive_key=drive(c))
+    assert s.threads == Threads(4, 4, (), tuple(fast) if pinned else ())
+    assert "4 measured unpinned threads" in s.settings["cpu.io_cpus"].reason
+
+
+def test_windows_selects_decode_and_batch_from_their_own_measurements(models):
+    c = machine(WINDOWS)
+    name = models["dsv"].dominant_format.upper()
+    for row in c["compute"]["cpu"]:
+        if row["format"] == name and row["threads"] == 1 and not row.get("cpus"):
+            row["points"][0]["weight_Bps"] = 1e12
+    s = derive(c, models["dsv"], runtime(range(8)), "windows", model_drive_key=drive(c))
+    assert s.threads == Threads(1, 4, ())
+
+
+@pytest.mark.parametrize("missing", ["one", "many"])
+def test_windows_without_complete_eligible_measurements_keeps_its_fallback(models, missing):
+    c = machine(WINDOWS)
+    name = models["dsv"].dominant_format.upper()
+    for row in c["compute"]["cpu"]:
+        if row["format"] == name and not row.get("cpus"):
+            row["points"] = [p for p in row["points"] if (p["tokens"] == 1) == (missing == "many")]
+    for row in c["compute"]["cpu"]:
+        if row["format"] == name and row.get("cpus"):
+            row["points"][0]["weight_Bps"] = 80e9 if len(row["cpus"]) == 8 else 60e9
+    s = derive(c, models["dsv"], runtime(range(8)), "windows", model_drive_key=drive(c))
+    assert s.threads == Threads(7, 7, ())
+    assert s.settings["cpu.io_cpus"].reason == (
+        "all placement: no I/O CPU, 7 unpinned threads for the 8 allowed CPUs 0-7; "
+        f"decode not on a cluster alone: every CPU streams {name} at one token as fast or faster "
+        "(80.0 against 60.0 GB/s pinned)"
+    )

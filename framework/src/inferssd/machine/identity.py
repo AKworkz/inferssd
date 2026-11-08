@@ -13,6 +13,7 @@ import contextlib
 import copy
 import glob
 import hashlib
+import mmap
 import os
 import platform
 import plistlib
@@ -32,6 +33,10 @@ from xml.parsers.expat import ExpatError
 from inferssd.configuration.settings import cpus
 from inferssd.machine.characteristics import PROBE_SCHEMAS, GPUIdentity, Identity
 from inferssd.platform.captured_command import run_captured
+from inferssd.platform.windows import win32
+from inferssd.platform.windows.system import Disk as WindowsDisk
+from inferssd.platform.windows.system import System as WindowsSystem
+from inferssd.platform.windows.system import Win32
 
 MEMORY_TOLERANCE = 0.01  # MemTotal moves with kernel reservations
 TEST_FILE_PREFIX = ".inferssd-drive-test-"
@@ -77,6 +82,7 @@ class Host(Protocol):
     def clear_test_files(self, directory: str) -> None: ...
     def glob(self, pattern: str) -> list[str]: ...
     def page_bytes(self) -> int: ...
+    def windows(self) -> WindowsSystem: ...
 
 
 class NativeHost:
@@ -116,6 +122,8 @@ class NativeHost:
 
     def device(self, path: str) -> tuple[int, int]:
         value = os.stat(path).st_dev
+        if sys.platform == "win32":
+            return value, 0  # the volume serial number
         return os.major(value), os.minor(value)
 
     def regular_files(self, path: str) -> list[tuple[str, int]]:
@@ -182,20 +190,27 @@ class NativeHost:
         return sorted(glob.glob(pattern))
 
     def page_bytes(self) -> int:
+        if sys.platform == "win32":
+            return mmap.PAGESIZE
         return os.sysconf("SC_PAGE_SIZE")
+
+    def windows(self) -> WindowsSystem:
+        return Win32()
 
 
 def is_test_file(path: str) -> bool:
-    return posixpath.basename(path).startswith(TEST_FILE_PREFIX)
+    return os.path.basename(path).startswith(TEST_FILE_PREFIX)
 
 
 def owner_of_test_file(path: str) -> Optional[int]:
     """The process ID a test file's name carries, or None for a name without one."""
-    head = posixpath.basename(path)[len(TEST_FILE_PREFIX) :].split("-", 1)[0]
+    head = os.path.basename(path)[len(TEST_FILE_PREFIX) :].split("-", 1)[0]
     return int(head) if head.isdigit() else None
 
 
 def _running(pid: int) -> bool:
+    if sys.platform == "win32":
+        return win32.process_running(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -245,6 +260,8 @@ def live_identity(host: Host) -> Identity:
         return _linux(host)
     if system == "darwin":
         return _darwin(host)
+    if system == "windows":
+        return _windows(host)
     raise UnsupportedPlatform(f"machine profiling is not supported on {system} yet")
 
 
@@ -361,7 +378,7 @@ def linux_adapters(host: Host) -> list[GPUIdentity]:
 
 def probe_versions(system: str, gpus: Sequence[GPUIdentity]) -> dict[str, str]:
     versions = {"ssd": PROBE_SCHEMAS["ssd"], "cpu": PROBE_SCHEMAS["cpu"]}
-    if system == "linux" and any(gpu["backend"] == "CUDA" for gpu in gpus):
+    if system in ("linux", "windows") and any(gpu["backend"] == "CUDA" for gpu in gpus):
         versions["memory"] = PROBE_SCHEMAS["memory"]
     return versions
 
@@ -486,6 +503,88 @@ def _darwin(host: Host) -> Identity:
     }
 
 
+CRYPTOGRAPHY = r"SOFTWARE\Microsoft\Cryptography"
+BIOS = r"HARDWARE\DESCRIPTION\System\BIOS"
+PROCESSOR = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+CURRENT_VERSION = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+
+
+def registry_text(system: WindowsSystem, key: str, name: str) -> Optional[str]:
+    """A registry value as one line of text, or None when it is absent or empty."""
+    value = system.registry(key, name)
+    return " ".join(str(value).split()) or None if value is not None else None
+
+
+def windows_release(system: WindowsSystem) -> tuple[Optional[str], str]:
+    """The OS release, such as "Windows 11 Pro 24H2 (build 26100)", and the kernel version.
+
+    The kernel version (major.minor.build.revision, such as 10.0.26100.2894)
+    changes with every cumulative update, as a Linux kernel release does.
+    """
+    build = registry_text(system, CURRENT_VERSION, "CurrentBuild")
+    parts = [
+        system.registry(CURRENT_VERSION, "CurrentMajorVersionNumber"),
+        system.registry(CURRENT_VERSION, "CurrentMinorVersionNumber"),
+        build,
+        system.registry(CURRENT_VERSION, "UBR"),
+    ]
+    kernel = ".".join(str(part) for part in parts) if None not in parts else "unknown"
+    name = registry_text(system, CURRENT_VERSION, "ProductName") or "Windows"
+    # Windows 11 keeps the product name of Windows 10; its builds start at 22000.
+    if build and build.isdigit() and int(build) >= 22000:
+        name = name.replace("Windows 10", "Windows 11")
+    version = registry_text(system, CURRENT_VERSION, "DisplayVersion")
+    release = " ".join(filter(None, (name, version)))
+    return (f"{release} (build {build})" if build else release), kernel
+
+
+def windows_adapters(system: WindowsSystem) -> list[GPUIdentity]:
+    """The PCI display adapters a Vulkan build can use (PCI_BACKENDS), by their device instance."""
+    found: list[GPUIdentity] = []
+    for adapter in system.adapters():
+        vendor = re.match(r"pci\\ven_([0-9a-f]{4})", adapter.device.lower())
+        if vendor is None or PCI_BACKENDS.get(vendor.group(1)) != "Vulkan":
+            continue
+        found.append(
+            {
+                "backend": "Vulkan",
+                "uuid": adapter.device,
+                "name": adapter.name,
+                "vram_bytes": adapter.memory_bytes,
+            }
+        )
+    return found
+
+
+def _windows(host: Host) -> Identity:
+    system = host.windows()
+    guid = registry_text(system, CRYPTOGRAPHY, "MachineGuid")
+    release, kernel = windows_release(system)
+    gpus, driver, failure = nvidia(host)
+    gpus = gpus + windows_adapters(system)
+    identity: Identity = {
+        "hard": {
+            "platform": "windows",
+            "arch": host.machine(),
+            "machine_id_sha256": sha256(guid) if guid else None,
+            "model": registry_text(system, BIOS, "SystemProductName"),
+            "cpu_brand": registry_text(system, PROCESSOR, "ProcessorNameString") or "unknown",
+            "logical_cpus": system.processors().logical,
+            "ram_bytes": system.memory().total_bytes,
+            "gpus": gpus,
+        },
+        "soft": {
+            "os_release": release,
+            "kernel": kernel,
+            "gpu_driver": driver,
+            "probe_versions": probe_versions("windows", gpus),
+        },
+    }
+    if failure:
+        raise GPUQueryFailed(failure, identity)
+    return identity
+
+
 @dataclass(frozen=True)
 class Drive:
     """The physical drive (or, without one, the filesystem) that holds a file."""
@@ -505,6 +604,8 @@ def drive_info(host: Host, path: str) -> Drive:
         return _linux_drive(host, path)
     if system == "darwin":
         return _darwin_drive(host, path)
+    if system == "windows":
+        return _windows_drive(host, path)
     raise UnsupportedPlatform(f"drive identity is not supported on {system} yet")
 
 
@@ -531,6 +632,19 @@ def _mount(host: Host, path: str, device: str) -> Optional[tuple[str, str, str]]
     return best[2] if best else None
 
 
+def _array(system: str, drives: set[Drive]) -> Drive:
+    """One drive, or the array of several that one volume spans."""
+    parts = sorted(drives, key=lambda drive: drive.key)
+    if len(parts) == 1:
+        return parts[0]
+    buses = {drive.bus for drive in parts}
+    return Drive(
+        f"{system}:array:" + "+".join(drive.key for drive in parts),
+        " + ".join(drive.model for drive in parts),
+        buses.pop() if len(buses) == 1 else "unknown",
+    )
+
+
 def _bus(name: str, directory: str) -> str:
     if "/usb" in directory:
         return "usb"
@@ -547,18 +661,8 @@ def _block(host: Host, directory: str, depth: int = 0) -> Drive:
     slaves = directory + "/slaves"
     members = host.listdir(slaves) if host.exists(slaves) else []
     if members and depth < 8:
-        parts = sorted(
-            {_block(host, host.realpath(slaves + "/" + name), depth + 1) for name in members},
-            key=lambda drive: drive.key,
-        )
-        if len(parts) == 1:
-            return parts[0]
-        buses = {drive.bus for drive in parts}
-        return Drive(
-            "linux:array:" + "+".join(drive.key for drive in parts),
-            " + ".join(drive.model for drive in parts),
-            buses.pop() if len(buses) == 1 else "unknown",
-        )
+        disks = {_block(host, host.realpath(slaves + "/" + name), depth + 1) for name in members}
+        return _array("linux", disks)
     name = posixpath.basename(directory)
     model = " ".join((read(host, directory + "/device/model") or "unknown").split())
     serial = (
@@ -650,3 +754,25 @@ def _darwin_drive(host: Host, path: str) -> Drive:
     uuid = volume.get("VolumeUUID") or volume.get("DiskUUID")
     digest = sha256(str(uuid).upper()) if uuid else "nouuid"
     return Drive(f"darwin:{bus}:{model}:{digest}", model, bus)
+
+
+# STORAGE_BUS_TYPE: BusTypeAta, BusTypeUsb, BusTypeSata, BusTypeNvme.
+WINDOWS_BUSES = {0x3: "sata", 0x7: "usb", 0xB: "sata", 0x11: "nvme"}
+
+
+def _windows_disk(disk: WindowsDisk) -> Drive:
+    model = " ".join(f"{disk.vendor} {disk.product}".split()) or "unknown"
+    bus = WINDOWS_BUSES.get(disk.bus, "unknown")
+    # Without a serial (virtual disks) the disk number keeps two disks apart.
+    unique = sha256(disk.serial) if disk.serial else f"noserial-disk{disk.number}"
+    return Drive(f"windows:{bus}:{model}:{unique}", model, bus)
+
+
+def _windows_drive(host: Host, path: str) -> Drive:
+    """The disks of the volume holding PATH; a volume without one (network, RAM disk) by type."""
+    system = host.windows()
+    volume = system.volume(path)
+    if not volume.disks:
+        kind = volume.filesystem
+        return Drive(f"windows:fs:{kind}:{volume.point}", kind, "unknown")
+    return _array("windows", {_windows_disk(system.disk(number)) for number in volume.disks})

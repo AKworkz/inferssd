@@ -12,12 +12,15 @@ CPU clusters follow the engine's split (``ssd::platform::topology``): Linux
 takes each CPU's ``cpu_capacity``, else ``cpuinfo_max_freq``, sorts them in
 descending order and cuts at the largest relative drop above 10%; one CPU
 without either value makes one cluster. macOS takes ``hw.perflevel0.logicalcpu``
-as the performance cluster and the remaining CPUs as efficiency.
+as the performance cluster and the remaining CPUs as efficiency. Windows takes
+the CPUs of the highest CPU Set efficiency class as the performance cluster;
+without a CPU Set for every CPU of processor group 0 the machine is one cluster.
 """
 
 from __future__ import annotations
 
 import glob
+import ntpath
 import posixpath
 import sys
 import time
@@ -183,6 +186,46 @@ def darwin_topology(host: Host) -> CPU:
     }
 
 
+def windows_topology(host: Host) -> CPU:
+    """Group 0's CPUs; ``capacity`` is the CPU Set efficiency class, ``core`` its CoreIndex."""
+    processors = host.windows().processors()
+    if processors.groups > 1:
+        raise ValueError("more than one processor group (over 64 logical CPUs) is not supported")
+    sets = {row.index: row for row in processors.sets}
+    ids = list(range(processors.group0))
+    known = all(cpu in sets for cpu in ids)
+    best = max(row.efficiency for row in sets.values()) if known else None
+    fast = [cpu for cpu in ids if best is None or sets[cpu].efficiency == best]
+    siblings: dict[int, list[int]] = {}
+    for cpu in ids if known else ():
+        siblings.setdefault(sets[cpu].core, []).append(cpu)
+    logical: list[LogicalCPU] = [
+        {
+            "id": cpu,
+            "core": sets[cpu].core if known else None,
+            "package": None,
+            "smt_siblings": siblings[sets[cpu].core] if known else None,
+            "capacity": sets[cpu].efficiency if known else None,
+            "max_khz": None,
+            "cluster": 0 if cpu in fast else 1,
+        }
+        for cpu in ids
+    ]
+    return {
+        "logical": logical,
+        "clusters": clusters(fast, [cpu for cpu in ids if cpu not in fast]),
+        "affinity_supported": True,
+        "isa": [],
+    }
+
+
+TOPOLOGY = {
+    "linux": ("sysfs", linux_topology),
+    "darwin": ("sysctl", darwin_topology),
+    "windows": ("Win32", windows_topology),
+}
+
+
 def probe_threads(cpu: CPU) -> list[int]:
     """1, the performance-cluster size and every logical CPU, without repeats."""
     total = len(cpu["logical"])
@@ -207,14 +250,15 @@ def pinned_sets(cpu: CPU) -> list[list[int]]:
 def model_files(host: Host, paths: Sequence[str]) -> list[tuple[str, int]]:
     """Regular files under PATHS (directories recursively); a split GGUF adds all its shards."""
     found: dict[str, int] = {}
+    os_path = ntpath if host.platform() == "windows" else posixpath
     for path in paths:
-        match = SHARD.match(posixpath.basename(path))
+        match = SHARD.match(os_path.basename(path))
         names = [path]
         if match:
-            directory = posixpath.dirname(path)
+            directory = os_path.dirname(path)
             pattern = f"{glob.escape(match.group(1))}-*-of-{match.group(2)}.gguf"
             if directory:
-                pattern = posixpath.join(glob.escape(directory), pattern)
+                pattern = os_path.join(glob.escape(directory), pattern)
             names = host.glob(pattern) or names
         # An empty directory lists nothing: its drive is measured with a test file.
         listed = [row for name in names for row in host.regular_files(name)]
@@ -271,11 +315,12 @@ def measure_cpu(
     host: Host, identity: Identity, probes: Probes, clock: Clock, progress: Progress
 ) -> tuple[CPU, Memory, Compute, dict[str, Section]]:
     system = identity["hard"]["platform"]
+    source, topology = TOPOLOGY[system]
     start = clock()
     progress("reading CPU topology and memory size")
     topology_error = ""
     try:
-        cpu = linux_topology(host) if system == "linux" else darwin_topology(host)
+        cpu = topology(host)
     except (OSError, ValueError, RuntimeError) as error:
         topology_error = f"topology unavailable: {error}"
         count = identity["hard"]["logical_cpus"]
@@ -293,7 +338,7 @@ def measure_cpu(
                 for index in range(count)
             ],
             "clusters": clusters(range(count), []),
-            "affinity_supported": system == "linux",
+            "affinity_supported": system != "darwin",
             "isa": [],
         }
     memory: Memory = {
@@ -331,7 +376,6 @@ def measure_cpu(
         if pinned_sets(cpu):
             method += "; one token pinned to each cluster and to every CPU"
     end = clock()
-    source = "sysfs" if system == "linux" else "sysctl"
     failed = "the CPU probe failed (see compute)" if probe_error else ""
     isa_missing = f"ISA unknown: {failed}" if failed else ""
     errors = "; ".join(filter(None, (topology_error, isa_missing)))
@@ -379,9 +423,9 @@ def measure_gpus(
         return [], section(start, clock(), "nvidia-smi", "failed", failure)
     if "memory" not in identity["soft"]["probe_versions"]:
         why = (
-            "no NVIDIA GPU found by nvidia-smi"
-            if identity["hard"]["platform"] == "linux"
-            else "the GPU transfer probe runs on Linux with CUDA only"
+            "the GPU transfer probe needs an NVIDIA GPU with CUDA"
+            if identity["hard"]["platform"] == "darwin"
+            else "no NVIDIA GPU found by nvidia-smi"
         )
         return [], section(start, clock(), "none", "ok", why)
     progress("GPU probe: VRAM size and transfer rates")

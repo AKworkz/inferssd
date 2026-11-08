@@ -52,6 +52,7 @@ DispatchLoaderDynamic & ggml_vk_default_dispatcher();
 #include <unordered_map>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 #include <future>
 #include <thread>
 
@@ -760,6 +761,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_cpy_transpose_16, pipeline_cpy_transpose_32;
     vk_pipeline pipeline_set_rows_i32[GGML_TYPE_COUNT];
     vk_pipeline pipeline_set_rows_i64[GGML_TYPE_COUNT];
+    vk_pipeline pipeline_set_rows_from_f16_i32[GGML_TYPE_COUNT];
+    vk_pipeline pipeline_set_rows_from_f16_i64[GGML_TYPE_COUNT];
     vk_pipeline pipeline_norm_f32;
     vk_pipeline pipeline_group_norm_f32;
     vk_pipeline pipeline_rms_norm_f32;
@@ -1966,6 +1969,13 @@ struct ggml_backend_vk_context {
     std::vector<int> query_node_idx;
     int32_t num_queries {};
     int32_t query_idx {};
+
+    // see ggml_vk_keep_awake
+    std::thread keep_awake_thread;
+    std::mutex keep_awake_mutex;
+    std::condition_variable keep_awake_signal;
+    std::chrono::steady_clock::time_point last_graph;
+    bool keep_awake_stop {};
 };
 
 static void * const vk_ptr_base = (void *)(uintptr_t) 0x1000;  // NOLINT
@@ -4485,6 +4495,11 @@ static void ggml_vk_load_shaders(vk_device& device) {
     SET_ROWS(_i32)
     SET_ROWS(_i64)
 #undef SET_ROWS
+
+    ggml_vk_create_pipeline(device, device->pipeline_set_rows_from_f16_i32[GGML_TYPE_F32], "set_rows_f32_from_f16_i32", set_rows_f32_from_f16_i32_len, set_rows_f32_from_f16_i32_data, "main", 3, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {1}, 1, true);
+    ggml_vk_create_pipeline(device, device->pipeline_set_rows_from_f16_i64[GGML_TYPE_F32], "set_rows_f32_from_f16_i64", set_rows_f32_from_f16_i64_len, set_rows_f32_from_f16_i64_data, "main", 3, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {1}, 1, true);
+    ggml_vk_create_pipeline(device, device->pipeline_set_rows_from_f16_i32[GGML_TYPE_F16], "set_rows_f16_from_f16_i32", set_rows_f16_from_f16_i32_len, set_rows_f16_from_f16_i32_data, "main", 3, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {1}, 1, true);
+    ggml_vk_create_pipeline(device, device->pipeline_set_rows_from_f16_i64[GGML_TYPE_F16], "set_rows_f16_from_f16_i64", set_rows_f16_from_f16_i64_len, set_rows_f16_from_f16_i64_data, "main", 3, sizeof(vk_op_binary_push_constants), {1, 1, 1}, {1}, 1, true);
 
 
     ggml_vk_create_pipeline(device, device->pipeline_cpy_quant_f32[GGML_TYPE_Q1_0], "cpy_q1_0_f32", cpy_q1_0_f32_len, cpy_q1_0_f32_data, "main", 2, sizeof(vk_op_unary_push_constants), {(uint32_t)ggml_blck_size(GGML_TYPE_Q1_0), 1, 1}, {}, 1);
@@ -9470,6 +9485,11 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const 
     case GGML_OP_DUP:
         return ggml_vk_get_cpy_pipeline(ctx, src0, dst, dst->type);
     case GGML_OP_SET_ROWS:
+        if (src0->type == GGML_TYPE_F16) {
+            return src1->type == GGML_TYPE_I64 ?
+                ctx->device->pipeline_set_rows_from_f16_i64[dst->type] :
+                ctx->device->pipeline_set_rows_from_f16_i32[dst->type];
+        }
         if (src1->type == GGML_TYPE_I64) {
             return ctx->device->pipeline_set_rows_i64[dst->type];
         } else {
@@ -13583,8 +13603,55 @@ static void ggml_vk_graph_cleanup(ggml_backend_vk_context * ctx) {
 }
 
 // Clean up on backend free
+// A GPU left idle can take far longer to start its next submit than to run it: on an integrated GPU, in the gap while
+// the CPU computes a layer's experts, 143 ms inside vkQueueSubmit and another 250-345 ms to its fence, for a few
+// milliseconds of work. A small submit every 20 ms holds the queue out of that state, so while graphs keep coming this
+// thread sends one; it goes quiet once no graph has come for a while.
+static void ggml_vk_keep_awake(ggml_backend_vk_context * ctx) {
+    const auto period = std::chrono::milliseconds(20);
+    const auto window = std::chrono::seconds(10);
+    vk_device & device = ctx->device;
+    vk::Device dev = device->device;
+    vk::CommandPool pool = dev.createCommandPool(vk::CommandPoolCreateInfo({}, device->compute_queue.queue_family_index));
+    vk::CommandBuffer cmd = dev.allocateCommandBuffers(vk::CommandBufferAllocateInfo(pool, vk::CommandBufferLevel::ePrimary, 1)).front();
+    vk_buffer target = ggml_vk_create_buffer_device(device, 4096);
+    cmd.begin(vk::CommandBufferBeginInfo{});
+    cmd.fillBuffer(target->buffer, 0, 4, 0);
+    cmd.end();
+    vk::Fence fence = dev.createFence({});
+    const vk::SubmitInfo submit(0, nullptr, nullptr, 1, &cmd);
+    std::unique_lock<std::mutex> lock(ctx->keep_awake_mutex);
+    while (!ctx->keep_awake_stop) {
+        if (std::chrono::steady_clock::now() - ctx->last_graph > window) {
+            ctx->keep_awake_signal.wait(lock);
+            continue;
+        }
+        lock.unlock();
+        {
+            std::lock_guard<std::mutex> guard(queue_mutex);
+            device->compute_queue.queue.submit(submit, fence);
+        }
+        VK_CHECK(dev.waitForFences({ fence }, true, UINT64_MAX), "keep awake");
+        dev.resetFences({ fence });
+        lock.lock();
+        ctx->keep_awake_signal.wait_for(lock, period, [&] { return ctx->keep_awake_stop; });
+    }
+    lock.unlock();
+    dev.destroyFence(fence);
+    ggml_vk_destroy_buffer(target);
+    dev.destroyCommandPool(pool);
+}
+
 static void ggml_vk_cleanup(ggml_backend_vk_context * ctx) {
     VK_LOG_DEBUG("ggml_vk_cleanup(" << ctx->name << ")");
+    if (ctx->keep_awake_thread.joinable()) {
+        {
+            std::lock_guard<std::mutex> lock(ctx->keep_awake_mutex);
+            ctx->keep_awake_stop = true;
+        }
+        ctx->keep_awake_signal.notify_one();
+        ctx->keep_awake_thread.join();
+    }
     // discard any unsubmitted command buffers
     ctx->compute_ctx.reset();
     // wait for any pending command buffers to finish
@@ -14536,6 +14603,15 @@ static int32_t find_first_set(uint32_t x) {
 static ggml_status ggml_backend_vk_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     VK_LOG_DEBUG("ggml_backend_vk_graph_compute(" << cgraph->n_nodes << " nodes)");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
+
+    {
+        std::lock_guard<std::mutex> lock(ctx->keep_awake_mutex);
+        ctx->last_graph = std::chrono::steady_clock::now();
+        if (!ctx->keep_awake_thread.joinable()) {
+            ctx->keep_awake_thread = std::thread(ggml_vk_keep_awake, ctx);
+        }
+    }
+    ctx->keep_awake_signal.notify_one();
 
     if (vk_instance.debug_utils_support) {
         vk::DebugUtilsLabelEXT dul = {};
@@ -15645,6 +15721,12 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
             }
         case GGML_OP_SET_ROWS:
             {
+                if (op->src[0]->type == GGML_TYPE_F16) {
+                    return op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16;
+                }
+                if (op->src[0]->type != GGML_TYPE_F32) {
+                    return false;
+                }
                 switch (op->type) {
                     case GGML_TYPE_F32:
                     case GGML_TYPE_F16:

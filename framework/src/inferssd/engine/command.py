@@ -16,6 +16,7 @@ from inferssd.launch.live import NativeHost
 from inferssd.launch.machine import MachineSource
 from inferssd.launch.typed_command import specification
 from inferssd.launch.types import LaunchInput, Output
+from inferssd.platform.host import STOP_SIGNALS
 from inferssd.platform.policy import Policy
 
 
@@ -30,7 +31,7 @@ def run_native(
         raise ValueError("--execute requires a runtime policy, a run directory and a port")
     if inputs.mode != "server":
         raise ValueError("owned execution currently supports server mode only")
-    data = json.loads(args.runtime_policy.read_text())
+    data = json.loads(args.runtime_policy.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("runtime policy must be a JSON object")
     policy = Policy.read(data)
@@ -54,10 +55,7 @@ def run_native(
         machine=MachineSource(args.machine, args.reprofile),
     )
     engine: Optional[Engine] = None
-    handlers = {
-        number: signal.signal(number, interrupted)
-        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
-    }
+    handlers = {number: signal.signal(number, interrupted) for number in STOP_SIGNALS}
     try:
         engine = runtime.engine(
             str(args.output_dir), args.port, 0, "static", "", list(inputs.extra)

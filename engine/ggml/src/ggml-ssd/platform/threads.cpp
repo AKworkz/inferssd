@@ -370,20 +370,21 @@ bool pin_thread(std::thread::native_handle_type handle, const cpu_list & cpus) {
     // Like a Linux mask outside the allowed set, CPUs the process may not use are refused.
     if (!cpu_mask(cpus, wanted) || !process_mask(allowed) || (wanted & ~allowed) != 0) { return false; }
     const auto & sets = cpu_sets();
-    if (sets.available) {
-        // A hard thread affinity outranks selected CPU Sets: the thread runs on
-        // their intersection, or ignores the sets when it is empty. Exact only
-        // if that affinity admits every wanted CPU.
-        GROUP_AFFINITY hard = {};
-        DWORD_PTR actual = 0;
-        return GetThreadGroupAffinity(thread, &hard) && hard.Group == 0 && (DWORD_PTR(hard.Mask) & wanted) == wanted &&
-            select_mask(thread, sets, wanted) && selected_mask(thread, sets, actual) && actual == wanted;
-    }
-    GROUP_AFFINITY affinity = {}, actual = {};
+    GROUP_AFFINITY saved = {}, affinity = {}, actual = {};
+    DWORD_PTR saved_selected = 0, selected = 0;
+    if (!GetThreadGroupAffinity(thread, &saved) || saved.Group != 0 ||
+            (sets.available && !selected_mask(thread, sets, saved_selected))) { return false; }
     affinity.Mask = KAFFINITY(wanted);
     affinity.Group = 0;
-    return SetThreadGroupAffinity(thread, &affinity, nullptr) && GetThreadGroupAffinity(thread, &actual) &&
-        actual.Group == 0 && actual.Mask == affinity.Mask;
+    // CPU Sets are a scheduler preference: a parked core may be ignored even
+    // when the selected IDs read back correctly. Hard affinity makes the pin exact.
+    if (!SetThreadGroupAffinity(thread, &affinity, nullptr)) { return false; }
+    if (GetThreadGroupAffinity(thread, &actual) && actual.Group == 0 && actual.Mask == affinity.Mask &&
+            (!sets.available || (select_mask(thread, sets, wanted) &&
+                selected_mask(thread, sets, selected) && selected == wanted))) { return true; }
+    SetThreadGroupAffinity(thread, &saved, nullptr);
+    if (sets.available) { select_mask(thread, sets, saved_selected); }
+    return false;
 }
 
 // Windows 11 parks cores and moves throttled (EcoQoS) threads onto efficiency

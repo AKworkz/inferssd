@@ -59,7 +59,8 @@ const char * const USAGE =
     "  --cols N            weight columns (the reduction dimension)\n"
     "  --tokens LIST       activation columns; 1 reports weight bytes/s, more report FLOP/s\n"
     "  --min-seconds S     timed repetitions per point after one warm-up call\n"
-    "  --cpus LIST         pin compute thread i to the i-th of these CPU IDs, ascending (Linux; default: unpinned)\n"
+    "  --cpus LIST         pin compute thread i to the i-th of these CPU IDs, ascending\n"
+    "                      (Linux and Windows; default: unpinned)\n"
     "\n"
     "DRAM: one buffer of max(1 GiB, 8 x last-level cache) is read with each thread count (disjoint slices).\n"
     "Compute: the median time of ggml_mul_mat on the CPU backend with a persistent ggml threadpool. At\n"
@@ -151,12 +152,19 @@ uint64_t parse_size(const std::string & text) {
     }
 }
 
-// Logical CPUs this process may run on: the affinity mask (which a cpuset narrows) on Linux, else all of them.
+// Logical CPUs this process may run on: the affinity mask (which a cpuset or a job narrows), else all of them.
 int available_cpus() {
 #if defined(__linux__)
     cpu_set_t set;
     CPU_ZERO(&set);
     if (sched_getaffinity(0, sizeof(set), &set) == 0 && CPU_COUNT(&set) > 0) { return CPU_COUNT(&set); }
+#elif defined(_WIN32)
+    DWORD_PTR process = 0, system = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process != 0) {
+        int count = 0;
+        for (; process != 0; process &= process - 1) { ++count; }
+        return count;
+    }
 #endif
     return (int) std::max(1u, std::thread::hardware_concurrency());
 }
@@ -409,6 +417,15 @@ struct affinity_guard {
     ~affinity_guard() {
         if (valid) { sched_setaffinity(0, sizeof(saved), &saved); }
     }
+#elif defined(_WIN32)
+    DWORD_PTR saved = 0;
+    affinity_guard() {
+        DWORD_PTR system = 0;
+        if (!GetProcessAffinityMask(GetCurrentProcess(), &saved, &system)) { saved = 0; }
+    }
+    ~affinity_guard() {
+        if (saved != 0) { SetThreadAffinityMask(GetCurrentThread(), saved); }
+    }
 #endif
 };
 
@@ -595,8 +612,21 @@ options parse_args(int argc, char ** argv) {
                     throw std::runtime_error("CPU " + std::to_string(cpu) + " is not available to this process");
                 }
             }
+#elif defined(_WIN32)
+            o.cpus = parse_int_list(arg, value, 0, GGML_MAX_N_THREADS - 1);
+            std::sort(o.cpus.begin(), o.cpus.end());
+            // A thread cannot be pinned outside this process's CPUs; it would run unpinned unnoticed.
+            DWORD_PTR allowed = 0, system = 0;
+            if (!GetProcessAffinityMask(GetCurrentProcess(), &allowed, &system)) {
+                throw std::runtime_error("cannot read the CPUs this process may use");
+            }
+            for (int cpu : o.cpus) {
+                if (cpu >= (int) (8 * sizeof(allowed)) || !((allowed >> cpu) & 1)) {
+                    throw std::runtime_error("CPU " + std::to_string(cpu) + " is not available to this process");
+                }
+            }
 #else
-            throw usage_error("--cpus: pinning threads is measured on Linux only");
+            throw usage_error("--cpus: threads cannot be pinned to CPUs on this platform");
 #endif
         } else if (arg == "--min-seconds") {
             char * end = nullptr;

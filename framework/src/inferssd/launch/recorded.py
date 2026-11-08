@@ -105,11 +105,11 @@ def generate_alias(
         for path in paths:
             command.extend(("--model-glob", glob.escape(path)))
         run(command)
-        data = json.loads(pending_summary.read_text())
+        data = json.loads(pending_summary.read_text(encoding="utf-8"))
         if data.get("model_shards") != len(paths) or data.get("entries", 0) <= 0:
             raise ValueError("GGUF metadata did not produce a complete nonempty expert index")
         data["output_tsv"] = str(alias)
-        pending_summary.write_text(json.dumps(data, indent=2) + "\n")
+        pending_summary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         replace(str(pending_alias), str(alias))
         replace(str(pending_summary), str(summary))
     return str(alias)
@@ -118,7 +118,8 @@ def generate_alias(
 def run_indexer(command: list[str]) -> None:
     # The only subprocess allowed by this adapter is the installed strict header
     # indexer, assembled by generate_alias. Engine argv never reaches this call.
-    subprocess.run(command, check=True)
+    # Its summary is a log: a command's stdout is its result, such as a chat's answer.
+    subprocess.run(command, check=True, stdout=sys.stderr.fileno())
 
 
 class RecordedArtifacts:

@@ -42,7 +42,7 @@ class Reservation:
         marker = self.directory / ".inferssd-owner"
         info = marker.stat()
         if (info.st_dev, info.st_ino) != (self.device, self.inode) or json.loads(
-            marker.read_text()
+            marker.read_text(encoding="utf-8")
         ).get("token") != self.token:
             raise RuntimeError("execution directory ownership changed")
 

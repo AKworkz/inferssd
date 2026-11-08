@@ -171,11 +171,6 @@ def default_output_directory() -> Path:
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.execute and args.platform == "windows":
-        # The owned process, its lock lease and its resource sampling are POSIX.
-        raise ValueError(
-            "owned execution supports linux and darwin; prepare a windows launch with --dry-run"
-        )
     if args.machine is not None and args.reprofile:
         raise ValueError("--machine is used as it is; --reprofile measures this machine instead")
     if args.dry_run and args.reprofile:

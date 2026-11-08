@@ -211,13 +211,15 @@ def plan_refresh(
         if before != after:
             mark(names, f"probe schema {before or 'none'} -> {after or 'none'}")
             stale = stale or probe == "ssd"
+    # Outside Linux no probe measures GPUs, so a partial gpus section stays partial.
+    unmeasured = () if "memory" in new["probe_versions"] else ("gpus",)
     for name in BASE_SECTIONS:
         section = saved["sections"].get(name)
         if section is None:
             mark([name], "not measured yet")
         elif section["status"] == "failed":
             mark([name], "last attempt failed")
-        elif section["status"] == "partial":
+        elif section["status"] == "partial" and name not in unmeasured:
             mark([name], "last attempt was partial")
     known = {entry["drive_key"] for entry in saved["storage"]}
     for key in drives:

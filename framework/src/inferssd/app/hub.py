@@ -33,6 +33,7 @@ def select_files(names: Sequence[str], quant: str) -> list[str]:
         if name.endswith(".gguf")
         and token.search(name)
         and "mmproj" not in PurePosixPath(name).name.lower()
+        and not PurePosixPath(name).name.lower().startswith("mtp-")
     )
     if not files:
         raise ValueError(f"no {quant} GGUF files found in the Hugging Face repository")

@@ -48,16 +48,14 @@ def plan(
 
     MEMORY is the launch's memory budget: it is the strategy's budget and
     bounds the memory available to it. GPU_BACKENDS are the engine's, None
-    when unknown. Without characteristics, or on a platform that cannot be
-    profiled yet, the launch keeps its inputs and the receipt names why.
+    when unknown. Without characteristics, or when no strategy can be derived
+    from them, the launch keeps its inputs and the receipt names why.
     """
 
     def skipped(reason: str) -> Planned:
         s.emit("inferssd launch: no launch strategy: " + reason + "\n", "stderr")
         return Planned(settings, threads, (), {"skipped": reason})
 
-    if platform == "windows":
-        return skipped("machine profiling is not supported on windows yet")
     text = s.value("machine_characteristics")
     if text is None:
         return skipped("no machine characteristics")

@@ -64,12 +64,15 @@ The host memory ledger has two terms on every platform, and they size the expert
 caches. The envelope is a finite limit on this process's memory less a 512 MiB
 reserve: on Linux the tightest cgroup v2 `memory.max`; on Windows a memory limit
 of the process's job, when the job sets one, against commit; and on macOS and
-Windows `host.budget_mib` against the process's own memory (Windows PrivateUsage,
-macOS phys_footprint). With `host.budget_mib = 0` and no job limit, the limit is
+Windows `host.budget_mib` against the process's host memory (macOS phys_footprint;
+Windows PrivateUsage less the video memory the process holds on discrete GPUs,
+which WDDM charges to commit without taking host memory, so the framework's job
+limit is the memory budget plus the discrete GPUs' dedicated memory). With `host.budget_mib = 0` and no job limit, the limit is
 the machine's physical memory, the budget the framework passes by default. The
 system term is the memory available now less the floor, which is at least
 `host.headroom_mib` and the reserve: Linux MemAvailable, Windows the smaller of available physical
-memory and available commit, macOS what a new allocation takes before the kernel
+memory and the commit still available (including what the paging files may grow
+by), macOS what a new allocation takes before the kernel
 compresses anything, by its own live thresholds: the free pages above its free
 target, the file-backed pages above its file cache minimum
 (`vm.vm_page_filecache_min`), and the purgeable and reusable pages. The RAM

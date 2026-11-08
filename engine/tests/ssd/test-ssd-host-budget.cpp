@@ -5,6 +5,7 @@
 #include "ggml-ssd/host/arbiter.h"
 #include "ggml-ssd/host/ledger-native.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -178,6 +179,23 @@ static void explicit_budget() {
 }
 
 #if defined(_WIN32)
+// Host use is the commit less the video memory held in discrete adapters' local segments, and the system term stays
+// within the physical memory available however far the paging files may grow.
+static void host_use_and_commit() {
+    uint64_t commit = 0, device = 0, host = 0;
+    require(native::commit_use(commit) && native::device_commit(device) && native::process_use(host),
+            "commit, device and host use read");
+    std::printf("commit %llu MiB, device %llu MiB, host %llu MiB\n", mib(commit), mib(device), mib(host));
+    require(host <= commit && host + device + 16 * MiB >= commit && host + device <= commit + 16 * MiB,
+            "host use is the commit less the device memory");
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    uint64_t room = 0;
+    require(GlobalMemoryStatusEx(&status) != 0 && native::available(room), "available memory read");
+    require(room <= status.ullAvailPhys + 64 * MiB && room + 64 * MiB >= std::min<uint64_t>(status.ullAvailPhys,
+            status.ullAvailPageFile), "the system term is physical memory, bounded by growable commit");
+}
+
 // A job memory limit on commit (the job's and the process's), set the way a deployment would.
 static void job_limit() {
     // Commit made before joining the job must count as the job's use too.
@@ -231,6 +249,7 @@ int main() {
     machine();
     explicit_budget();
 #if defined(_WIN32)
+    host_use_and_commit();
     job_limit(); // last: the process stays in the job
 #endif
     std::printf("ok\n");
