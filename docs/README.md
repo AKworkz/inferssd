@@ -6,6 +6,7 @@
 ## Using InferSSD
 
 - [Quick start](quickstart.md): build and launch on macOS or Linux.
+- [macOS package](macos-package.md): the prebuilt Apple Silicon package, how it is made and published.
 - [Apple Silicon deployment](mac-launcher.md): Metal build, cache and thread settings.
 - [Configuration](configuration.md): the typed `inferssd-settings 1` contract.
 - [Deployment resources](engine-resources.md): engine descriptors for installations outside a checkout.

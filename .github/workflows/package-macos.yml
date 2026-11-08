@@ -1,0 +1,76 @@
+name: Package macOS
+
+# Build the prebuilt Apple silicon package from main, check it on the oldest and the newest macOS
+# it runs on, and, when asked, publish it and point the installer's package list at it.
+# See docs/macos-package.md.
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Upload the package and point latest-macos.json at it
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-macos
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # The build number is the commit count of main.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build the package
+        run: scripts/package-macos.sh dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-macos
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  check:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: package-macos
+          path: dist
+      - name: Install and run the package without developer tools
+        run: scripts/check-package-macos.sh dist/inferssd-*-macos-arm64.tar.gz
+
+  publish:
+    needs: check
+    if: inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: package-macos
+          path: dist
+      - name: Publish
+        env:
+          APP_VERSIONING_TOKEN: ${{ secrets.APP_VERSIONING_TOKEN }}
+        run: python3 scripts/publish-package.py dist

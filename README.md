@@ -81,9 +81,13 @@ Install on Apple Silicon macOS or on Linux with an NVIDIA GPU:
 curl -fsSL https://github.com/wici-ai/inferssd/releases/latest/download/install.sh | sh
 ```
 
-InferSSD currently installs from source, so the engine is compiled for your machine's CPU and GPU; prebuilt packages are not available yet. Building takes about 2 to 12 minutes, depending on the machine.
+A release's installer builds that release from source, so the engine is compiled for your machine's CPU and GPU. Building takes about 2 to 12 minutes, depending on the machine. On an Apple Silicon Mac with macOS 15 or later, the installer on `main` instead downloads a prebuilt package of `main`, about 30 MB, which needs no developer tools; see [the macOS package](docs/macos-package.md):
 
-The installer works in a private environment and uses no `sudo`. It needs Git, Python 3.9 or later, and a C/C++ compiler. macOS also needs the Xcode Command Line Tools; Linux also needs systemd with cgroup v2, and the CUDA toolkit on a machine with an NVIDIA GPU. Follow the printed PATH instruction if it shows one.
+```sh
+curl -fsSL https://raw.githubusercontent.com/wici-ai/inferssd/main/scripts/install.sh | sh
+```
+
+The installer works in a private environment and uses no `sudo`. A source build needs Git, Python 3.9 or later, and a C/C++ compiler. On macOS it also needs the Xcode Command Line Tools; Linux also needs systemd with cgroup v2, and the CUDA toolkit on a machine with an NVIDIA GPU. Follow the printed PATH instruction if it shows one.
 
 Then start a model:
 
@@ -108,7 +112,8 @@ label of its own, `<yymmdd>.<build>.<commit>`: the day (UTC) of the commit it wa
 branch's commit count up to that commit, and the commit. The installer records the three in
 `engine-resources.json` beside the build, from the clone's Git metadata, and so does a local
 build that runs `scripts/engine-resources.py`; a source archive has no Git metadata and records
-none. `inferssd --version` prints the release and the label, `inferssd --version --json` every
+none. A [macOS package](docs/macos-package.md) carries those of the commit it was built from
+and is named by its label. `inferssd --version` prints the release and the label, `inferssd --version --json` every
 field:
 
 ```sh
@@ -119,8 +124,8 @@ $ inferssd --version --json
 ```
 
 The engine only says what it is. Whether a build is one it can work with is for whatever runs
-the engine to decide; the WiCi AI desktop app, for one, installs the head of `main`, offers its
-newer commits as updates, and keeps a floor of its own on `build`. Nothing here refers to it.
+the engine to decide; the WiCi AI desktop app, for one, installs `main`, offers its newer
+builds as updates, and keeps a floor of its own on `build`. Nothing here refers to it.
 
 ## Further reading
 
