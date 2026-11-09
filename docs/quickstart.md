@@ -240,4 +240,24 @@ python3 engine/tools/expert-pack/create-moe-expert-pack.py --inspect -o /path/to
 
 To launch with the pack, set `expert.source = ["/path/to/model.expert-pack"]` in the settings file. The v1 format records no checkpoint fingerprint, so rebuild the pack whenever the shards change.
 
+To read the experts from several drives at once, stripe the alias index over them. The striping tool keeps part of the experts in the GGUF shards and copies the rest into one pack per further drive, each payload 4 KiB aligned, read back through the operating system and compared by SHA-256 after it is written. It then writes an alias index that names where each expert is. Both tools run in the environment of a [manual source installation](#manual-source-installation):
+
+```sh
+python3 -m inferssd.source.gguf_alias --model-glob '/path/to/model-*-of-00010.gguf' \
+  --out /path/to/model.tsv --summary-json /path/to/model.json
+python3 -m inferssd.source.stripe --index /path/to/model.tsv \
+  --drive /mnt/second-ssd/inferssd --out /path/to/model.stripe.tsv
+```
+
+On Windows:
+
+```bat
+python -m inferssd.source.gguf_alias --model-glob "D:\models\model-*-of-00010.gguf" --out D:\models\model.tsv --summary-json D:\models\model.json
+python -m inferssd.source.stripe --index D:\models\model.tsv --drive E:\inferssd --out D:\models\model.stripe.tsv
+```
+
+Then set `expert.source = ["/path/to/model.stripe.tsv"]`. Repeat `--drive` for each further drive. The unit of placement is one role (gate, up or down) of one expert, the same in every layer. Consecutive units, an expert's roles and then the next expert's, go to consecutive drives, so the reads of the experts a layer misses run on several drives at once. `--weights` gives each drive a share of the units instead, the shards' drive first, for example each drive's read rate: `--weights 4.4,3.7`. Shares count units, not bytes or how often the router selects an expert. A drive on the same volume as another adds no bandwidth.
+
+Each run creates new packs, named with a fresh generation, and publishes the index last by renaming it into place. An index written earlier keeps naming its own packs, so a server can keep running on it; remove those packs once nothing uses that index. The packs and the index are flushed before the index is published; on Linux and macOS the packs' directories too, and the index's directory once it is in place. Rebuild the striped index and its packs whenever the shards change.
+
 Open **http://127.0.0.1:8080** after the server is ready, or point an OpenAI-compatible client at `http://127.0.0.1:8080/v1`. Stop the owned launcher with **Ctrl+C**.
