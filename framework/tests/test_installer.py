@@ -164,7 +164,7 @@ def test_mac_asks_for_the_command_line_tools(installation):
 
 
 def test_release_workflow_can_pin_the_installer():
-    # .github/workflows/release.yml rewrites exactly this line to the tag.
+    # Numbered release asset preparation rewrites exactly this line to the tag.
     assert re.search(r"^DEFAULT_REF=main$", INSTALLER.read_text(), re.M)
 
 
@@ -179,7 +179,7 @@ WINDOWS_INSTALLER = INSTALLER.with_name("install.ps1")
 
 
 def test_release_workflow_can_pin_the_windows_installer():
-    # .github/workflows/release.yml rewrites exactly this line to the tag.
+    # Numbered release asset preparation rewrites exactly this line to the tag.
     assert re.search(r"^\$DefaultRef = 'main'$", WINDOWS_INSTALLER.read_text(), re.M)
 
 
@@ -293,6 +293,24 @@ def test_mac_installs_the_package_without_developer_tools(installation, tmp_path
     assert current.parent.parent == home.resolve() / "releases"
     descriptor = subprocess.check_output([str(bindir / "inferssd"), "serve", "--help"], text=True)
     assert Path(descriptor.strip()) == current / "engine-resources.json"
+    called = set(Path(env["CALL_LOG"]).read_text().split())
+    assert not called & {"git", "cc", "c++", "xcode-select", "python3", "cmake"}
+
+
+@posix_installer
+def test_tagged_mac_installer_still_uses_its_prebuilt_package(installation, tmp_path):
+    home, _, env = installation
+    text = INSTALLER.read_text().replace("DEFAULT_REF=main", "DEFAULT_REF=v0.1.3")
+    result = subprocess.run(
+        ["sh"],
+        input=text,
+        text=True,
+        env=dict(env, INFERSSD_PACKAGES=make_package(tmp_path, "261107.207.84bcc56")),
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Downloading InferSSD" in result.stdout and "Building" not in result.stdout
+    assert home.joinpath("current").is_dir()
     called = set(Path(env["CALL_LOG"]).read_text().split())
     assert not called & {"git", "cc", "c++", "xcode-select", "python3", "cmake"}
 

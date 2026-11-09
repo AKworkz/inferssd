@@ -1,0 +1,135 @@
+name: Package Windows
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Exact commit to build and check for the shared numbered release
+        required: true
+        type: string
+      publish:
+        type: boolean
+        default: false
+    secrets:
+      APP_VERSIONING_TOKEN:
+        required: false
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'engine/**'
+      - 'framework/**'
+      - 'scripts/package-windows*'
+      - 'scripts/check-package-windows*'
+      - scripts/windows-launcher.cpp
+      - scripts/engine-resources.py
+      - scripts/install.ps1
+      - CMakeLists.txt
+      - CMakePresets.json
+      - .github/workflows/package-windows.yml
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the checked package and update latest-windows.json (main only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-windows-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    runs-on: windows-2025
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install the build-time Vulkan SDK
+        shell: pwsh
+        run: |
+          $sdk = Join-Path $env:RUNNER_TEMP 'vulkan-sdk'
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkan-sdk.exe'
+          Invoke-WebRequest -UserAgent 'inferssd-build' -Uri 'https://sdk.lunarg.com/sdk/download/1.4.363.0/windows/vulkansdk-windows-X64-1.4.363.0.exe' -OutFile $installer
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne '94a82d378f7a5e3e54c9db7d2fb7016af136e14ac0a18dbf0f2f67a36352d141') { throw 'Vulkan SDK checksum mismatch' }
+          $stdout = Join-Path $env:RUNNER_TEMP 'vulkan-sdk-install.stdout.txt'
+          $stderr = Join-Path $env:RUNNER_TEMP 'vulkan-sdk-install.stderr.txt'
+          # LunarG's supported unattended syntax puts global options before the command.
+          # copy_only avoids machine registry/PATH changes; only this job needs the SDK.
+          $install = Start-Process -FilePath $installer -ArgumentList @('--root', "`"$sdk`"", '--accept-licenses', '--default-answer', '--confirm-command', 'install', 'copy_only=1') -PassThru -Wait -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          Write-Host "Vulkan SDK installer exit: $($install.ExitCode); requested root: $sdk"
+          Get-Content -LiteralPath $stdout -ErrorAction SilentlyContinue
+          Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue
+          if (Test-Path -LiteralPath $sdk) { Get-ChildItem -LiteralPath $sdk | Select-Object Name }
+          if ($install.ExitCode -ne 0 -or !(Test-Path -LiteralPath "$sdk\Bin\glslc.exe")) { throw 'Vulkan SDK installation failed; see captured installer output' }
+          "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+      - name: Preserve SDK install diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: vulkan-sdk-install-log
+          path: ${{ runner.temp }}/vulkan-sdk-install.*.txt
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Build the relocatable engine package
+        shell: cmd
+        run: |
+          for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
+          call "%VS%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44 > nul || exit /b 1
+          set "PATH=%ProgramFiles%\LLVM\bin;%VULKAN_SDK%\Bin;%PATH%"
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -OutputDirectory dist -Jobs 2
+          if errorlevel 1 exit /b 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-windows-x64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  check:
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: package-windows-x64
+          path: dist
+      - name: Relocate, install and run without developer tools
+        shell: powershell
+        run: |
+          $zip = @(Get-ChildItem -LiteralPath dist -Filter 'inferssd-*-windows-x64.zip')
+          if ($zip.Count -ne 1) { throw 'Expected one Windows engine archive' }
+          & scripts/check-package-windows.ps1 -Archive $zip[0].FullName
+
+  publish:
+    needs: check
+    if: github.ref == 'refs/heads/main' && inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: inferssd-package-publish
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: package-windows-x64
+          path: dist
+      - name: Publish the checked package
+        env:
+          APP_VERSIONING_TOKEN: ${{ secrets.APP_VERSIONING_TOKEN }}
+        run: python3 scripts/publish-package.py dist

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Publish a package from scripts/package-macos.sh and point the package list at it.
+"""Publish a prebuilt platform package and point its package list at it.
 
 Usage: APP_VERSIONING_TOKEN=... scripts/publish-package.py DIST_DIR
 
-DIST_DIR holds one inferssd-<label>-macos-arm64.tar.gz and its .json. The archive goes to
+DIST_DIR holds one versioned macOS tar.gz or Windows ZIP and its .json. The archive goes to
 cdn.wici.ai/apps/inferssd/ through WiCi AI's release service, which hands out an upload URL for it,
 as the desktop app's releases do. Then the package list, the .json with the archive's URL added,
-replaces latest-macos.json, which scripts/install.sh reads. The list never moves to an older
-build.
+replaces latest-macos.json or latest-windows.json, which that platform's installer reads.
+The list never moves to an older build.
 
 The CDN keeps a file for a year, so a name never gets other bytes: a package built again from a
 commit already uploaded is refused. Re-run the failed publish job of the run that built it
@@ -26,7 +26,8 @@ import urllib.request
 from pathlib import Path
 
 SERVICE = os.environ.get("INFERSSD_PUBLISH_SERVICE", "https://appapi.wici.ai/versioning/inferssd")
-LIST = "latest-macos.json"
+LISTS = {"darwin-arm64": ("latest-macos.json", ".tar.gz"),
+         "windows-x64": ("latest-windows.json", ".zip")}
 # The CDN in front of the service refuses Python's default User-Agent.
 AGENT = "inferssd-publish"
 
@@ -60,10 +61,20 @@ def main() -> None:
     token = os.environ.get("APP_VERSIONING_TOKEN")
     if not token:
         fail("APP_VERSIONING_TOKEN is not set")
-    listings = sorted(Path(sys.argv[1]).glob("inferssd-*-macos-arm64.json"))
+    folder = Path(sys.argv[1])
+    listings = sorted(folder.glob("inferssd-*-macos-arm64.json")) + sorted(
+        folder.glob("inferssd-*-windows-x64.json")
+    )
     if len(listings) != 1:
         fail(f"expected one package in {sys.argv[1]}, found {len(listings)}")
     package = json.loads(listings[0].read_text(encoding="utf-8"))
+    if package.get("platform") not in LISTS:
+        fail("unsupported package platform")
+    listing_name, extension = LISTS[package["platform"]]
+    name = package.get("name")
+    if (not isinstance(name, str) or not name or "/" in name or "\\" in name
+            or package.get("file") != name + extension):
+        fail("the package filename does not match its platform and name")
     archive = listings[0].with_name(package["file"])
     data = archive.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
@@ -71,16 +82,16 @@ def main() -> None:
     if package["schema"] != "inferssd-package 1" or not matches:
         fail(f"{archive.name} does not match {listings[0].name}")
 
-    status, body = call("GET", f"{SERVICE}/config/{LIST}")
+    status, body = call("GET", f"{SERVICE}/config/{listing_name}")
     if status == 200:
         current = json.loads(body)
         if current.get("build", 0) > package["build"]:
             fail(
-                f"{LIST} already names build {current['build']} ({current.get('label')}), "
+                f"{listing_name} already names build {current['build']} ({current.get('label')}), "
                 f"later than {package['build']}"
             )
     elif status != 404:
-        fail(f"reading {LIST} answered {status}")
+        fail(f"reading {listing_name} answered {status}")
 
     name = archive.name
     status, body = call(
@@ -115,10 +126,10 @@ def main() -> None:
         fail(f"{upload['url']} does not serve the package (status {status})")
     listing = json.dumps({**package, "url": upload["url"]}, indent=2).encode() + b"\n"
     status, body = call(
-        "PUT", f"{SERVICE}/config/{LIST}", listing, {"Content-Type": "application/json"}, token
+        "PUT", f"{SERVICE}/config/{listing_name}", listing, {"Content-Type": "application/json"}, token
     )
     if status != 200:
-        fail(f"writing {LIST} answered {status}: {body[:300]!r}")
+        fail(f"writing {listing_name} answered {status}: {body[:300]!r}")
     stored = json.loads(body)
     print(f"{stored['url']} now names {upload['url']}")
     print(f"{package['label']}, sha256 {digest}")

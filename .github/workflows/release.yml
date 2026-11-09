@@ -1,40 +1,114 @@
 name: Release
 
-# Publish a version tag as a release whose installer builds that tag from source.
+# One numbered release contains checked macOS and Windows packages of the same tag commit.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
+  validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      revision: ${{ steps.source.outputs.revision }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
-      - name: Check the tag against the package version
-        run: grep -qx "version = \"${GITHUB_REF_NAME#v}\"" framework/pyproject.toml
-      - name: Pin the installer to this tag
+      - name: Check the numbered tag and package version
+        id: source
+        shell: bash
         run: |
-          sed -i "s/^DEFAULT_REF=main$/DEFAULT_REF=${GITHUB_REF_NAME}/" scripts/install.sh
-          grep -qx "DEFAULT_REF=${GITHUB_REF_NAME}" scripts/install.sh
-          sh -n scripts/install.sh
-          sed -i "s/^\$DefaultRef = 'main'\$/\$DefaultRef = '${GITHUB_REF_NAME}'/" scripts/install.ps1
-          grep -qx "\$DefaultRef = '${GITHUB_REF_NAME}'" scripts/install.ps1
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          grep -Fqx "version = \"${GITHUB_REF_NAME#v}\"" framework/pyproject.toml
+          revision=$(git rev-parse HEAD)
+          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "$revision"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+  macos:
+    needs: validate
+    uses: ./.github/workflows/package-macos.yml
+    with:
+      source_ref: ${{ needs.validate.outputs.revision }}
+
+  windows:
+    needs: validate
+    uses: ./.github/workflows/package-windows.yml
+    with:
+      source_ref: ${{ needs.validate.outputs.revision }}
+
+  release:
+    needs: [validate, macos, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    concurrency:
+      group: inferssd-package-publish
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.revision }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: package-macos
+          path: dist/macos
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: package-windows-x64
+          path: dist/windows
+      - name: Prepare both platforms and tag-pinned installers
+        env:
+          RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
+        run: |
+          python3 scripts/prepare-release-assets.py --macos dist/macos --windows dist/windows \
+            --output release-assets --tag "$GITHUB_REF_NAME" --revision "$RELEASE_REVISION" \
+            --repository "$GITHUB_REPOSITORY"
+          sh -n release-assets/install.sh
       - name: Extract the release notes from the changelog
         run: |
           awk -v heading="## ${GITHUB_REF_NAME#v} " \
             'index($0, heading) == 1 { found = 1; next } /^## / { found = 0 } found' \
             CHANGELOG.md > release-notes.md
           test -s release-notes.md
-      - name: Publish
+      - name: Publish the common numbered release and normal package feeds
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          APP_VERSIONING_TOKEN: ${{ secrets.APP_VERSIONING_TOKEN }}
+          RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
         run: |
-          gh release create "$GITHUB_REF_NAME" scripts/install.sh scripts/install.ps1 \
-            --verify-tag --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+          set -euo pipefail
+          test -n "$APP_VERSIONING_TOKEN" || { echo 'APP_VERSIONING_TOKEN is required for both normal package feeds.' >&2; exit 1; }
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo 'A release already exists for this tag; its assets will not be replaced.' >&2
+            exit 1
+          fi
+          created=no
+          cleanup() {
+            if [ "$created" = yes ] && [ "$(gh api "repos/$GH_REPO/releases/tags/$GITHUB_REF_NAME" --jq '.draft')" = true ]; then
+              gh release delete "$GITHUB_REF_NAME" --yes
+            fi
+          }
+          trap cleanup EXIT
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --target "$RELEASE_REVISION" --title "$GITHUB_REF_NAME" --notes-file release-notes.md
+          created=yes
+          gh release upload "$GITHUB_REF_NAME" release-assets/*
+          python3 scripts/publish-package.py dist/macos
+          python3 scripts/publish-package.py dist/windows
+          gh release edit "$GITHUB_REF_NAME" --draft=false
+          created=no

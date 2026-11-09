@@ -9,7 +9,7 @@ DIRECTORIES = {"engine", "framework", "bench", "tests", "scripts", "docs", ".git
 FILES = {
     ".clang-format", ".clang-tidy", ".dockerignore", ".editorconfig", ".gitattributes",
     ".gitignore", ".gitleaks.toml", ".gitleaksignore",
-    "CHANGELOG.md", "CMakeLists.txt", "CMakePresets.json", "CONTRIBUTING.md", "LICENSE",
+    "AGENTS.md", "CHANGELOG.md", "CMakeLists.txt", "CMakePresets.json", "CONTRIBUTING.md", "LICENSE",
     "NOTICE", "README.md",
 }
 tracked = set(subprocess.check_output(

@@ -88,7 +88,7 @@ Install on Apple Silicon macOS or on Linux with an NVIDIA GPU:
 curl -fsSL https://github.com/wici-ai/inferssd/releases/latest/download/install.sh | sh
 ```
 
-A release's installer builds that release from source, so the engine is compiled for your machine's CPU and GPU. Building takes about 2 to 12 minutes, depending on the machine. On an Apple Silicon Mac with macOS 15 or later, the installer on `main` instead downloads a prebuilt package of `main`, about 30 MB, which needs no developer tools; see [the macOS package](docs/macos-package.md):
+Each numbered release includes checked prebuilt packages for Apple Silicon macOS 15 or later and Windows 11 x64, built from the same tagged commit. Its installers download that exact release without developer tools; see [the macOS package](docs/macos-package.md) and [Windows package](docs/windows-package.md). Linux builds that release from source for the machine's CPU and GPU, which takes about 2 to 12 minutes. The installer on `main` downloads the latest published package:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/wici-ai/inferssd/main/scripts/install.sh | sh
@@ -119,8 +119,8 @@ label of its own, `<yymmdd>.<build>.<commit>`: the day (UTC) of the commit it wa
 branch's commit count up to that commit, and the commit. The installer records the three in
 `engine-resources.json` beside the build, from the clone's Git metadata, and so does a local
 build that runs `scripts/engine-resources.py`; a source archive has no Git metadata and records
-none. A [macOS package](docs/macos-package.md) carries those of the commit it was built from
-and is named by its label. `inferssd --version` prints the release and the label, `inferssd --version --json` every
+none. The [macOS](docs/macos-package.md) and [Windows](docs/windows-package.md) packages carry those of the same tagged commit in each numbered release
+and are named by that label. `inferssd --version` prints the release and the label, `inferssd --version --json` every
 field:
 
 ```sh

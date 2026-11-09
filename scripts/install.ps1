@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Usage: irm https://github.com/wici-ai/inferssd/releases/latest/download/install.ps1 | iex
-# The same installation as install.sh: a new release directory built from source, published
-# only once it works, and a command that uses it. A previous installation stays usable.
+# Install the precompiled Windows package without developer tools. A source build is an
+# explicit developer option; either path keeps the working installation until checks pass.
 
 # The release workflow replaces this with the tag it publishes.
 $DefaultRef = 'main'
+$Packages = 'https://appapi.wici.ai/versioning/inferssd/config/latest-windows.json'
 
 function Install-InferSSD {
     param([string[]] $Arguments = @())
@@ -12,22 +13,22 @@ function Install-InferSSD {
 
     if ($Arguments -contains '--help') {
         @'
-Install InferSSD from source for Windows x64.
-Requires Git, Python >=3.9, LLVM clang and the Visual Studio C++ build tools with a
-Windows SDK of 10.0.22000 or later. The engine is built for the machine's GPUs: with
-the Vulkan SDK (VULKAN_SDK) it uses a GPU through Vulkan, an NVIDIA GPU included;
-without a GPU or the Vulkan SDK it runs on the CPU.
-CMake, Ninja and the Python framework are installed in a private environment.
+Install InferSSD for Windows x64 (Windows 11 / Windows Server build 22000 or later).
+The default installation downloads a precompiled engine and its own Python runtime.
+No Git, Python, compiler, Visual Studio or Vulkan SDK is needed. GPU drivers remain
+provided by Windows or the GPU vendor; the package also supports CPU inference.
 
 Environment:
   INFERSSD_HOME         Installation and model root (default: %LOCALAPPDATA%\inferssd)
   INFERSSD_BIN_DIR      Command directory (default: %LOCALAPPDATA%\inferssd\bin)
-  INFERSSD_REF          Branch or tag to build (default: this installer's release)
-  INFERSSD_REPO         Git repository to build from (default: the InferSSD repository)
-  INFERSSD_JOBS         Build parallelism (default: 4)
-  INFERSSD_VCVARS       vcvars64.bat, if Visual Studio's installer does not know it
+  INFERSSD_PACKAGES     Prebuilt package list (default: main's latest-windows.json)
+  INFERSSD_FROM_SOURCE  Build from source instead (any value, developer tools required)
+  INFERSSD_REF          Explicit branch/tag to build from source
+  INFERSSD_REPO         Git repository for an explicit source build
+  INFERSSD_JOBS         Source-build parallelism (default: 4)
+  INFERSSD_VCVARS       Source build's vcvars64.bat, if not discovered
 
-No administrator rights are used. A previous installation remains usable if building fails.
+No administrator rights are used. Models, settings and previous releases are preserved.
 '@ | Write-Output
         return
     }
@@ -39,6 +40,218 @@ No administrator rights are used. A previous installation remains usable if buil
         $oem = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
         [IO.File]::WriteAllLines($Path, $Lines, $oem)
     }
+
+    $installHome = if ($env:INFERSSD_HOME) { $env:INFERSSD_HOME } else { Join-Path $env:LOCALAPPDATA 'inferssd' }
+    $binDir = if ($env:INFERSSD_BIN_DIR) { $env:INFERSSD_BIN_DIR } else { Join-Path $env:LOCALAPPDATA 'inferssd\bin' }
+    if (-not [IO.Path]::IsPathRooted($installHome)) { throw 'inferssd: INFERSSD_HOME must be an absolute path.' }
+    if (-not [IO.Path]::IsPathRooted($binDir)) { throw 'inferssd: INFERSSD_BIN_DIR must be an absolute path.' }
+    $installHome = [IO.Path]::GetFullPath($installHome).TrimEnd('\', '/')
+    $binDir = [IO.Path]::GetFullPath($binDir).TrimEnd('\', '/')
+    if ($installHome -match '^[a-zA-Z]:$') { $installHome += '\' }
+    if ($binDir -match '^[a-zA-Z]:$') { $binDir += '\' }
+    $releases = Join-Path $installHome 'releases'
+
+    function Remove-Stage([string] $Path) {
+        $absolute = [IO.Path]::GetFullPath($Path)
+        if ([IO.Path]::GetDirectoryName($absolute) -ne $releases -or
+            [IO.Path]::GetFileName($absolute) -notmatch '^(package|source)\.[a-zA-Z0-9]+$') {
+            throw 'inferssd: refusing to clean a path outside the release staging directory.'
+        }
+        if (Test-Path -LiteralPath $absolute) {
+            if ((Get-Item -LiteralPath $absolute -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw 'inferssd: refusing to recursively clean a reparse point.'
+            }
+            Remove-Item -LiteralPath $absolute -Recurse -Force
+        }
+    }
+
+    function Remove-Link([string] $Path) {
+        if (Test-Path -LiteralPath $Path) {
+            if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Path)) -ne $installHome -or
+                -not ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw 'inferssd: the installation pointer is not a junction.'
+            }
+            # Non-recursive deletion removes the junction, never the release it names.
+            [IO.Directory]::Delete($Path)
+        }
+    }
+
+    function Publish-Release([string] $Package, [string] $Command, [string] $Resources) {
+        [IO.Directory]::CreateDirectory($binDir) | Out-Null
+        $id = [Guid]::NewGuid().ToString('N')
+        $current = Join-Path $installHome 'current'
+        $pending = Join-Path $installHome ('.current-' + $id)
+        $previous = Join-Path $installHome ('.previous-' + $id)
+        $wrapper = Join-Path $binDir 'inferssd.cmd'
+        $pendingCommand = Join-Path $binDir ('.inferssd-' + $id + '.cmd')
+        $previousCommand = Join-Path $binDir ('.previous-' + $id + '.cmd')
+        $moved = $false; $published = $false; $commandPublished = $false; $finished = $false
+        Write-Batch $pendingCommand @(
+            '@echo off',
+            "if not defined INFERSSD_HOME set `"INFERSSD_HOME=$installHome`"",
+            "if not defined INFERSSD_RESOURCES set `"INFERSSD_RESOURCES=$Resources`"",
+            "`"$Command`" %*"
+        )
+        New-Item -ItemType Junction -Path $pending -Value $Package | Out-Null
+        try {
+            if (Test-Path -LiteralPath $current) {
+                if (-not ((Get-Item -LiteralPath $current -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                    throw 'inferssd: current is not an installation junction; it was left unchanged.'
+                }
+                [IO.Directory]::Move($current, $previous)
+                $moved = $true
+            }
+            [IO.Directory]::Move($pending, $current)
+            $published = $true
+            if (Test-Path -LiteralPath $wrapper) {
+                [IO.File]::Replace($pendingCommand, $wrapper, $previousCommand)
+            } else {
+                [IO.File]::Move($pendingCommand, $wrapper)
+            }
+            $commandPublished = $true
+            $finished = $true
+        } catch {
+            $failure = $_
+            if ($published) { Remove-Link $current }
+            if ($moved) { [IO.Directory]::Move($previous, $current) }
+            if ($commandPublished -and (Test-Path -LiteralPath $previousCommand)) {
+                [IO.File]::Replace($previousCommand, $wrapper, $null)
+            }
+            throw $failure
+        } finally {
+            Remove-Link $pending
+            if ($finished) { Remove-Link $previous }
+            foreach ($file in @($pendingCommand, $previousCommand)) {
+                if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
+            }
+        }
+    }
+
+    function Download-File([string] $Address, [string] $Destination) {
+        $uri = [Uri]$Address
+        if (-not $uri.IsAbsoluteUri -or $uri.UserInfo -or $uri.Fragment -or
+            ($uri.Scheme -ne 'https' -and -not ($uri.IsFile -and $env:INFERSSD_PACKAGES) -and
+             -not ($uri.Scheme -eq 'http' -and $uri.Host -in @('127.0.0.1', 'localhost', '[::1]')))) {
+            throw 'inferssd: package URLs require HTTPS (or a local test package list).'
+        }
+        if ($uri.IsFile) { Copy-Item -LiteralPath $uri.LocalPath -Destination $Destination }
+        else { Invoke-WebRequest -UseBasicParsing -Uri $uri.AbsoluteUri -OutFile $Destination }
+    }
+
+    function Install-Package {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [IO.Directory]::CreateDirectory($releases) | Out-Null
+        # Keep the installed path short enough for Windows PowerShell 5 / .NET Framework.
+        $release = Join-Path $releases ('package.' + [Guid]::NewGuid().ToString('N').Substring(0,12))
+        [IO.Directory]::CreateDirectory($release) | Out-Null
+        $complete = $false
+        try {
+            $listing = Join-Path $release 'latest.json'
+            $address = if ($env:INFERSSD_PACKAGES) { $env:INFERSSD_PACKAGES } else { $Packages }
+            try { Download-File $address $listing }
+            catch { throw "inferssd: cannot download the Windows package list. No source build was started. $($_.Exception.Message)" }
+            $package = Get-Content -LiteralPath $listing -Raw | ConvertFrom-Json
+            if ($package.schema -ne 'inferssd-package 1' -or $package.platform -ne 'windows-x64') {
+                throw 'inferssd: unsupported Windows package list.'
+            }
+            if ($package.name -notmatch '^inferssd-[a-zA-Z0-9.-]+-windows-x64$' -or
+                $package.file -ne ($package.name + '.zip') -or $package.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or
+                ($package.size -isnot [int] -and $package.size -isnot [long]) -or [long]$package.size -lt 1 -or
+                ($package.build -isnot [int] -and $package.build -isnot [long]) -or [long]$package.build -lt 1 -or
+                $package.revision -notmatch '^[a-fA-F0-9]{40}$' -or
+                $package.minimum_windows -notmatch '^10\.0\.[0-9]+(?:\.[0-9]+)?$') {
+                throw 'inferssd: invalid Windows package metadata.'
+            }
+            if ([Environment]::OSVersion.Version -lt [Version]$package.minimum_windows) {
+                throw "inferssd: this package requires Windows build $($package.minimum_windows) or later."
+            }
+            Write-Output "Downloading InferSSD $($package.label) ($([math]::Ceiling($package.size / 1000000)) MB)."
+            $archive = Join-Path $release 'package.zip'
+            Download-File $package.url $archive
+            $hash = [Security.Cryptography.SHA256]::Create()
+            $stream = [IO.File]::OpenRead($archive)
+            try { $digest = [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-', '') }
+            finally { $hash.Dispose(); $stream.Dispose() }
+            if ((Get-Item -LiteralPath $archive).Length -ne [long]$package.size -or
+                $digest -ne $package.sha256) {
+                throw 'inferssd: the package download does not match its size and checksum.'
+            }
+            $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+            try {
+                function Entry-Path($entry) {
+                    $relative = $entry.FullName.Replace('/', '\')
+                    $link = (($entry.ExternalAttributes -shr 16) -band 61440) -eq 40960
+                    if ($relative.Contains(':') -or $link -or
+                        -not $relative.StartsWith($package.name + '\', [StringComparison]::Ordinal)) {
+                        throw 'inferssd: unsafe path in the Windows package.'
+                    }
+                    $relative = $relative.Substring($package.name.Length + 1)
+                    if (!$relative -and !$entry.Length) { return $null }
+                    # The archive's validated single top folder is not duplicated on disk.
+                    $target = [IO.Path]::GetFullPath((Join-Path $release $relative))
+                    if (!$target.StartsWith($release + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'inferssd: unsafe path in the Windows package.'
+                    }
+                    return $target
+                }
+                foreach ($entry in $zip.Entries) { [void](Entry-Path $entry) }
+                Write-Output "Unpacking InferSSD $($package.label)."
+                foreach ($entry in $zip.Entries) {
+                    $target = Entry-Path $entry
+                    if (!$target) { continue }
+                    if ($entry.FullName.EndsWith('/') -or $entry.FullName.EndsWith('\')) {
+                        [IO.Directory]::CreateDirectory($target) | Out-Null
+                    } else {
+                        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target)) | Out-Null
+                        [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target)
+                    }
+                }
+            } finally { $zip.Dispose() }
+            $root = $release
+            $command = Join-Path $root 'bin\inferssd.exe'
+            $server = Join-Path $root 'bin\inferssd-server.exe'
+            $resources = Join-Path $root 'engine-resources.json'
+            foreach ($file in @($command, $server, $resources, (Join-Path $root 'python\python.exe'))) {
+                if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw 'inferssd: the package is incomplete.' }
+            }
+            $oldResources = $env:INFERSSD_RESOURCES
+            try {
+                $env:INFERSSD_RESOURCES = $resources
+                $version = & $command --version --json
+                if ($LASTEXITCODE) { throw 'inferssd: the packaged command does not run.' }
+                $version = $version | ConvertFrom-Json
+                if ($version.build -ne $package.build -or $version.revision -ne $package.revision) {
+                    throw 'inferssd: the command version differs from its package list.'
+                }
+                & $command cli --help | Out-Null
+                if ($LASTEXITCODE) { throw 'inferssd: the packaged chat command does not run.' }
+                & $command serve --help | Out-Null
+                if ($LASTEXITCODE) { throw 'inferssd: the packaged server command does not run.' }
+                & $server --ssd-schema | Out-Null
+                if ($LASTEXITCODE) { throw 'inferssd: the native engine or its runtime libraries do not run.' }
+            } finally {
+                if ($null -eq $oldResources) { Remove-Item Env:INFERSSD_RESOURCES -ErrorAction SilentlyContinue }
+                else { $env:INFERSSD_RESOURCES = $oldResources }
+            }
+            Remove-Item -LiteralPath $archive, $listing -Force
+            # The verified package remains available even if publishing the pointer fails.
+            $complete = $true
+            Publish-Release $root $command $resources
+            Write-Output "Installed: $binDir\inferssd.cmd"
+            if (($env:PATH -split ';') -notcontains $binDir) {
+                Write-Output 'Add this directory to your terminal PATH:'
+                Write-Output "  `$env:PATH = '$binDir;' + `$env:PATH"
+            }
+        } finally {
+            if (-not $complete) { Remove-Stage $release }
+        }
+    }
+
+    if (-not $env:INFERSSD_FROM_SOURCE -and -not $env:INFERSSD_REF) {
+        Install-Package
+        return
+    }
+
     function Require([string] $Name) {
         if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
             throw "inferssd: install $Name first. See docs/quickstart.md."
@@ -78,10 +291,6 @@ No administrator rights are used. A previous installation remains usable if buil
         throw 'inferssd: install the Visual Studio C++ build tools, or set INFERSSD_VCVARS to vcvars64.bat.'
     }
 
-    $installHome = if ($env:INFERSSD_HOME) { $env:INFERSSD_HOME } else { Join-Path $env:LOCALAPPDATA 'inferssd' }
-    $binDir = if ($env:INFERSSD_BIN_DIR) { $env:INFERSSD_BIN_DIR } else { Join-Path $env:LOCALAPPDATA 'inferssd\bin' }
-    if (-not [IO.Path]::IsPathRooted($installHome)) { throw 'inferssd: INFERSSD_HOME must be an absolute path.' }
-    if (-not [IO.Path]::IsPathRooted($binDir)) { throw 'inferssd: INFERSSD_BIN_DIR must be an absolute path.' }
     $jobs = if ($env:INFERSSD_JOBS) { $env:INFERSSD_JOBS } else { '4' }
     if ($jobs -notmatch '^[1-9][0-9]*$') { throw 'inferssd: INFERSSD_JOBS must be a positive integer.' }
     $ref = if ($env:INFERSSD_REF) { $env:INFERSSD_REF } else { $DefaultRef }
@@ -144,20 +353,9 @@ No administrator rights are used. A previous installation remains usable if buil
         # Retain it even if publishing the command fails halfway through.
         $complete = $true
 
-        $pending = Join-Path $binDir ('.inferssd-' + [IO.Path]::GetRandomFileName() + '.cmd')
-        Write-Batch $pending @(
-            '@echo off',
-            "if not defined INFERSSD_HOME set `"INFERSSD_HOME=$installHome`"",
-            "if not defined INFERSSD_RESOURCES set `"INFERSSD_RESOURCES=$resources`"",
-            "`"$inferssd`" %*"
-        )
-        $current = Join-Path $installHome 'current'
-        if (Test-Path $current) { & cmd /c rmdir "$current" }
-        & cmd /c mklink /J "$current" "$release" | Out-Null
-        if ($LASTEXITCODE) { throw 'inferssd: publishing the release failed.' }
-        Move-Item -Force $pending (Join-Path $binDir 'inferssd.cmd')
+        Publish-Release $release $inferssd $resources
     } finally {
-        if (-not $complete) { Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $release }
+        if (-not $complete) { Remove-Stage $release }
     }
 
     Write-Output ''

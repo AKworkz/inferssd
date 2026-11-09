@@ -4,6 +4,18 @@ name: Package macOS
 # it runs on, and, when asked, publish it and point the installer's package list at it.
 # See docs/macos-package.md.
 on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Exact commit to build and check for the shared numbered release
+        required: true
+        type: string
+      publish:
+        type: boolean
+        default: false
+    secrets:
+      APP_VERSIONING_TOKEN:
+        required: false
   workflow_dispatch:
     inputs:
       publish:
@@ -20,12 +32,13 @@ concurrency:
 
 jobs:
   build:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: macos-15
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.source_ref }}
           # The build number is the commit count of main.
           fetch-depth: 0
           persist-credentials: false
@@ -49,6 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.source_ref }}
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -59,12 +73,16 @@ jobs:
 
   publish:
     needs: check
-    if: inputs.publish
+    if: github.ref == 'refs/heads/main' && inputs.publish
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    concurrency:
+      group: inferssd-package-publish
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          ref: ${{ inputs.source_ref }}
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

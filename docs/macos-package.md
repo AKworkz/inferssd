@@ -53,12 +53,19 @@ with a space, checks every binary's libraries, search paths, signature and oldes
 installs it with `scripts/install.sh` from a package list of its own, with every developer tool
 replaced by a stub that fails, and profiles the machine.
 
-The **Package macOS** workflow (`.github/workflows/package-macos.yml`) runs both from `main`
-when it is started by hand: it builds on macOS 15 and checks on macOS 15 and 26. With
-**publish** ticked it then runs `scripts/publish-package.py`, which needs the repository secret
-`APP_VERSIONING_TOKEN`. That uploads the archive to `https://cdn.wici.ai/apps/inferssd/`
-through WiCi AI's release service, checks that the CDN serves those bytes, and only then writes
-the package list. It refuses a list older than the one already published.
+Every numbered `vX.Y.Z` release calls **Package macOS** and **Package Windows** at the same
+tag commit. macOS still builds on macOS 15 and checks on macOS 15 and 26; Windows also checks
+installation without developer tools. Only after both platforms pass does the common **Release**
+job attach both archives, manifests and installers to one numbered GitHub release and update both
+normal package feeds with `scripts/publish-package.py`. `APP_VERSIONING_TOKEN` is required.
+
+Each numbered installer pins its package manifest to that same GitHub release. The installer
+from `main` keeps following the normal latest package list; explicit `INFERSSD_REF` or
+`INFERSSD_FROM_SOURCE` continues to request a source build.
+
+**Package macOS** remains manually runnable on `main` for validation and its existing explicit
+**publish** option. The publisher uploads to `https://cdn.wici.ai/apps/inferssd/`, checks the
+served bytes before updating the list, and refuses a list older than the one already published.
 
 The CDN keeps a file for a year, so a name never gets other bytes: packing a commit already
 uploaded again is refused. If publishing fails, re-run the failed job: it publishes the same

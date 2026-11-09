@@ -100,6 +100,25 @@ class CompanyNameTests(unittest.TestCase):
                 self.assertIn("REPORT", output)
 
 
+class PowerShellLineTests(unittest.TestCase):
+    def findings(self, text):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return scanner.inspect(scanner.added_line_text("fixture.ps1", text), "fixture:1")
+
+    def test_generated_batch_newlines_are_not_remote_login_identifiers(self):
+        text = '"@echo blocked' + '`r`n' + '@exit /b 127' + '`r`n"'
+        self.assertEqual(self.findings(text), 0)
+
+    def test_real_login_and_literal_escaped_backtick_are_still_blocked(self):
+        self.assertEqual(self.findings('"user' + '@host"'), 1)
+        self.assertEqual(self.findings('"``n' + '@host"'), 1)
+        # Single-quoted PowerShell text does not interpret newline escapes.
+        self.assertEqual(self.findings("'literal`n" + "@host'"), 1)
+
+    def test_escape_normalization_exposes_an_actual_personal_path(self):
+        self.assertEqual(self.findings('"`n' + '/home/' + 'private-user/file"'), 1)
+
+
 class TaskNumberTests(unittest.TestCase):
     # Fixtures are split so that this file does not match its own patterns.
     def findings(self, text, strict):

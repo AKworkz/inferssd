@@ -26,7 +26,15 @@ def git(*args):
 
 
 def added_line_text(filename, text):
-    """Decode complete JSON strings while preserving every other fragment."""
+    """Decode complete literal escapes while preserving every other fragment."""
+    if filename.endswith(".ps1"):
+        # Generated batch strings contain PowerShell `r`n escapes, not a login such
+        # as the apparent suffix n@exit. Only complete double-quoted literals are
+        # normalized; escaped backticks and real identifiers remain visible.
+        def powershell_literal(match):
+            return re.sub(r"`(.)", lambda escape: {"r": "\r", "n": "\n", "t": "\t"}.get(
+                escape.group(1), escape.group(0)), match.group())
+        return re.sub(r'"(?:`.|[^"`])*"', powershell_literal, text)
     if not filename.endswith(".json"):
         return text
     parts = []

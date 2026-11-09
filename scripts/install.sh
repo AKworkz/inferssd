@@ -178,7 +178,7 @@ main() (
     if [ "${1:-}" = --help ]; then
         cat <<'EOF'
 Install InferSSD for Apple silicon macOS or Linux x86_64/ARM64.
-This installer from main puts the prebuilt package of main, once one is published, on a Mac
+This installer puts its matching prebuilt package, once published, on an Apple silicon Mac
 with macOS 15 or later, which then needs no developer tools. Otherwise it builds from source,
 which requires Git, Python >=3.9 with venv and a C/C++ compiler; on macOS, the Xcode Command
 Line Tools.
@@ -219,8 +219,8 @@ EOF
     trap 'if [ "$complete" != yes ] && [ -n "$release" ]; then rm -rf -- "$release"; fi' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    # A release's installer builds its tag; a branch or tag asked for is built from source too.
-    if [ "$system" = darwin ] && [ "$DEFAULT_REF" = main ] && [ -z "${INFERSSD_REF:-}" ] &&
+    # Release copies pin PACKAGES to their own tag; an explicit source opt-in still wins.
+    if [ "$system" = darwin ] && [ -z "${INFERSSD_REF:-}" ] &&
         [ -z "${INFERSSD_FROM_SOURCE:-}" ]; then
         if package_list; then
             install_package
