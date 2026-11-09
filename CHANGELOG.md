@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.4 - 2026-11-10
+
+This release adds Qwen3.8 Flash Next and Gemma 4 E4B, and publishes checked Mac and Windows packages together from the same tagged commit.
+
+### Highlights
+
+- **Precompiled packages in one release:** Apple silicon macOS and Windows x64 packages, manifests and version-pinned installers are built and checked before either platform is published. Installation needs no Git, Python, compiler or SDK. Linux retains its source installer ([#162](https://github.com/wici-ai/inferssd/pull/162)).
+- **Qwen3.8 Flash Next:** the tested IQ4_XS checkpoint uses SSD expert offload through the shared launch flow ([#157](https://github.com/wici-ai/inferssd/pull/157)).
+- **Gemma 4 E4B:** the tested QAT Q4_0 checkpoint uses the ordinary RAM inference path and is admitted only when its estimated memory fits the available RAM and host reserve ([#157](https://github.com/wici-ai/inferssd/pull/157)).
+- **Windows package:** includes its own Python, native CPU/Vulkan engine, probes, Vulkan loader and runtime DLLs. It requires Windows 11 x64 and AVX2; GPU execution uses the normal graphics driver. macOS requires Apple silicon and macOS 15 or later ([#162](https://github.com/wici-ai/inferssd/pull/162)).
+- **Explicit model capabilities:** `inferssd --version --json` reports its supported model profiles, so clients can check the capabilities they need across branch and release builds ([#157](https://github.com/wici-ai/inferssd/pull/157)).
+
+### Install or upgrade
+
+On macOS or Linux:
+
+```sh
+curl -fsSL https://github.com/wici-ai/inferssd/releases/download/v0.1.4/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://github.com/wici-ai/inferssd/releases/download/v0.1.4/install.ps1 | iex
+```
+
+Run the same command to upgrade. Downloaded models are preserved.
+
 ## 0.1.3 - 2026-11-06
 
 This release decodes faster where experts run on the CPU or a CUDA GPU, puts Apple silicon's GPU to work on prompts, and lets a client turn thinking off or choose how much the model thinks, as the model's own chat template allows.

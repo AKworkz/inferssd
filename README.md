@@ -114,7 +114,7 @@ See the [quick start](docs/quickstart.md#one-command-installation) for upgrades 
 
 ## Versions
 
-InferSSD has a release number, `0.1.3` in `framework/pyproject.toml`, and every build has a
+InferSSD has a release number, `0.1.4` in `framework/pyproject.toml`, and every build has a
 label of its own, `<yymmdd>.<build>.<commit>`: the day (UTC) of the commit it was built from, the
 branch's commit count up to that commit, and the commit. The installer records the three in
 `engine-resources.json` beside the build, from the clone's Git metadata, and so does a local
