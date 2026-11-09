@@ -10,6 +10,7 @@ embeddings and DeepSeek-V4.1's engram tables.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 from inferssd.strategy.inputs import ModelFacts, model_facts_from
 
@@ -19,13 +20,13 @@ class Model:
     repo: str
     quantization: str
     revision: str  # the Hugging Face commit the facts were read at
-    facts: ModelFacts
+    facts: Optional[ModelFacts]  # None for an ordinary RAM-only model, with no expert store.
     lookup_bytes: int
 
     @property
     def dense_read_bytes(self) -> int:
         """The dense weights one token reads whole."""
-        return self.facts.dense_bytes - self.lookup_bytes
+        return self.facts.dense_bytes - self.lookup_bytes if self.facts is not None else 0
 
 
 def _shards(prefix: str, count: int) -> list[str]:
@@ -108,5 +109,36 @@ MODELS: tuple[Model, ...] = (
             }
         ),
         540344320,
+    ),
+    Model(
+        "bartowski/Qwen3.8-Flash-Next-GGUF",
+        "IQ4_XS",
+        "db3a185731e162be9ffa4d52d20d7509939e60e8",
+        model_facts_from(
+            {
+                "paths": _shards("Qwen3.8-Flash-Next-IQ4_XS/Qwen3.8-Flash-Next-IQ4_XS", 3),
+                "architecture": "qwen4exp",
+                "layers": 48,
+                "experts": 512,
+                "experts_used": 10,
+                "roles": {
+                    "gate": {"formats": [["IQ4_XS", 48]], "rows": 640, "cols": 2560},
+                    "up": {"formats": [["IQ4_XS", 48]], "rows": 640, "cols": 2560},
+                    "down": {"formats": [["IQ4_NL", 48]], "rows": 2560, "cols": 640},
+                },
+                "expert_bytes": 2662400,
+                "expert_read_bytes": 2678784,
+                "dense_bytes": 32239669760,
+                "format_bytes": [["IQ4_XS", 42781900800], ["IQ4_NL", 22649241600]],
+            }
+        ),
+        29137853440,
+    ),
+    Model(
+        "google/gemma-4-E4B-it-qat-q4_0-gguf",
+        "Q4_0",
+        "4b4a2c1d584be7264f87aac328a1bc739ce81b6c",
+        None,
+        0,
     ),
 )

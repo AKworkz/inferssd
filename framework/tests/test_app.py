@@ -34,6 +34,17 @@ def test_tested_quantizations_and_shards():
         hub.select_files(["../model-Q8_0.gguf"], "Q8_0")
 
 
+def test_new_models_use_complete_quant_tokens_and_ignore_projectors():
+    flash = "bartowski/Qwen3.8-Flash-Next-GGUF"
+    gemma = "google/gemma-4-E4B-it-qat-q4_0-gguf"
+    assert hub.selection(flash) == (flash, "IQ4_XS")
+    assert hub.selection(gemma) == (gemma, "Q4_0")
+    model = "gemma-4-E4B_q4_0-it.gguf"
+    assert hub.select_files([model, "gemma-4-E4B-it-mmproj.gguf"], "Q4_0") == [model]
+    with pytest.raises(ValueError, match="no Q4_0"):
+        hub.select_files(["Q4_0/gemma-4-E4B-Q4_0_4_8.gguf"], "Q4_0")
+
+
 @pytest.fixture
 def fake_hub(monkeypatch):
     names = [f"Model-Q8_0-{n:05}-of-00002.gguf" for n in (1, 2)]
@@ -138,6 +149,17 @@ def test_serve_reuses_owned_launch_and_policy(ready_app, monkeypatch):
     assert policy["memory_budget_bytes"] == 48 << 30
     assert "host_reserve_bytes" not in policy and "runtime_seconds" not in policy
     assert not args.output_dir.exists()  # owned runtime reserves it
+
+
+def test_ram_serve_keeps_its_admission_margin_in_the_owned_policy(ready_app, monkeypatch):
+    launch = Mock(return_value=0)
+    monkeypatch.setattr(command.typed_command, "run", launch)
+    monkeypatch.setattr(command.ram, "is_model", lambda _: True)
+    assert main(["serve", "-m", str(ready_app)]) == 0
+    args = launch.call_args.args[0]
+    policy = Policy.read(json.loads(args.runtime_policy.read_text()))
+    assert policy.host_reserve_bytes == 2 << 30
+    assert policy.memory_budget_bytes == 48 << 30
 
 
 def test_serve_listens_on_the_given_host(ready_app, monkeypatch, capsys):

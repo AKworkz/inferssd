@@ -175,6 +175,40 @@ def test_http_contract_retains_prompt_tokens_raw_events_and_failure(tmp_path):
         worker.join()
 
 
+def test_recorder_writes_unicode_json_and_events_as_utf8(tmp_path, monkeypatch):
+    text = "city\u2019s \u4f60\u597d \U0001f680"
+    rows = fixture(8)
+    rows[1]["event"]["content"] = text
+    rows[1]["event"]["completion_probabilities"][0]["token"] = text
+    wire = b"".join(b"data: " + json.dumps(row["event"], ensure_ascii=False).encode("utf-8")
+                    + b"\n\n" for row in rows)
+    monkeypatch.setattr(stream_chat, "get", lambda *_args: {})
+    monkeypatch.setattr(stream_chat, "post", lambda *_args: {"prompt": text, "tokens": [7, 8, 9]})
+    monkeypatch.setattr(stream_chat.urllib.request, "urlopen", lambda *_args, **_kwargs: io.BytesIO(wire))
+    original_open = Path.open
+
+    def legacy_open(path, mode="r", **kwargs):
+        # Reproduce Windows' legacy text default even on a UTF-8 test host.
+        if "b" not in mode and kwargs.get("encoding") is None:
+            kwargs["encoding"] = "cp936"
+        return original_open(path, mode, **kwargs)
+
+    monkeypatch.setattr(Path, "open", legacy_open)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_bytes(text.encode("utf-8"))
+    args = argparse.Namespace(url="http://127.0.0.1:1", prompt=prompt, input_tokens=3,
+                              output_tokens=8, output=tmp_path / "result.json", timeout=5)
+    assert stream_chat.run(args) == 0
+    result = json.loads(args.output.read_bytes().decode("utf-8"))
+    protocol = json.loads((tmp_path / "result.protocol.json").read_bytes().decode("utf-8"))
+    events = [json.loads(line) for line in
+              (tmp_path / "result.events.jsonl").read_bytes().decode("utf-8").splitlines()]
+    assert result["probabilities"][1]["token"] == text
+    assert protocol["chat_request"]["messages"][0]["content"] == text
+    assert events[1]["event"]["content"] == text
+    assert (tmp_path / "result.events.sse").read_bytes() == wire
+
+
 def test_compare_rejects_different_protocol_and_reports_first_divergence():
     a = summary(fixture(8), 8)
     a.update(status="passed", prompt_sha256="hash", rendered_prompt_sha256="render", prompt_ids=[7, 8, 9])

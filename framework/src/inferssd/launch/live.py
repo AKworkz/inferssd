@@ -84,7 +84,7 @@ HOST_FACTS = frozenset(
     "gpu_available ss_available systemd cgroup_v2 user_manager memory_controller euid "
     "memory_kib filesystem gpu_memory gpu_processes port_busy scope_suffix "
     "platform_system platform_machine default_threads physical_memory disk_free "
-    "runtime_facts model_drive_key engine_gpu_backends".split()
+    "runtime_facts model_drive_key engine_gpu_backends cpu_topology".split()
 )
 
 
@@ -198,6 +198,10 @@ class LiveArtifacts:
         if name == "runtime_facts":
             facts = strategy_inputs.read_runtime(host=self.strategy_host)
             return strategy_inputs.runtime_facts_json(facts)
+        if name == "cpu_topology":
+            from inferssd.machine.profile import TOPOLOGY
+
+            return TOPOLOGY[self.strategy_host.platform()][1](self.strategy_host)
         if name == "model_drive_key":
             return strategy_inputs.model_drive_key(args, self.strategy_host)
         if name == "engine_gpu_backends":

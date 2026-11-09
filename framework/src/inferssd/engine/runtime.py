@@ -14,6 +14,7 @@ from typing import Optional
 from inferssd.configuration.settings import Snapshot
 from inferssd.engine.core import Engine, NativeEffects
 from inferssd.engine.owned import OwnedProcess
+from inferssd.launch import ram
 from inferssd.launch.live import Host, LiveArtifacts
 from inferssd.launch.machine import MachineSource
 from inferssd.launch.machine import characteristics as machine_characteristics
@@ -56,6 +57,10 @@ class Runtime:
         if self.machine is None or specification is None or not specification.strategy:
             return None
         if self.characteristics_text is None:
+            if ram.is_model(specification.model):
+                # Ordinary models need a live RAM check, not expert/SSD calibration.
+                self.characteristics_text = (None,)
+                return None
             platform, repo = self.policy.platform, self.inputs.repo
             resources = specification.resources
             binary = server_binary(platform, specification.binary, resources, repo, os.path.isfile)
@@ -101,6 +106,7 @@ class Runtime:
                 directory=directory,
                 memory=self.policy.memory_budget_bytes,
                 configured=configured,
+                reserve=self.policy.host_reserve_bytes or 0,
             ),
             observe=adapter,
             emit=self.emit,

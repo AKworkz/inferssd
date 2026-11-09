@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 from inferssd import __version__
 from inferssd.launch.resources import installed_resources
+from inferssd.launch.typed import PROFILES
 
 
 def label(build: Optional[int], date: Optional[str], revision: Optional[str]) -> Optional[str]:
@@ -33,6 +34,7 @@ def report(environ: Mapping[str, str] = os.environ) -> dict[str, Any]:
         "date": None,
         "branch": None,
         "label": None,
+        "capabilities": {"model_profiles": list(PROFILES)},
     }
     try:
         data = json.loads(installed_resources(environ).read_text(encoding="utf-8"))

@@ -62,6 +62,7 @@ def test_version_names_the_build_the_installer_recorded(capsys, monkeypatch, tmp
         "date": "2026-11-06",
         "branch": "main",
         "label": "261106.202.03af979",
+        "capabilities": {"model_profiles": ["dsv", "muse", "qwen4exp", "qwen35moe", "gemma4"]},
     }
 
 

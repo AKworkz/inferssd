@@ -24,7 +24,7 @@ def digest(data):
 
 
 def save(path, value):
-    with path.open("x") as stream:
+    with path.open("x", encoding="utf-8") as stream:
         json.dump(value, stream, indent=2, ensure_ascii=False, allow_nan=False)
         stream.write("\n")
 
@@ -283,7 +283,7 @@ def record_chat(args, validate_input, protocol_extra=None, validate_result=None)
             save(paths["protocol"], protocol)
             records = []
             start_ns = time.perf_counter_ns()
-            with (paths["events"].open("x") as raw_events,
+            with (paths["events"].open("x", encoding="utf-8") as raw_events,
                   paths["sse"].open("xb") as wire,
                   urllib.request.urlopen(request(base + "/completion", body), timeout=args.timeout) as response):
                 for event in events(response, wire):

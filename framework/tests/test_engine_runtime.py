@@ -45,6 +45,36 @@ def resolution(scope=(), environment=()):
     )
 
 
+@pytest.mark.parametrize("result,busy", [(0, True), (10035, False)])
+def test_loopback_listener_probe_is_bounded_even_when_closed_ports_drop_packets(
+    monkeypatch, result, busy
+):
+    class Socket:
+        timeout = None
+        closed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            self.closed = True
+
+        def settimeout(self, value):
+            self.timeout = value
+
+        def connect_ex(self, address):
+            assert address == ("127.0.0.1", 8080)
+            if self.timeout is None:
+                pytest.fail("a dropped loopback SYN would block launch and eject indefinitely")
+            assert 0 < self.timeout <= 1
+            return result
+
+    connection = Socket()
+    monkeypatch.setattr(core.socket, "socket", lambda: connection)
+    assert core.NativeEffects("127.0.0.1").port_busy(8080) is busy
+    assert connection.closed
+
+
 @pytest.mark.parametrize(
     "case",
     [

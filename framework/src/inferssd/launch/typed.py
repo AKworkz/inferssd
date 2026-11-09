@@ -7,7 +7,7 @@ import json
 import ntpath
 import posixpath
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Optional, cast
 
@@ -20,10 +20,11 @@ from inferssd.configuration.settings import (
     schema,
     uncomment,
 )
+from inferssd.launch import ram
 from inferssd.launch.darwin import MODEL_OPTIONS
 from inferssd.launch.resources import EngineResources, server_binary
 from inferssd.launch.types import AwaitFact, Fact, LaunchInput, Reply, Resolution, State, Threads
-from inferssd.strategy.inputs import model_facts_from
+from inferssd.strategy.inputs import model_facts_from, runtime_facts_from
 from inferssd.strategy.launch import Planned, plan
 
 # Each model profile's chat template: a bundled template replaces the GGUF's,
@@ -33,6 +34,7 @@ PROFILES: dict[str, Optional[str]] = {
     "muse": "muse-spark.jinja",
     "qwen4exp": None,  # Qwen3.8-Flash-Next
     "qwen35moe": None,  # Qwen3.6-35B-A3B; its GGUF carries the model's sampling
+    "gemma4": None,  # Ordinary RAM inference; no expert index or SSD executor.
 }
 # The profile of each GGUF general.architecture; --profile overrides it.
 ARCHITECTURES = {
@@ -40,6 +42,7 @@ ARCHITECTURES = {
     "muse-spark": "muse",
     "qwen4exp": "qwen4exp",
     "qwen35moe": "qwen35moe",
+    "gemma4": "gemma4",
 }
 # The server's default sampling for each profile, from the model's own
 # generation config where the GGUF carries none; a request's values win.
@@ -181,6 +184,32 @@ def materialized_settings(value: Snapshot) -> str:
     )
 
 
+def cpu_defaults(raw: object, allowed: Sequence[int], given: Threads) -> Threads:
+    """Default CPU work to the available fast cluster; preserve explicit counts."""
+    if not isinstance(raw, Mapping) or type(raw.get("affinity_supported")) is not bool:
+        raise ValueError("invalid CPU topology")
+    clusters = raw.get("clusters")
+    if not isinstance(clusters, list) or not clusters:
+        raise ValueError("invalid CPU clusters")
+    fast: set[int] = set()
+    for cluster in clusters:
+        if not isinstance(cluster, Mapping) or not isinstance(cluster.get("cpus"), list):
+            raise ValueError("invalid CPU cluster")
+        ids = cluster["cpus"]
+        if any(type(cpu) is not int or cpu < 0 for cpu in ids):
+            raise ValueError("invalid CPU IDs")
+        if cluster.get("kind") == "performance":
+            fast.update(ids)
+    selected = sorted(set(allowed) & fast) or sorted(set(allowed))
+    if not selected:
+        raise ValueError("no available CPUs for inference")
+    count = min(256, len(selected))
+    decode, batch = given.decode or count, given.batch or count
+    if raw["affinity_supported"] and max(selected) < 512 and max(decode, batch) <= len(selected):
+        return Threads(decode, batch, tuple(selected))
+    return Threads(decode, batch)
+
+
 def _resolve(
     s: State,
     spec: LaunchSpec,
@@ -188,6 +217,7 @@ def _resolve(
     directory: str,
     memory: int,
     configured: Optional[Snapshot],
+    reserve: int,
 ) -> None:
     reject_legacy_environment(s.env)
     if platform not in PLATFORMS:
@@ -313,14 +343,53 @@ def _resolve(
         if not s.value("is_file", path):
             raise ValueError("missing GGUF shard: " + path)
     profile = s.inputs.profile
+    observed: object = None
     if not profile:
-        architecture = model_facts_from(s.value("model_facts", *paths)).architecture
+        observed = s.value("model_facts", *paths)
+        architecture = (
+            cast(str, ram.validate(observed)["architecture"])
+            if isinstance(observed, Mapping) and observed.get("architecture") == ram.ARCHITECTURE
+            else model_facts_from(observed).architecture
+        )
         if architecture not in ARCHITECTURES:
             raise ValueError(
                 f"no model profile for the GGUF architecture {architecture}; choose one with "
                 "--profile " + ", ".join(PROFILES)
             )
         profile = ARCHITECTURES[architecture]
+    ordinary = profile == ram.ARCHITECTURE
+    if ordinary:
+        owned = {
+            "--mlock",
+            "--no-mlock",
+            "-ctk",
+            "--cache-type-k",
+            "-ctv",
+            "--cache-type-v",
+            "--ctx-checkpoints",
+            "--swa-checkpoints",
+            "--swa-full",
+            "--override-kv",
+            "--model-draft",
+            "--hf-repo-draft",
+        }
+        if any(
+            x.split("=", 1)[0].replace("_", "-") in owned
+            or x.replace("_", "-").startswith(
+                ("-ctk", "-ctv", "--lora", "--mmproj", "--control-vector", "--spec-", "--draft")
+            )
+            for x in s.inputs.extra
+        ):
+            raise ValueError(
+                "the RAM profile owns model weights, locking, KV storage and checkpoints"
+            )
+        if any(
+            key == "LLAMA_ARG_SWA_FULL" or key.startswith(("LLAMA_ARG_SPEC_", "LLAMA_ARG_MMPROJ"))
+            for key in s.env
+        ):
+            raise ValueError(
+                "the RAM profile does not accept unbudgeted model or KV environment controls"
+            )
     resources = spec.resources
     if resources is not None and resources.platform not in (None, platform):
         raise ValueError("engine resource platform differs from the selected platform")
@@ -373,13 +442,74 @@ def _resolve(
             ),
         )
     planned: Optional[Planned] = None
-    if spec.strategy:
+    ram_fit: Optional[dict[str, object]] = None
+    if ordinary:
+        runtime = runtime_facts_from(s.value("runtime_facts"))
+        configured_budget = cast(int, value.at("host.budget_mib").value) << 20
+        ram_fit = ram.admission(
+            observed if observed is not None else s.value("model_facts", *paths),
+            context=spec.context or CONTEXT,
+            batch=spec.ubatch or BATCH,
+            gpu=bool(gpu_backends),
+            available=runtime.available_bytes,
+            budget=min(memory, configured_budget) if configured_budget else memory,
+            headroom=max(reserve, cast(int, value.at("host.headroom_mib").value) << 20),
+        )
+        if (
+            not gpu_backends
+            and not threads.cpus
+            and not threads.decode_cpus
+            and (threads.decode is None or threads.batch is None)
+        ):
+            threads = threadpools(
+                cpu_defaults(s.value("cpu_topology"), runtime.cpus, threads), platform
+            )
+    elif spec.strategy:
         # The strategy fills what the user left unset; the checks below see the result.
         planned = plan(s, platform, memory, paths, value, spec.threads, gpu_backends)
         value, threads = planned.settings, threadpools(planned.threads, platform)
         if any(argument in protected for argument in planned.server_args[::2]):
             raise ValueError("the launch strategy names a protected server option")
-    if not value.at("expert.source").value:
+        # This newly supported CPU model has no measured thread/compute priors on
+        # many existing profiles. Avoid the unpriced all-core fallback on hybrid
+        # machines; priced strategies and explicit user thread choices still win.
+        costs = dict(cast(tuple[tuple[str, float], ...], value.at("place.costs").value))
+        if (
+            profile == "qwen4exp"
+            and gpu_backends == ()
+            and spec.threads == Threads()
+            and not {"cpu_fixed_us", "cpu_route_us"} <= costs.keys()
+            and value.at("cpu.decode_participants").value == 0
+        ):
+            runtime = runtime_facts_from(s.value("runtime_facts"))
+            io_cpus = set(cast(tuple[int, ...], value.at("cpu.io_cpus").value))
+            threads = threadpools(
+                cpu_defaults(
+                    s.value("cpu_topology"),
+                    [cpu for cpu in runtime.cpus if cpu not in io_cpus],
+                    spec.threads,
+                ),
+                platform,
+            )
+            chosen = dict(cast(Mapping[str, object], planned.receipt.get("chosen", {})))
+            actual = {
+                "decode": threads.decode,
+                "batch": threads.batch,
+                "cpus": list(threads.cpus),
+                "decode_cpus": list(threads.decode_cpus),
+            }
+            strategy_receipt = dict(
+                planned.receipt,
+                model_defaults={
+                    "reason": "qwen4exp CPU compute priors unavailable; use the live fast cluster",
+                    "previous_threads": chosen.get("threads", {}),
+                    "threads": actual,
+                },
+            )
+            chosen["threads"] = actual
+            strategy_receipt["chosen"] = chosen
+            planned = replace(planned, threads=threads, receipt=strategy_receipt)
+    if not ordinary and not value.at("expert.source").value:
         if value.at("expert.source").origin != "default":
             raise ValueError("typed launch requires a nonempty explicit expert.source")
         artifacts = spec.artifact_directory or os_path.join(directory, "artifacts")
@@ -395,7 +525,7 @@ def _resolve(
         value = replace(
             value, entries=tuple(selected if x.key == selected.key else x for x in value.entries)
         )
-    for path in cast(tuple[str, ...], value.at("expert.source").value):
+    for path in () if ordinary else cast(tuple[str, ...], value.at("expert.source").value):
         if not isinstance(path, str) or not s.value("is_file", path):
             raise ValueError("missing typed expert source: " + str(path))
     if platform == "linux":
@@ -424,11 +554,11 @@ def _resolve(
                 )
     # The CUDA tier finds its GPUs through nvidia-smi. With the engine's backends unknown, the
     # engine itself refuses a budget it has no tier for.
-    if value.at("vram.budget").value != 0 and "CUDA" in (gpu_backends or ()):
+    if not ordinary and value.at("vram.budget").value != 0 and "CUDA" in (gpu_backends or ()):
         if not s.value("gpu_available"):
             raise ValueError("typed GPU execution requires nvidia-smi")
     # A setting of a GPU backend's expert tier needs an engine built with that backend.
-    for item in value.entries:
+    for item in () if ordinary else value.entries:
         backend = schema()["properties"][item.key].get("backend")
         if backend and item.origin != "default" and gpu_backends is not None:
             if backend not in gpu_backends:
@@ -437,16 +567,17 @@ def _resolve(
                     "which this engine was built without"
                 )
     # The sink's I/O thread keeps its own CPUs; decode runs on the first decode threads.
-    if set(cast(tuple[int, ...], value.at("cpu.io_cpus").value)) & set(
+    if not ordinary and set(cast(tuple[int, ...], value.at("cpu.io_cpus").value)) & set(
         threads.cpus + threads.decode_cpus
     ):
         raise ValueError("cpu.io_cpus overlaps the strict compute CPUs")
     participants = cast(int, value.at("cpu.decode_participants").value)
-    if threads.decode is not None and participants > threads.decode:
+    if not ordinary and threads.decode is not None and participants > threads.decode:
         raise ValueError("cpu.decode_participants exceeds the decode thread count")
-    settings = os_path.join(directory, "settings.ssd")
-    telemetry = os_path.join(directory, "native-events.jsonl")
-    s.ask("write_exclusive", settings, materialized_settings(value))
+    settings = None if ordinary else os_path.join(directory, "settings.ssd")
+    telemetry = None if ordinary else os_path.join(directory, "native-events.jsonl")
+    if settings is not None:
+        s.ask("write_exclusive", settings, materialized_settings(value))
     if planned is not None:
         receipt = json.dumps(planned.receipt, ensure_ascii=False, indent=2) + "\n"
         s.ask("write_exclusive", os_path.join(directory, "strategy.json"), receipt)
@@ -457,21 +588,23 @@ def _resolve(
     if planned is not None and one_pass:
         given = [name for name, size in (("-b", spec.batch), ("-ub", spec.ubatch)) if size]
         cast(list[str], planned.receipt["kept"]).extend("server " + name for name in given)
-    command = [binary, "-m", model, "--ssd-settings", settings, "--ssd-telemetry", telemetry]
-    for item in value.entries:
+    command = [binary, "-m", model]
+    if settings is not None and telemetry is not None:
+        command += ["--ssd-settings", settings, "--ssd-telemetry", telemetry]
+    for item in () if ordinary else value.entries:
         if item.origin == "cli":
             command += [
                 "--ssd-" + item.key.replace(".", "-").replace("_", "-"),
                 literal(item, platform),
             ]
     command += [
-        "--mmap",
+        "--no-mmap" if ordinary and gpu_backends else "--mmap",
         "--no-repack",
         "--fit",
         "off",
         "--no-warmup",
         "-ngl",
-        "99",
+        "0" if ordinary and not gpu_backends else "99",
         "-c",
         str(context),
         "-b",
@@ -479,6 +612,16 @@ def _resolve(
         "-ub",
         str(ubatch),
     ]
+    if ordinary:
+        command += [
+            "--mlock",
+            "--cache-type-k",
+            "f16",
+            "--cache-type-v",
+            "f16",
+            "--ctx-checkpoints",
+            "1",
+        ]
     if threads.decode is not None:
         command += ["-t", str(threads.decode)]
     if threads.batch is not None:
@@ -518,9 +661,10 @@ def _resolve(
         str(spec.port),
         "-np",
         "1",
-        # The SSD executor reads the routed experts; their mapped pages stay unread.
-        "--defer-experts",
     ]
+    if not ordinary:
+        # The SSD executor reads the routed experts; their mapped pages stay unread.
+        command += ["--defer-experts"]
     if platform == "linux":
         command += ["-fa", "on"]
         s.scope = (
@@ -546,7 +690,7 @@ def _resolve(
     output: dict[str, object] = {
         "settings": settings,
         "telemetry": telemetry,
-        "effective": value.document(),
+        "effective": value.document() if not ordinary else None,
         "profile": profile,
         "launch": {
             "decode_threads": threads.decode,
@@ -558,6 +702,8 @@ def _resolve(
             "ubatch": ubatch,
         },
     }
+    if ordinary:
+        output["mode"], output["memory"] = "ram", ram_fit
     if planned is not None:
         output["strategy"] = planned.receipt
     s.emit(json.dumps(output, ensure_ascii=False) + "\n")
@@ -572,10 +718,11 @@ def resolve_typed(
     directory: str,
     memory: int,
     configured: Optional[Snapshot] = None,
+    reserve: int = 0,
 ) -> Resolution:
     state = State(inputs, facts)
     try:
-        _resolve(state, spec, platform, directory, memory, configured)
+        _resolve(state, spec, platform, directory, memory, configured, reserve)
     except AwaitFact as missing:
         return state.finish(None, missing.fact)
     return state.finish(0)

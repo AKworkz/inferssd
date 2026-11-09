@@ -68,6 +68,7 @@ class NativeEffects:
 
     def port_busy(self, port: int) -> bool:
         with socket.socket() as connection:
+            connection.settimeout(1)
             return connection.connect_ex((self.address, port)) == 0
 
 

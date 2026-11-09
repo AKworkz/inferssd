@@ -3,6 +3,7 @@
 
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -189,6 +190,37 @@ def test_windows_installer_builds_the_preset_the_framework_looks_in():
     assert "--target inferssd-server inferssd-cpuprobe inferssd-ssdprobe" in text
     for name in ("INFERSSD_HOME", "INFERSSD_BIN_DIR", "INFERSSD_REF", "INFERSSD_JOBS"):
         assert name in text and name in INSTALLER.read_text()
+
+
+def test_windows_installer_keeps_selected_branch_history_for_build_number(tmp_path):
+    source, installed = tmp_path / "source repository", tmp_path / "installed source"
+
+    def git(*args, cwd=None):
+        return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
+
+    git("init", "--initial-branch=main", str(source))
+    git("config", "user.name", "Installer test", cwd=source)
+    git("config", "user.email", "installer@example.test", cwd=source)
+    git("config", "commit.gpgsign", "false", cwd=source)
+    for index in range(3):
+        if index == 1:
+            git("checkout", "-b", "model-support", cwd=source)
+        (source / "version.txt").write_text(str(index))
+        git("add", "version.txt", cwd=source)
+        git("commit", "-m", f"Build {index}", cwd=source)
+
+    command = next(
+        line.strip()[2:]
+        for line in WINDOWS_INSTALLER.read_text().splitlines()
+        if line.strip().startswith("& git clone ")
+    )
+    values = {"$ref": "model-support", "$repository": source.as_uri(), "$source": str(installed)}
+    # file:// makes Git honor a shallow clone, reproducing the old build=1 bug.
+    subprocess.run([values.get(word, word) for word in shlex.split(command)], check=True)
+    assert git("rev-list", "--count", "HEAD", cwd=installed) == "3"
+    assert git("rev-parse", "--is-shallow-repository", cwd=installed) == "false"
+    assert git("branch", "--show-current", cwd=installed) == "model-support"
+    assert (installed / "version.txt").read_text() == "2"
 
 
 def package_name(label):

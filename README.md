@@ -14,7 +14,7 @@
 </p>
 <p align="center">macOS / Metal &nbsp;·&nbsp; Linux / CUDA &nbsp;·&nbsp; Windows (in progress)</p>
 
-**Run models larger than your RAM or VRAM.** InferSSD builds on [llama.cpp](https://github.com/ggml-org/llama.cpp) to run large mixture-of-experts (MoE) models from SSD, using standard GGUF files, with browser chat and an OpenAI-compatible API. It currently supports **DeepSeek-V4.1-Flash-1017**, **Muse-Spark-Open** and **Qwen3.6-35B-A3B**, with more models coming.
+**Run models larger than your RAM or VRAM.** InferSSD builds on [llama.cpp](https://github.com/ggml-org/llama.cpp) to run large mixture-of-experts (MoE) models from SSD, using standard GGUF files, with browser chat and an OpenAI-compatible API. It supports **DeepSeek-V4.1-Flash-1017**, **Muse-Spark-Open**, **Qwen3.6-35B-A3B** and **Qwen3.8 Flash Next**, plus ordinary RAM inference for **Gemma4 E4B**.
 
 ## Models
 
@@ -25,6 +25,13 @@ These are the tested GGUF files, community conversions of the named model releas
 | DeepSeek-V4.1-Flash-1017 | 763B total / 8–16B active | [mrfakename · Q8_0](https://huggingface.co/mrfakename/DeepSeek-V4.1-Flash-1017-GGUF) |
 | Muse-Spark-Open | 816B total / 42B active | [Unsloth · UD-Q4_K_XL](https://huggingface.co/unsloth/Muse-Spark-Open-816B-A42B-GGUF) |
 | Qwen3.6-35B-A3B | 35B total / 3B active | [Unsloth · UD-Q4_K_XL](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) |
+| Qwen3.8 Flash Next | 177B total / A3B | [Bartowski · IQ4_XS](https://huggingface.co/bartowski/Qwen3.8-Flash-Next-GGUF) |
+| Gemma4 E4B | 7.46B total / E4B | [Google · QAT Q4_0](https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf) |
+
+Gemma uses the ordinary native loader without SSD expert offload. Before loading, the shared
+launcher checks that weights, KV cache and working memory fit the live available RAM, the
+configured budget and headroom. An insufficient fit is rejected. macOS and Windows use the
+same model selection and launch entry points.
 
 ## Performance benchmarks
 
@@ -99,7 +106,7 @@ inferssd cli -hf mrfakename/DeepSeek-V4.1-Flash-1017-GGUF
 inferssd serve -hf mrfakename/DeepSeek-V4.1-Flash-1017-GGUF
 ```
 
-For Muse, use `unsloth/Muse-Spark-Open-816B-A42B-GGUF`; for Qwen3.6, `unsloth/Qwen3.6-35B-A3B-GGUF`. With `serve`, open `http://127.0.0.1:8080` in your browser, or point any OpenAI-compatible client at `http://127.0.0.1:8080/v1`. Add `--host 0.0.0.0` to reach it from other devices on your network; the API has no authentication, so anyone who can reach the port can use it.
+For Muse, use `unsloth/Muse-Spark-Open-816B-A42B-GGUF`; for Qwen3.6, `unsloth/Qwen3.6-35B-A3B-GGUF`; for Flash Next, `bartowski/Qwen3.8-Flash-Next-GGUF`; for Gemma, `google/gemma-4-E4B-it-qat-q4_0-gguf`. With `serve`, open `http://127.0.0.1:8080` in your browser, or point any OpenAI-compatible client at `http://127.0.0.1:8080/v1`. Add `--host 0.0.0.0` to reach it from other devices on your network; the API has no authentication, so anyone who can reach the port can use it.
 
 The first run downloads the model files (about 470 GiB for DeepSeek or Muse, 21 GiB for Qwen3.6) to `~/.local/share/inferssd/models` and measures your machine. Use `--model-dir /path/on/ssd` to choose the drive, or `-m /path/to/first-shard.gguf` for files you already have. There is no memory setting to choose: InferSSD uses the memory available. Stop with **Ctrl+C**, or `/exit` in chat.
 

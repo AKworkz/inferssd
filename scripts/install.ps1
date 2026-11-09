@@ -93,7 +93,8 @@ No administrator rights are used. A previous installation remains usable if buil
     $complete = $false
     try {
         $source = Join-Path $release 'source'
-        & git clone --depth 1 --branch $ref $repository $source
+        # Keep the history for engine-resources.py's build number, without old file contents.
+        & git clone --filter=blob:none --single-branch --branch $ref $repository $source
         if ($LASTEXITCODE) { throw 'inferssd: git clone failed.' }
         $rest = @($python | Select-Object -Skip 1)
         # The GPU backend for this machine's GPUs, by the table the launch reads. This installer

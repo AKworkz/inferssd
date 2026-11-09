@@ -26,12 +26,12 @@ def selection(reference: str) -> tuple[str, str]:
 
 def select_files(names: Sequence[str], quant: str) -> list[str]:
     # Match a full quantization token, never Q4_K in Q4_K_M or a vision projector.
-    token = re.compile(r"(?:^|[-./])" + re.escape(quant) + r"(?:[-./]|$)", re.I)
+    token = re.compile(r"(?:^|[-./_])" + re.escape(quant) + r"(?:[-./]|$)", re.I)
     files = sorted(
         name
         for name in names
         if name.endswith(".gguf")
-        and token.search(name)
+        and token.search(PurePosixPath(name).name)
         and "mmproj" not in PurePosixPath(name).name.lower()
         and not PurePosixPath(name).name.lower().startswith("mtp-")
     )

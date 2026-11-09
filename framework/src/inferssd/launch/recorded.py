@@ -16,11 +16,13 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Optional
 
+from inferssd.launch import ram
 from inferssd.launch.darwin import PROFILES
 from inferssd.launch.resources import GPU_BACKENDS
 from inferssd.launch.types import Fact, LaunchInput, Reply
 from inferssd.machine import characteristics
 from inferssd.source import experts
+from inferssd.source import header as gguf_header
 from inferssd.strategy import inputs as strategy_inputs
 
 
@@ -194,8 +196,20 @@ class RecordedArtifacts:
             )
         if name == "model_facts" and name not in self.host:
             # Read from the model's own headers, as the alias index is.
-            header = strategy_inputs.shard_facts(args)
-            return Reply(strategy_inputs.model_facts_json(header))
+            headers = [gguf_header.read(path) for path in args]
+            if headers[0].kv.get("general.architecture") == ram.ARCHITECTURE:
+                return Reply(ram.facts(headers))
+            model = strategy_inputs.facts_from_headers(headers)
+            return Reply(strategy_inputs.model_facts_json(model))
+        if name == "cpu_topology" and name not in self.host:
+            saved = self.host.get("machine_characteristics")
+            if saved is not None:
+                data = (
+                    characteristics.loads(saved)
+                    if isinstance(saved, str)
+                    else characteristics.validate(saved)
+                )
+                return Reply(data["cpu"])
         if (
             name in ("machine_characteristics", "model_drive_key", "engine_gpu_backends")
             and name not in self.host
@@ -208,6 +222,8 @@ class RecordedArtifacts:
         if name not in self.host:
             raise ValueError(f"Missing recorded host fact: {name}")
         value = self.host[name]
+        if name == "cpu_topology":
+            return Reply(value)  # The shared RAM thread selector validates this topology.
         boolean = {
             "gpu_available",
             "ss_available",
@@ -238,6 +254,8 @@ class RecordedArtifacts:
             # Serialised strategy inputs, read back strictly and written out again.
             try:
                 if name == "model_facts":
+                    if isinstance(value, Mapping) and value.get("architecture") == ram.ARCHITECTURE:
+                        return Reply(ram.validate(value))
                     facts = strategy_inputs.model_facts_from(value)
                     return Reply(strategy_inputs.model_facts_json(facts))
                 runtime = strategy_inputs.runtime_facts_from(value)

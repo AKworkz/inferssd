@@ -171,7 +171,9 @@ def estimates(
                     model,
                     decode_estimate(
                         value, model.facts, model.dense_read_bytes, facts, platform, drive_key
-                    ),
+                    )
+                    if model.facts is not None
+                    else Estimate(None, "RAM-only model; speed is measured after loading"),
                 )
                 for model in catalog.MODELS
             ]
