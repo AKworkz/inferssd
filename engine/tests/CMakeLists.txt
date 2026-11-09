@@ -322,7 +322,7 @@ if (TARGET ggml-cpu AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # backend objects; do not acquire a shared GPU automatically in ctest.
         foreach(tier_test test-kimi-vram-async test-kimi-vram-deferred test-kimi-vram-exclusive
                 test-kimi-vram-format-compat test-kimi-vram-pool-cuda
-                test-kimi-vram-elastic test-kimi-vram-reclaim test-kimi-vram-mixed)
+                test-kimi-vram-elastic test-kimi-vram-reclaim test-kimi-vram-mixed test-kimi-vram-payload)
             add_executable(${tier_test} ssd/${tier_test}.cpp)
             target_compile_features(${tier_test} PRIVATE cxx_std_17)
             target_compile_options(${tier_test} PRIVATE -fno-fast-math -ffp-contract=off)

@@ -111,9 +111,10 @@ void run_case(fixture_inputs & inputs, ggml_type type, int tokens, int activatio
 // An SSD-sink prefill seeds the tier's empty slots with the experts its CPU computes, and decode then reads them. The
 // seeded tier's decode admits nothing, so only the seeds can put the experts on the GPU for a later pass, whose output
 // matches that of a tier which took the same experts by decode admission: the same kernels over the same bytes.
-void run_seed_case(fixture_inputs & inputs, ggml_type type, int tokens, int activation_kind) {
+void run_seed_case(fixture_inputs & inputs, ggml_type type, int tokens, int activation_kind, bool native = false) {
     fixture f; f.type = f.down_type = type;
     f.latent = 512; f.hidden = 256; f.experts = 4;
+    f.native_ranges = native; // native ranges name each role by its payload, as a GGUF source does
     make_synthetic(f, 20261110);
     const auto unit = triplet_bytes(f);
     inputs.set("vram_budget", std::to_string(8 * unit).c_str());
@@ -309,6 +310,7 @@ int main(int argc, char ** argv) {
         }
         run_seed_case(inputs, GGML_TYPE_MXFP4, 48, KIMI_CPU_SINK_ACTIVATION_SWIGLU_CLAMP);
         run_seed_case(inputs, GGML_TYPE_Q8_0, 48, KIMI_CPU_SINK_ACTIVATION_SWIGLU);
+        run_seed_case(inputs, GGML_TYPE_Q6_K, 48, KIMI_CPU_SINK_ACTIVATION_SWIGLU, true);
         for (int tokens : {48, 300}) { run_lookahead_case(inputs, tokens); }
         std::printf("PREFILL_SCRATCH_%s cases=%zu failures=%zu\n", failures ? "FAIL" : "PASS", cases, failures);
         return failures ? 1 : 0;
