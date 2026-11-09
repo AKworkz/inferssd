@@ -10515,7 +10515,6 @@ ggml_backend_dev_t llama_model_get_device(const struct llama_model * model, int 
 }
 
 void llama_model::prefetch_ple_rows(const int32_t * rows, size_t count) const {
-#if defined(__unix__) || defined(__APPLE__)
     if (!per_layer_tok_embd || !per_layer_tok_embd->data || count == 0) return;
     const uintptr_t base = reinterpret_cast<uintptr_t>(per_layer_tok_embd->data);
     const size_t bytes = ggml_nbytes(per_layer_tok_embd);
@@ -10528,29 +10527,8 @@ void llama_model::prefetch_ple_rows(const int32_t * rows, size_t count) const {
         }
     }
     if (!mapped) return;
-    const long page_query = sysconf(_SC_PAGESIZE);
-    if (page_query <= 0) return;
-    const size_t page_size = static_cast<size_t>(page_query);
     const size_t row_bytes = ggml_row_size(per_layer_tok_embd->type, per_layer_tok_embd->ne[0]);
-    std::vector<uintptr_t> pages;
-    pages.reserve(count * (2 + row_bytes / page_size));
-    for (size_t i = 0; i < count; ++i) {
-        if (rows[i] < 0 || rows[i] >= per_layer_tok_embd->ne[1]) throw std::runtime_error("PLE prefetch row out of bounds");
-        const uintptr_t first = base + static_cast<size_t>(rows[i]) * row_bytes;
-        const uintptr_t last = first + row_bytes - 1;
-        for (uintptr_t page = first-first%page_size; page <= last-last%page_size; page += page_size) pages.push_back(page);
+    if (!llama_prefetch_rows(per_layer_tok_embd->data, row_bytes, per_layer_tok_embd->ne[1], rows, count)) {
+        LLAMA_LOG_WARN("PLE exact-page prefetch failed\n");
     }
-    std::sort(pages.begin(), pages.end());
-    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
-    for (size_t i = 0; i < pages.size();) {
-        size_t j = i+1;
-        while (j < pages.size() && pages[j] == pages[j-1]+page_size) ++j;
-        if (madvise(reinterpret_cast<void *>(pages[i]), (j-i)*page_size, MADV_WILLNEED) != 0) {
-            LLAMA_LOG_WARN("PLE exact-page prefetch failed\n");
-        }
-        i = j;
-    }
-#else
-    (void) rows; (void) count;
-#endif
 }

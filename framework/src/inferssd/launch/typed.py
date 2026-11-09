@@ -665,8 +665,9 @@ def _resolve(
     if not ordinary:
         # The SSD executor reads the routed experts; their mapped pages stay unread.
         command += ["--defer-experts"]
+    # Flash Attention stays the server's auto choice on every platform: on for each layer whose
+    # device runs it, which is every layer wherever the backends implement it.
     if platform == "linux":
-        command += ["-fa", "on"]
         s.scope = (
             ["systemd-run"]
             + (["--user"] if uid != 0 else [])

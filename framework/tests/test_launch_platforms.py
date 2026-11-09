@@ -107,7 +107,7 @@ def test_windows_passes_cli_settings_and_pins_threads():
 def test_linux_qwen4exp_keeps_the_linux_launch():
     expected = golden("linux-qwen4exp")
     assert "--chat-template-file" not in expected["argv"]
-    assert expected["argv"][-2:] == ["-fa", "on"] and "MemoryMax=17179869184" in expected["scope"]
+    assert "-fa" not in expected["argv"] and "MemoryMax=17179869184" in expected["scope"]
 
 
 @pytest.mark.parametrize(

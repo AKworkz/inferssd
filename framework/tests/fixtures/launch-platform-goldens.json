@@ -109,9 +109,7 @@
       "8080",
       "-np",
       "1",
-      "--defer-experts",
-      "-fa",
-      "on"
+      "--defer-experts"
     ],
     "scope": [
       "systemd-run",
@@ -192,9 +190,7 @@
       "8080",
       "-np",
       "1",
-      "--defer-experts",
-      "-fa",
-      "on"
+      "--defer-experts"
     ],
     "scope": [
       "systemd-run",
@@ -343,9 +339,7 @@
       "8080",
       "-np",
       "1",
-      "--defer-experts",
-      "-fa",
-      "on"
+      "--defer-experts"
     ],
     "scope": [
       "systemd-run",

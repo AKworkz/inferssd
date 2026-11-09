@@ -909,3 +909,59 @@ const bool llama_mlock::SUPPORTED = false;
 size_t llama_path_max() {
     return PATH_MAX;
 }
+
+bool llama_prefetch_rows(const void * table, size_t row_bytes, int64_t n_rows, const int32_t * rows, size_t count) {
+#if defined(_WIN32)
+    SYSTEM_INFO system{};
+    GetSystemInfo(&system);
+    const size_t page = system.dwPageSize;
+#elif defined(_POSIX_MAPPED_FILES)
+    const long query = sysconf(_SC_PAGESIZE);
+    if (query <= 0) { return false; }
+    const size_t page = size_t(query);
+#else
+    (void) table; (void) row_bytes; (void) n_rows; (void) rows; (void) count;
+    return false;
+#endif
+#if defined(_WIN32) || defined(_POSIX_MAPPED_FILES)
+    if (!table || !row_bytes) { return false; }
+    // The pages under the rows, in order, then merged into runs of adjacent pages.
+    const uintptr_t base = reinterpret_cast<uintptr_t>(table);
+    std::vector<uintptr_t> pages;
+    pages.reserve(count * (2 + row_bytes / page));
+    for (size_t i = 0; i < count; ++i) {
+        if (rows[i] < 0 || rows[i] >= n_rows) { continue; }
+        const uintptr_t first = base + size_t(rows[i]) * row_bytes, last = first + row_bytes - 1;
+        for (uintptr_t p = first - first % page; p <= last - last % page; p += page) { pages.push_back(p); }
+    }
+    std::sort(pages.begin(), pages.end());
+    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
+    std::vector<std::pair<uintptr_t, size_t>> runs;
+    for (size_t i = 0; i < pages.size();) {
+        size_t j = i + 1;
+        while (j < pages.size() && pages[j] == pages[j - 1] + page) { ++j; }
+        runs.emplace_back(pages[i], (j - i) * page);
+        i = j;
+    }
+    if (runs.empty()) { return true; }
+#endif
+#if defined(_WIN32)
+#if _WIN32_WINNT >= 0x602
+    using prefetch_fn = BOOL (WINAPI *)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
+    static const auto prefetch = (prefetch_fn)(void *) GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory");
+    if (!prefetch) { return false; }
+    std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+    ranges.reserve(runs.size());
+    for (const auto & [start, bytes] : runs) { ranges.push_back({ reinterpret_cast<void *>(start), SIZE_T(bytes) }); }
+    return prefetch(GetCurrentProcess(), ULONG_PTR(ranges.size()), ranges.data(), 0) != 0;
+#else
+    return false;
+#endif
+#elif defined(_POSIX_MAPPED_FILES)
+    bool advised = true;
+    for (const auto & [start, bytes] : runs) {
+        advised = madvise(reinterpret_cast<void *>(start), bytes, MADV_WILLNEED) == 0 && advised;
+    }
+    return advised;
+#endif
+}

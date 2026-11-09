@@ -5,6 +5,7 @@
 #include "llama-engram.h"
 #include "llama-impl.h"
 #include "llama-kv-cache-dsv4.h"
+#include "llama-mmap.h"
 
 #include "ggml-backend.h"
 
@@ -18,10 +19,6 @@
 #include <string>
 #include <vector>
 
-#ifdef __linux__
-#include <sys/mman.h>
-#include <unistd.h>
-#endif
 
 // DeepSeek-V4.1.
 //
@@ -146,26 +143,11 @@ static constexpr int64_t DSV41_CANDIDATE_TOPK_BLOCKS = 2048;
 static constexpr int64_t DSV41_CANDIDATE_BLOCK_SIZE  = 8;
 
 void dsv41_engram_prefetch_rows(const ggml_tensor * table, const std::vector<int32_t> & rows) {
-#ifdef __linux__
     if (!table || !table->data || !table->buffer || !ggml_backend_buffer_is_host(table->buffer)) {
         return;
     }
-    const size_t page     = (size_t) sysconf(_SC_PAGESIZE);
-    const size_t row_size = table->nb[1];
-    for (int32_t r : rows) {
-        if (r < 0 || r >= table->ne[1]) {
-            continue;
-        }
-        const uintptr_t begin = (uintptr_t) table->data + (size_t) r*row_size;
-        const uintptr_t first = begin & ~(uintptr_t) (page - 1);
-        const uintptr_t end   = (begin + row_size + page - 1) & ~(uintptr_t) (page - 1);
-        // advisory only: on failure the row is read by the regular fault in get_rows
-        (void) madvise((void *) first, end - first, MADV_WILLNEED);
-    }
-#else
-    (void) table;
-    (void) rows;
-#endif
+    // advisory only: on failure the row is read by the regular fault in get_rows
+    (void) llama_prefetch_rows(table->data, table->nb[1], table->ne[1], rows.data(), rows.size());
 }
 
 void dsv41_engram_decode_op(ggml_tensor * dst, int ith, int nth, void *) {
