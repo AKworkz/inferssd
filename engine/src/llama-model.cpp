@@ -8770,6 +8770,35 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         pimpl->expert_mmap_ranges = ml.expert_tensor_index.file_ranges;
     }
 
+    // Refuse weights that do not fit a GPU before any of them is allocated. Past the device's free
+    // memory the allocation fails midway naming only a buffer, or, where the driver backs device
+    // memory with system memory, succeeds and runs the weights across the bus.
+    if (!ml.no_alloc) {
+        std::map<ggml_backend_dev_t, size_t> gpu_weights;
+        for (auto & [buft, ctx_ptr] : ml.ctx_map) {
+            ggml_backend_dev_t dev = ggml_backend_buft_get_device(buft);
+            if (dev == nullptr || ggml_backend_buft_is_host(buft) || ggml_get_first_tensor(ctx_ptr.get()) == nullptr) {
+                continue;
+            }
+            const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
+            if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
+                gpu_weights[dev] += ggml_backend_alloc_ctx_tensors_from_buft_size(ctx_ptr.get(), buft);
+            }
+        }
+        for (const auto & [dev, bytes] : gpu_weights) {
+            size_t free  = 0;
+            size_t total = 0;
+            ggml_backend_dev_memory(dev, &free, &total);
+            if (bytes > free) {
+                throw std::runtime_error(format(
+                        "the model weights for %s (%s) need %zu MiB, more than the %zu MiB free of its %zu MiB: "
+                        "they do not fit the GPU's memory",
+                        ggml_backend_dev_name(dev), ggml_backend_dev_description(dev),
+                        bytes >> 20, free >> 20, total >> 20));
+            }
+        }
+    }
+
     // create the backend buffers
     std::vector<std::pair<ggml_context *, llama_buf_map>> ctx_buf_maps;
     ctx_buf_maps.reserve(ml.ctx_map.size());
