@@ -20,6 +20,7 @@ on:
       - 'framework/**'
       - 'scripts/package-windows*'
       - 'scripts/check-package-windows*'
+      - scripts/install-cuda-redist.ps1
       - scripts/windows-launcher.cpp
       - scripts/engine-resources.py
       - scripts/install.ps1
@@ -41,10 +42,24 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # One package for each GPU backend the launch's table names on Windows: CUDA for NVIDIA GPUs,
+  # Vulkan for the others and the CPU. The installer picks by the machine's GPU.
   build:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: vulkan
+            package: windows-x64
+            jobs: 2
+          - backend: cuda
+            package: windows-x64-cuda
+            jobs: 4
     runs-on: windows-2025
-    timeout-minutes: 120
+    timeout-minutes: 240
+    env:
+      CUDA_REDIST: 12.9.1
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -52,6 +67,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install the build-time Vulkan SDK
+        if: matrix.backend == 'vulkan'
         shell: pwsh
         run: |
           $sdk = Join-Path $env:RUNNER_TEMP 'vulkan-sdk'
@@ -70,30 +86,40 @@ jobs:
           if ($install.ExitCode -ne 0 -or !(Test-Path -LiteralPath "$sdk\Bin\glslc.exe")) { throw 'Vulkan SDK installation failed; see captured installer output' }
           "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
       - name: Preserve SDK install diagnostics
-        if: always()
+        if: always() && matrix.backend == 'vulkan'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: vulkan-sdk-install-log
           path: ${{ runner.temp }}/vulkan-sdk-install.*.txt
           if-no-files-found: ignore
           retention-days: 7
+      - name: Install the build-time CUDA toolkit
+        if: matrix.backend == 'cuda'
+        shell: pwsh
+        run: scripts/install-cuda-redist.ps1 -Version $env:CUDA_REDIST -Root (Join-Path $env:RUNNER_TEMP 'cuda')
       - name: Build the relocatable engine package
         shell: cmd
         run: |
           for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VS=%%i"
           call "%VS%\VC\Auxiliary\Build\vcvars64.bat" -vcvars_ver=14.44 > nul || exit /b 1
-          set "PATH=%ProgramFiles%\LLVM\bin;%VULKAN_SDK%\Bin;%PATH%"
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -OutputDirectory dist -Jobs 2
+          if defined VULKAN_SDK set "PATH=%VULKAN_SDK%\Bin;%PATH%"
+          if defined CUDA_PATH set "PATH=%CUDA_PATH%\bin;%PATH%"
+          set "PATH=%ProgramFiles%\LLVM\bin;%PATH%"
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -Backend ${{ matrix.backend }} -OutputDirectory dist -Jobs ${{ matrix.jobs }}
           if errorlevel 1 exit /b 1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: package-windows-x64
+          name: package-${{ matrix.package }}
           path: dist/
           if-no-files-found: error
           retention-days: 30
 
   check:
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [windows-x64, windows-x64-cuda]
     runs-on: windows-2025
     timeout-minutes: 30
     steps:
@@ -103,18 +129,23 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: package-windows-x64
+          name: package-${{ matrix.package }}
           path: dist
       - name: Relocate, install and run without developer tools
+        # GitHub's runner has no GPU, so the CUDA package's check also shows it starts without NVIDIA's driver.
         shell: powershell
         run: |
-          $zip = @(Get-ChildItem -LiteralPath dist -Filter 'inferssd-*-windows-x64.zip')
+          $zip = @(Get-ChildItem -LiteralPath dist -Filter 'inferssd-*-${{ matrix.package }}.zip')
           if ($zip.Count -ne 1) { throw 'Expected one Windows engine archive' }
           & scripts/check-package-windows.ps1 -Archive $zip[0].FullName
 
   publish:
     needs: check
     if: github.ref == 'refs/heads/main' && inputs.publish
+    strategy:
+      max-parallel: 1
+      matrix:
+        package: [windows-x64, windows-x64-cuda]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     concurrency:
@@ -127,7 +158,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: package-windows-x64
+          name: package-${{ matrix.package }}
           path: dist
       - name: Publish the checked package
         env:

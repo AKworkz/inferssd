@@ -38,9 +38,12 @@ curl -fsSL https://raw.githubusercontent.com/wici-ai/inferssd/main/scripts/insta
 
 The Windows installer downloads the precompiled [Windows package](windows-package.md),
 including its own Python runtime, native engine, probes and runtime DLLs. It does not compile
-or require Git, Python, Visual Studio or a Vulkan SDK. Its package list is
-`https://appapi.wici.ai/versioning/inferssd/config/latest-windows.json` on `main`; a numbered
-release's installer pins its own release manifest instead.
+or require Git, Python, Visual Studio or a Vulkan SDK. On a machine with an NVIDIA GPU whose
+driver is at least the CUDA package's minimum it installs the CUDA package; otherwise the
+Vulkan package, which also runs on the CPU, and it says when a newer NVIDIA driver would give
+CUDA. Its package lists are `latest-windows-cuda.json` and `latest-windows.json` under
+`https://appapi.wici.ai/versioning/inferssd/config/` on `main`; a numbered release's installer
+pins its own release manifests instead.
 `INFERSSD_PACKAGES` can select another list. A missing package list reports an error rather
 than silently starting a source build.
 
@@ -156,16 +159,19 @@ Use the same Metal build and point `-m` at the first Muse GGUF shard; the launch
 
 ## Windows
 
-The prebuilt package requires Windows x64 build 22000 or later and GPU drivers for GPU inference;
-CPU inference is also available. It runs the same `inferssd profile`, `inferssd cli` and
+The prebuilt packages require Windows x64 build 22000 or later and GPU drivers for GPU
+inference: an NVIDIA GPU runs the CUDA package, any other GPU the Vulkan package; CPU inference
+is also available. It runs the same `inferssd profile`, `inferssd cli` and
 `inferssd serve` as the other platforms. The desktop app uses the real executable at
 `%LOCALAPPDATA%\inferssd\current\bin\inferssd.exe`; the installer also supplies
 `%LOCALAPPDATA%\inferssd\bin\inferssd.cmd` for terminal use.
 
 An explicit source build needs Git, Python 3.9 or later, LLVM clang and the Visual Studio C++
-build tools with a Windows SDK of 10.0.22000 or later, for the `IoRing` read path. With the
-[Vulkan SDK](https://vulkan.lunarg.com/) installed (`VULKAN_SDK` set) it can also use a GPU
-through Vulkan. Set `INFERSSD_FROM_SOURCE=1` or `INFERSSD_REF` to request this developer path.
+build tools with a Windows SDK of 10.0.22000 or later, for the `IoRing` read path. It builds
+for the machine's GPUs, as on Linux: with an NVIDIA GPU it uses CUDA and needs the CUDA
+toolkit (`CUDA_PATH`); with another GPU it uses Vulkan when the
+[Vulkan SDK](https://vulkan.lunarg.com/) is installed (`VULKAN_SDK` set). Set
+`INFERSSD_FROM_SOURCE=1` or `INFERSSD_REF` to request this developer path.
 
 From a Visual Studio x64 developer prompt, with CMake and Ninja on PATH:
 
@@ -175,7 +181,8 @@ cmake --build build-windows-llvm --parallel 4 --target inferssd-server inferssd-
 python scripts\engine-resources.py --build build-windows-llvm --output engine-resources.json
 ```
 
-Add `-DGGML_VULKAN=ON` to the first command to build the Vulkan backend.
+Add `-DGGML_VULKAN=ON` to the first command to build the Vulkan backend. For an NVIDIA GPU use
+the `windows-cuda` preset and build directory instead, and add the `inferssd-memprobe` target.
 
 ## Linux / NVIDIA
 

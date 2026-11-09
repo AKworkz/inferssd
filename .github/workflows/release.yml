@@ -1,6 +1,6 @@
 name: Release
 
-# One numbered release contains checked macOS and Windows packages of the same tag commit.
+# One numbered release contains the checked macOS and Windows (Vulkan and CUDA) packages of the same tag commit.
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+"]
@@ -69,11 +69,16 @@ jobs:
         with:
           name: package-windows-x64
           path: dist/windows
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: package-windows-x64-cuda
+          path: dist/windows-cuda
       - name: Prepare both platforms and tag-pinned installers
         env:
           RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
         run: |
-          python3 scripts/prepare-release-assets.py --macos dist/macos --windows dist/windows \
+          python3 scripts/prepare-release-assets.py --macos-arm64 dist/macos --windows-x64 dist/windows \
+            --windows-x64-cuda dist/windows-cuda \
             --output release-assets --tag "$GITHUB_REF_NAME" --revision "$RELEASE_REVISION" \
             --repository "$GITHUB_REPOSITORY"
           sh -n release-assets/install.sh
@@ -110,5 +115,6 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" release-assets/*
           python3 scripts/publish-package.py dist/macos
           python3 scripts/publish-package.py dist/windows
+          python3 scripts/publish-package.py dist/windows-cuda
           gh release edit "$GITHUB_REF_NAME" --draft=false
           created=no

@@ -77,25 +77,7 @@ jobs:
       - name: CUDA toolkit
         # The compiler, runtime, CCCL and cuBLAS archives, each checked against NVIDIA's manifest.
         shell: pwsh
-        run: |
-          $base = 'https://developer.download.nvidia.com/compute/cuda/redist/'
-          $manifest = Invoke-RestMethod "${base}redistrib_$env:CUDA_REDIST.json"
-          $root = Join-Path $env:RUNNER_TEMP 'cuda'
-          New-Item -ItemType Directory -Force $root | Out-Null
-          foreach ($name in 'cuda_nvcc', 'cuda_cudart', 'cuda_cccl', 'libcublas', 'cuda_nvtx', 'cuda_profiler_api') {
-            $part = $manifest.$name.'windows-x86_64'
-            $zip = Join-Path $env:RUNNER_TEMP (Split-Path $part.relative_path -Leaf)
-            # The server can end a large response early: resume until the archive is whole.
-            for ($i = 0; $i -lt 20 -and -not ((Test-Path $zip) -and (Get-Item $zip).Length -ge [int64]$part.size); $i++) {
-              curl.exe -sSL -C - -o $zip ($base + $part.relative_path)
-            }
-            if ((Get-FileHash -Algorithm SHA256 $zip).Hash -ne $part.sha256) { throw "$name does not match the manifest" }
-            tar -xf $zip -C $env:RUNNER_TEMP
-            if ($LASTEXITCODE) { throw "$name does not extract" }
-            $extracted = Join-Path $env:RUNNER_TEMP ([IO.Path]::GetFileNameWithoutExtension($zip))
-            Copy-Item -Recurse -Force (Join-Path $extracted '*') $root
-          }
-          "CUDA_PATH=$root" >> $env:GITHUB_ENV
+        run: scripts/install-cuda-redist.ps1 -Version $env:CUDA_REDIST -Root (Join-Path $env:RUNNER_TEMP 'cuda')
       - name: Configure and build
         # CUDA 12.9 needs the VS 2022-era host toolset, not the runner's default VS 2026 compiler.
         shell: cmd

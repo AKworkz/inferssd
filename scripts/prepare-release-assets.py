@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Prepare one numbered release from checked macOS and Windows packages of one commit."""
+"""Prepare one numbered release from the checked macOS and Windows packages of one commit."""
 
 from __future__ import annotations
 
@@ -12,20 +12,22 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-PLATFORMS = {
-    "darwin-arm64": ("macos-arm64", ".tar.gz", "latest-macos.json"),
+# Each package by the suffix of its name: its platform, archive extension and package list.
+PACKAGES = {
+    "macos-arm64": ("darwin-arm64", ".tar.gz", "latest-macos.json"),
     "windows-x64": ("windows-x64", ".zip", "latest-windows.json"),
+    "windows-x64-cuda": ("windows-x64", ".zip", "latest-windows-cuda.json"),
 }
 
 
 def checked_package(
-    directory: Path, platform: str, version: str, revision: str
+    directory: Path, suffix: str, version: str, revision: str
 ) -> dict[str, Any]:
-    suffix, extension, _ = PLATFORMS[platform]
+    platform, extension, _ = PACKAGES[suffix]
     listings = sorted(directory.glob(f"inferssd-*-{suffix}.json"))
     if len(listings) != 1:
         raise ValueError(
-            f"expected one checked {platform} package, found {len(listings)}"
+            f"expected one checked {suffix} package, found {len(listings)}"
         )
     package = json.loads(listings[0].read_text(encoding="utf-8"))
     if (
@@ -74,8 +76,7 @@ def replace_once(text: str, old: str, new: str) -> str:
 
 def prepare(
     root: Path,
-    macos: Path,
-    windows: Path,
+    directories: dict[str, Path],
     output: Path,
     tag: str,
     revision: str,
@@ -94,15 +95,24 @@ def prepare(
     )
     if version is None or version[1] != tag[1:]:
         raise ValueError("tag does not match the framework version")
-    packages = [
-        checked_package(macos, "darwin-arm64", tag[1:], revision),
-        checked_package(windows, "windows-x64", tag[1:], revision),
-    ]
-    if any(
-        packages[0].get(key) != packages[1].get(key)
-        for key in ("build", "label", "date")
+    if set(directories) != set(PACKAGES):
+        raise ValueError(
+            "a numbered release holds every package: " + ", ".join(PACKAGES)
+        )
+    packages = {
+        suffix: checked_package(directories[suffix], suffix, tag[1:], revision)
+        for suffix in PACKAGES
+    }
+    if (
+        len(
+            {
+                tuple(p.get(key) for key in ("build", "label", "date"))
+                for p in packages.values()
+            }
+        )
+        != 1
     ):
-        raise ValueError("macOS and Windows packages do not share one build identity")
+        raise ValueError("the packages do not share one build identity")
     if output.exists() and any(output.iterdir()):
         raise ValueError("release output is not empty; existing assets were preserved")
     base = f"https://github.com/{repository}/releases/download/{tag}"
@@ -121,16 +131,20 @@ def prepare(
         "$DefaultRef = 'main'",
         "$DefaultRef = '" + tag + "'",
     )
-    powershell = replace_once(
-        powershell,
-        "$Packages = 'https://appapi.wici.ai/versioning/inferssd/config/latest-windows.json'",
-        "$Packages = '" + base + "/latest-windows.json'",
-    )
+    for variable, listing in (
+        ("Packages", "latest-windows.json"),
+        ("CudaPackages", "latest-windows-cuda.json"),
+    ):
+        powershell = replace_once(
+            powershell,
+            f"${variable} = 'https://appapi.wici.ai/versioning/inferssd/config/{listing}'",
+            f"${variable} = '{base}/{listing}'",
+        )
     output.mkdir(parents=True, exist_ok=True)
     names = []
-    for directory, package in zip((macos, windows), packages):
-        shutil.copy2(directory / package["file"], output / package["file"])
-        latest = PLATFORMS[package["platform"]][2]
+    for suffix, package in packages.items():
+        shutil.copy2(directories[suffix] / package["file"], output / package["file"])
+        latest = PACKAGES[suffix][2]
         (output / latest).write_text(
             json.dumps({**package, "url": base + "/" + package["file"]}, indent=2)
             + "\n",
@@ -145,8 +159,13 @@ def prepare(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--macos", required=True, type=Path)
-    parser.add_argument("--windows", required=True, type=Path)
+    for suffix in PACKAGES:
+        parser.add_argument(
+            "--" + suffix,
+            required=True,
+            type=Path,
+            help=f"the checked {suffix} package",
+        )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--revision", required=True)
@@ -154,8 +173,7 @@ def main() -> None:
     args = parser.parse_args()
     files = prepare(
         Path(__file__).resolve().parents[1],
-        args.macos,
-        args.windows,
+        {suffix: getattr(args, suffix.replace("-", "_")) for suffix in PACKAGES},
         args.output,
         args.tag,
         args.revision,

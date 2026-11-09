@@ -61,3 +61,17 @@ def test_visual_cpp_runtime_must_be_bundled_even_on_developer_machine(tmp_path, 
         check.audit(package)
     (package / "vcruntime140.dll").write_bytes(binary())
     assert check.audit(package)["pe_files"] == 2
+
+
+def test_a_driver_library_must_be_delay_loaded_even_where_the_driver_is(tmp_path, monkeypatch):
+    system = tmp_path / "Windows/System32"
+    system.mkdir(parents=True)
+    package = tmp_path / "package"
+    package.mkdir()
+    monkeypatch.setenv("SystemRoot", str(system.parent))
+    # On a machine with the NVIDIA driver the library resolves, yet a normal import would stop
+    # the package from starting on every machine without that driver.
+    (system / "nvcuda.dll").write_bytes(binary())
+    (package / "ggml-cuda.dll").write_bytes(binary("nvcuda.dll"))
+    with pytest.raises(ValueError, match="nvcuda.dll must be delay-loaded"):
+        check.audit(package)

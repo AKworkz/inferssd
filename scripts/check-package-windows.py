@@ -48,6 +48,11 @@ def imports(path: Path) -> list[str]:
     return names
 
 
+# Libraries only a GPU driver installs. A package loads them on first use (delay-loaded), so that it
+# starts where that driver is absent; a normal import would stop every binary that has it.
+DRIVER_LIBRARIES = {"nvcuda.dll"}
+
+
 def audit(package: Path) -> dict[str, int]:
     files = [p for p in package.rglob("*") if p.suffix.casefold() in (".exe", ".dll", ".pyd")]
     bundled = {p.name.casefold() for p in files}
@@ -57,6 +62,8 @@ def audit(package: Path) -> dict[str, int]:
         for dependency in imports(path):
             crt = dependency.startswith(("vcruntime", "msvcp", "concrt"))
             api_set = dependency.startswith(("api-ms-win-", "ext-ms-win-"))
+            if dependency in DRIVER_LIBRARIES:
+                raise ValueError(f"{dependency} must be delay-loaded: {path}")
             if dependency not in bundled and (crt or not api_set and not (system / dependency).is_file()):
                 raise ValueError(f"unbundled dependency {dependency}: {path}")
             count += 1
@@ -130,6 +137,8 @@ def main() -> None:
         path = package / relative
         if Path(relative).is_absolute() or not path.resolve().is_relative_to(package) or not path.is_file():
             raise ValueError("nonrelocatable engine resource: " + relative)
+    if "CUDA" in resources["capabilities"]["gpu_backends"] and "memory" not in resources["probes"]:
+        raise ValueError("a CUDA package must carry the GPU memory probe")
     command = str(package / "bin/inferssd.exe")
     version = json.loads(subprocess.check_output([command, "--version", "--json"]))
     assert {"gemma4", "qwen4exp"} <= set(version["capabilities"]["model_profiles"])

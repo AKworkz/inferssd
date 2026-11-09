@@ -6,6 +6,7 @@
 # The release workflow replaces this with the tag it publishes.
 $DefaultRef = 'main'
 $Packages = 'https://appapi.wici.ai/versioning/inferssd/config/latest-windows.json'
+$CudaPackages = 'https://appapi.wici.ai/versioning/inferssd/config/latest-windows-cuda.json'
 
 function Install-InferSSD {
     param([string[]] $Arguments = @())
@@ -15,13 +16,14 @@ function Install-InferSSD {
         @'
 Install InferSSD for Windows x64 (Windows 11 / Windows Server build 22000 or later).
 The default installation downloads a precompiled engine and its own Python runtime.
-No Git, Python, compiler, Visual Studio or Vulkan SDK is needed. GPU drivers remain
-provided by Windows or the GPU vendor; the package also supports CPU inference.
+No Git, Python, compiler, Visual Studio or Vulkan SDK is needed. With an NVIDIA GPU
+whose driver is new enough it installs the CUDA package; otherwise the Vulkan package,
+which uses other GPUs through their drivers and also runs on the CPU.
 
 Environment:
   INFERSSD_HOME         Installation and model root (default: %LOCALAPPDATA%\inferssd)
   INFERSSD_BIN_DIR      Command directory (default: %LOCALAPPDATA%\inferssd\bin)
-  INFERSSD_PACKAGES     Prebuilt package list (default: main's latest-windows.json)
+  INFERSSD_PACKAGES     Prebuilt package list (default: the CUDA or Vulkan list, by GPU)
   INFERSSD_FROM_SOURCE  Build from source instead (any value, developer tools required)
   INFERSSD_REF          Explicit branch/tag to build from source
   INFERSSD_REPO         Git repository for an explicit source build
@@ -135,7 +137,33 @@ No administrator rights are used. Models, settings and previous releases are pre
             throw 'inferssd: package URLs require HTTPS (or a local test package list).'
         }
         if ($uri.IsFile) { Copy-Item -LiteralPath $uri.LocalPath -Destination $Destination }
-        else { Invoke-WebRequest -UseBasicParsing -Uri $uri.AbsoluteUri -OutFile $Destination }
+        else {
+            # Windows PowerShell 5 redraws its progress bar for every block it receives, which makes a
+            # download of hundreds of MB take minutes even from this machine.
+            $ProgressPreference = 'SilentlyContinue'
+            Invoke-WebRequest -UseBasicParsing -Uri $uri.AbsoluteUri -OutFile $Destination
+        }
+    }
+
+    # The NVIDIA driver version of this machine's NVIDIA GPU, or $null. PCI vendor 10DE is the CUDA
+    # row of the backend table the launch reads (inferssd.machine.identity.PCI_BACKENDS).
+    function Get-NvidiaDriver {
+        foreach ($adapter in @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)) {
+            if ([string]$adapter.PNPDeviceID -match '^PCI\\VEN_10DE&' -and
+                [string]$adapter.DriverVersion -match '^[0-9]+\.[0-9]+\.([0-9]+)\.([0-9]+)$') {
+                # Windows writes NVIDIA's driver 591.91 as 32.0.15.9191: its last five digits.
+                $digits = $Matches[1] + $Matches[2].PadLeft(4, '0')
+                $digits = $digits.Substring($digits.Length - 5)
+                return [Version]($digits.Substring(0, 3) + '.' + $digits.Substring(3))
+            }
+        }
+        return $null
+    }
+
+    function Get-PackageList([string] $Address, [string] $Destination) {
+        try { Download-File $Address $Destination }
+        catch { throw "inferssd: cannot download the Windows package list. No source build was started. $($_.Exception.Message)" }
+        return Get-Content -LiteralPath $Destination -Raw | ConvertFrom-Json
     }
 
     function Install-Package {
@@ -147,25 +175,39 @@ No administrator rights are used. Models, settings and previous releases are pre
         $complete = $false
         try {
             $listing = Join-Path $release 'latest.json'
-            $address = if ($env:INFERSSD_PACKAGES) { $env:INFERSSD_PACKAGES } else { $Packages }
-            try { Download-File $address $listing }
-            catch { throw "inferssd: cannot download the Windows package list. No source build was started. $($_.Exception.Message)" }
-            $package = Get-Content -LiteralPath $listing -Raw | ConvertFrom-Json
-            if ($package.schema -ne 'inferssd-package 1' -or $package.platform -ne 'windows-x64') {
+            if ($env:INFERSSD_PACKAGES) {
+                $package = Get-PackageList $env:INFERSSD_PACKAGES $listing
+            } else {
+                # An NVIDIA GPU runs the CUDA package once its driver runs the package's CUDA runtime.
+                $driver = Get-NvidiaDriver
+                $package = if ($driver) { Get-PackageList $CudaPackages $listing }
+                if ($package -and $driver -lt [Version]$package.minimum_nvidia_driver) {
+                    Write-Output ("inferssd: the CUDA package needs NVIDIA driver $($package.minimum_nvidia_driver) or later " +
+                        "and this machine has $driver; installing the Vulkan package. Update the driver and run " +
+                        'this installer again to use CUDA.')
+                    $package = $null
+                }
+                if (-not $package) { $package = Get-PackageList $Packages $listing }
+            }
+            # Package lists from before the CUDA package carry no backend: they are Vulkan's.
+            $backend = if ($package.backend) { $package.backend } else { 'vulkan' }
+            $suffix = @{ vulkan = 'windows-x64'; cuda = 'windows-x64-cuda' }[[string]$backend]
+            if ($package.schema -ne 'inferssd-package 1' -or $package.platform -ne 'windows-x64' -or -not $suffix) {
                 throw 'inferssd: unsupported Windows package list.'
             }
-            if ($package.name -notmatch '^inferssd-[a-zA-Z0-9.-]+-windows-x64$' -or
+            if ($package.name -notmatch ('^inferssd-[a-zA-Z0-9.-]+-' + $suffix + '$') -or
                 $package.file -ne ($package.name + '.zip') -or $package.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or
                 ($package.size -isnot [int] -and $package.size -isnot [long]) -or [long]$package.size -lt 1 -or
                 ($package.build -isnot [int] -and $package.build -isnot [long]) -or [long]$package.build -lt 1 -or
                 $package.revision -notmatch '^[a-fA-F0-9]{40}$' -or
-                $package.minimum_windows -notmatch '^10\.0\.[0-9]+(?:\.[0-9]+)?$') {
+                $package.minimum_windows -notmatch '^10\.0\.[0-9]+(?:\.[0-9]+)?$' -or
+                ($backend -eq 'cuda' -and [string]$package.minimum_nvidia_driver -notmatch '^[0-9]+\.[0-9]+$')) {
                 throw 'inferssd: invalid Windows package metadata.'
             }
             if ([Environment]::OSVersion.Version -lt [Version]$package.minimum_windows) {
                 throw "inferssd: this package requires Windows build $($package.minimum_windows) or later."
             }
-            Write-Output "Downloading InferSSD $($package.label) ($([math]::Ceiling($package.size / 1000000)) MB)."
+            Write-Output "Downloading InferSSD $($package.label), $backend ($([math]::Ceiling($package.size / 1000000)) MB)."
             $archive = Join-Path $release 'package.zip'
             Download-File $package.url $archive
             $hash = [Security.Cryptography.SHA256]::Create()
@@ -306,19 +348,27 @@ No administrator rights are used. Models, settings and previous releases are pre
         & git clone --filter=blob:none --single-branch --branch $ref $repository $source
         if ($LASTEXITCODE) { throw 'inferssd: git clone failed.' }
         $rest = @($python | Select-Object -Skip 1)
-        # The GPU backend for this machine's GPUs, by the table the launch reads. This installer
-        # builds a GPU's engine with Vulkan, an NVIDIA GPU's too.
+        # The GPU backend for this machine's GPUs, by the table the launch reads: CUDA for an NVIDIA
+        # GPU, Vulkan for the others.
         $env:PYTHONPATH = Join-Path $source 'framework\src'
         $backend = & $python[0] @rest -m inferssd.machine.backend
         $found = $LASTEXITCODE
         Remove-Item Env:PYTHONPATH
         if ($found) { throw 'inferssd: reading the GPUs failed.' }
+        $preset = 'windows-llvm'
         $vulkan = ''
-        if ($backend -ne 'CPU') {
+        $targets = 'inferssd-server inferssd-cpuprobe inferssd-ssdprobe'
+        if ($backend -eq 'CUDA') {
+            if (-not $env:CUDA_PATH -or -not (Test-Path -LiteralPath (Join-Path $env:CUDA_PATH 'bin\nvcc.exe'))) {
+                throw 'inferssd: an NVIDIA GPU was found: install the CUDA toolkit (it sets CUDA_PATH).'
+            }
+            $preset = 'windows-cuda'
+            $targets += ' inferssd-memprobe'
+        } elseif ($backend -ne 'CPU') {
             if ($env:VULKAN_SDK) { $vulkan = ' -DGGML_VULKAN=ON' }
             else { Write-Output 'inferssd: a GPU was found; install the Vulkan SDK to use it.' }
         }
-        $kind = if ($vulkan) { 'windows-llvm, Vulkan' } else { 'windows-llvm' }
+        $kind = if ($vulkan) { "$preset, Vulkan" } else { $preset }
         Write-Output "Building InferSSD ($kind). This may take several minutes."
         & $python[0] @rest -m venv (Join-Path $release 'venv')
         if ($LASTEXITCODE) { throw 'inferssd: creating the Python environment failed.' }
@@ -334,15 +384,15 @@ No administrator rights are used. Models, settings and previous releases are pre
         Write-Batch $build @(
             '@echo off',
             "call `"$vcvars`" > nul || exit /b 1",
-            "set `"PATH=$scripts;$llvm;%VULKAN_SDK%\Bin;%PATH%`"",
+            "set `"PATH=$scripts;$llvm;%VULKAN_SDK%\Bin;%CUDA_PATH%\bin;%PATH%`"",
             "cd /d `"$source`" || exit /b 1",
-            "cmake --preset windows-llvm$vulkan || exit /b 1",
-            "cmake --build build-windows-llvm --parallel $jobs --target inferssd-server inferssd-cpuprobe inferssd-ssdprobe || exit /b 1"
+            "cmake --preset $preset$vulkan || exit /b 1",
+            "cmake --build build-$preset --parallel $jobs --target $targets || exit /b 1"
         )
         & cmd /c $build
         if ($LASTEXITCODE) { throw 'inferssd: building the engine failed.' }
         $resources = Join-Path $release 'engine-resources.json'
-        & $py (Join-Path $source 'scripts\engine-resources.py') --build (Join-Path $source 'build-windows-llvm') --output $resources
+        & $py (Join-Path $source 'scripts\engine-resources.py') --build (Join-Path $source "build-$preset") --output $resources
         if ($LASTEXITCODE) { throw 'inferssd: describing the engine failed.' }
         $inferssd = Join-Path $scripts 'inferssd.exe'
         & $inferssd cli --help | Out-Null

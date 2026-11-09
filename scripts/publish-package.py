@@ -4,10 +4,10 @@
 
 Usage: APP_VERSIONING_TOKEN=... scripts/publish-package.py DIST_DIR
 
-DIST_DIR holds one versioned macOS tar.gz or Windows ZIP and its .json. The archive goes to
+DIST_DIR holds one versioned macOS tar.gz or Windows ZIP (Vulkan or CUDA) and its .json. The archive goes to
 cdn.wici.ai/apps/inferssd/ through WiCi AI's release service, which hands out an upload URL for it,
 as the desktop app's releases do. Then the package list, the .json with the archive's URL added,
-replaces latest-macos.json or latest-windows.json, which that platform's installer reads.
+replaces latest-macos.json, latest-windows.json or latest-windows-cuda.json, which the installers read.
 The list never moves to an older build.
 
 The CDN keeps a file for a year, so a name never gets other bytes: a package built again from a
@@ -26,8 +26,10 @@ import urllib.request
 from pathlib import Path
 
 SERVICE = os.environ.get("INFERSSD_PUBLISH_SERVICE", "https://appapi.wici.ai/versioning/inferssd")
-LISTS = {"darwin-arm64": ("latest-macos.json", ".tar.gz"),
-         "windows-x64": ("latest-windows.json", ".zip")}
+# Each package by the suffix of its name: its platform, package list and archive extension.
+LISTS = {"macos-arm64": ("darwin-arm64", "latest-macos.json", ".tar.gz"),
+         "windows-x64": ("windows-x64", "latest-windows.json", ".zip"),
+         "windows-x64-cuda": ("windows-x64", "latest-windows-cuda.json", ".zip")}
 # The CDN in front of the service refuses Python's default User-Agent.
 AGENT = "inferssd-publish"
 
@@ -62,25 +64,24 @@ def main() -> None:
     if not token:
         fail("APP_VERSIONING_TOKEN is not set")
     folder = Path(sys.argv[1])
-    listings = sorted(folder.glob("inferssd-*-macos-arm64.json")) + sorted(
-        folder.glob("inferssd-*-windows-x64.json")
-    )
-    if len(listings) != 1:
-        fail(f"expected one package in {sys.argv[1]}, found {len(listings)}")
-    package = json.loads(listings[0].read_text(encoding="utf-8"))
-    if package.get("platform") not in LISTS:
-        fail("unsupported package platform")
-    listing_name, extension = LISTS[package["platform"]]
+    found = [(suffix, path) for suffix in LISTS for path in sorted(folder.glob(f"inferssd-*-{suffix}.json"))]
+    if len(found) != 1:
+        fail(f"expected one package in {sys.argv[1]}, found {len(found)}")
+    suffix, manifest = found[0]
+    package = json.loads(manifest.read_text(encoding="utf-8"))
+    platform, listing_name, extension = LISTS[suffix]
+    if package.get("platform") != platform:
+        fail("the package platform does not match its name")
     name = package.get("name")
     if (not isinstance(name, str) or not name or "/" in name or "\\" in name
             or package.get("file") != name + extension):
         fail("the package filename does not match its platform and name")
-    archive = listings[0].with_name(package["file"])
+    archive = manifest.with_name(package["file"])
     data = archive.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     matches = digest == package["sha256"] and len(data) == package["size"]
     if package["schema"] != "inferssd-package 1" or not matches:
-        fail(f"{archive.name} does not match {listings[0].name}")
+        fail(f"{archive.name} does not match {manifest.name}")
 
     status, body = call("GET", f"{SERVICE}/config/{listing_name}")
     if status == 200:

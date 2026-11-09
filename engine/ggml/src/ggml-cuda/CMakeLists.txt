@@ -184,6 +184,12 @@ if (CUDAToolkit_FOUND)
         # No VMM requested, no need to link directly with the cuda driver lib (libcuda.so)
     else()
         target_link_libraries(ggml-cuda PRIVATE CUDA::cuda_driver)
+        if (WIN32)
+            # nvcuda.dll comes with the NVIDIA driver. The driver API is called only for devices the runtime
+            # found, so loading it on first use lets a CUDA build start, without CUDA devices, where no driver is.
+            target_link_options(ggml-cuda PRIVATE "LINKER:/DELAYLOAD:nvcuda.dll")
+            target_link_libraries(ggml-cuda PRIVATE delayimp)
+        endif()
     endif()
 
     if (GGML_CUDA_NCCL)

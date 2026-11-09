@@ -185,9 +185,13 @@ def test_release_workflow_can_pin_the_windows_installer():
 
 def test_windows_installer_builds_the_preset_the_framework_looks_in():
     text = WINDOWS_INSTALLER.read_text()
-    assert "cmake --preset windows-llvm" in text
-    # The same targets as the POSIX installer on a machine without a CUDA GPU.
-    assert "--target inferssd-server inferssd-cpuprobe inferssd-ssdprobe" in text
+    # CUDA for an NVIDIA GPU, as the POSIX installer builds linux-cuda; else Vulkan or the CPU.
+    assert "$preset = 'windows-llvm'" in text and "$preset = 'windows-cuda'" in text
+    assert '"cmake --preset $preset$vulkan || exit /b 1"' in text
+    assert '"cmake --build build-$preset --parallel $jobs --target $targets || exit /b 1"' in text
+    # The same targets as the POSIX installer, the GPU memory probe only with CUDA.
+    assert "$targets = 'inferssd-server inferssd-cpuprobe inferssd-ssdprobe'" in text
+    assert "$targets += ' inferssd-memprobe'" in text
     for name in ("INFERSSD_HOME", "INFERSSD_BIN_DIR", "INFERSSD_REF", "INFERSSD_JOBS"):
         assert name in text and name in INSTALLER.read_text()
 

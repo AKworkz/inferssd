@@ -23,13 +23,13 @@ def inputs(tmp_path):
     (root / "framework/pyproject.toml").write_text('version = "0.1.3"\n')
     for name in ("install.sh", "install.ps1"):
         shutil.copyfile(ROOT / "scripts" / name, root / "scripts" / name)
-    directories = []
-    for platform, (suffix, extension, _) in release.PLATFORMS.items():
+    directories = {}
+    for suffix, (platform, extension, _) in release.PACKAGES.items():
         directory = tmp_path / suffix
         directory.mkdir()
         name = f"inferssd-261109.250.1111111-{suffix}"
         archive = directory / (name + extension)
-        archive.write_bytes((platform + " checked package").encode())
+        archive.write_bytes((suffix + " checked package").encode())
         package = {
             "schema": "inferssd-package 1",
             "name": name,
@@ -44,24 +44,30 @@ def inputs(tmp_path):
             "label": "261109.250.1111111",
         }
         (directory / (name + ".json")).write_text(json.dumps(package))
-        directories.append(directory)
+        directories[suffix] = directory
     return root, directories, tmp_path / "assets"
 
 
 def prepare(inputs, tag="v0.1.3", revision=REVISION):
     root, directories, output = inputs
-    return release.prepare(root, *directories, output, tag, revision, "wici-ai/inferssd")
+    return release.prepare(root, directories, output, tag, revision, "wici-ai/inferssd")
 
 
-def test_one_release_contains_both_platforms_and_both_pinned_installers(inputs):
+def test_one_release_contains_every_package_and_both_pinned_installers(inputs):
     root, _, output = inputs
     originals = {
         name: (root / "scripts" / name).read_bytes() for name in ("install.sh", "install.ps1")
     }
     files = prepare(inputs)
-    assert len(files) == 6 and set(files) == {p.name for p in output.iterdir()}
-    assert {"install.sh", "install.ps1", "latest-macos.json", "latest-windows.json"} <= set(files)
-    for platform, (_, _, listing) in release.PLATFORMS.items():
+    assert len(files) == 8 and set(files) == {p.name for p in output.iterdir()}
+    assert {
+        "install.sh",
+        "install.ps1",
+        "latest-macos.json",
+        "latest-windows.json",
+        "latest-windows-cuda.json",
+    } <= set(files)
+    for platform, _, listing in release.PACKAGES.values():
         package = json.loads((output / listing).read_text())
         assert package["platform"] == platform and package["revision"] == REVISION
         assert (
@@ -77,10 +83,9 @@ def test_one_release_contains_both_platforms_and_both_pinned_installers(inputs):
         in shell
     )
     assert "$DefaultRef = 'v0.1.3'" in powershell
-    assert (
-        "$Packages = 'https://github.com/wici-ai/inferssd/releases/download/v0.1.3/latest-windows.json'"
-        in powershell
-    )
+    base = "https://github.com/wici-ai/inferssd/releases/download/v0.1.3/"
+    assert f"$Packages = '{base}latest-windows.json'" in powershell
+    assert f"$CudaPackages = '{base}latest-windows-cuda.json'" in powershell
     for name, original in originals.items():
         assert (root / "scripts" / name).read_bytes() == original
 
@@ -100,7 +105,7 @@ def test_other_version_commit_build_or_changed_bytes_cannot_enter_numbered_relea
     inputs, field, value
 ):
     _, directories, output = inputs
-    listing = next(directories[1].glob("*.json"))
+    listing = next(directories["windows-x64-cuda"].glob("*.json"))
     package = json.loads(listing.read_text())
     package[field] = value
     listing.write_text(json.dumps(package))
@@ -111,7 +116,7 @@ def test_other_version_commit_build_or_changed_bytes_cannot_enter_numbered_relea
 
 def test_missing_platform_and_existing_assets_are_not_silently_replaced(inputs):
     _, directories, output = inputs
-    manifest = next(directories[1].glob("*.json"))
+    manifest = next(directories["windows-x64"].glob("*.json"))
     saved = manifest.read_bytes()
     manifest.unlink()
     with pytest.raises(ValueError, match="expected one checked"):
@@ -153,6 +158,7 @@ def test_tag_workflow_waits_for_both_reusable_checked_packages():
         s["run"] for s in jobs["release"]["steps"] if "Publish the common" in s.get("name", "")
     )
     assert "scripts/publish-package.py dist/macos" in publication
-    assert "scripts/publish-package.py dist/windows" in publication
+    assert "scripts/publish-package.py dist/windows\n" in publication
+    assert "scripts/publish-package.py dist/windows-cuda" in publication
     assert "--draft --verify-tag" in publication and "--draft=false" in publication
     assert "its assets will not be replaced" in publication

@@ -9,7 +9,7 @@ preserves its source attribution and license files.
 | Integration group | Reason and boundary |
 | --- | --- |
 | ggml scheduler and allocator | Borrowed SSD copy hooks; graph buffer measurement/admission; first touch; backend scratch reservation; a pass that keeps an in-place op with the backend holding its storage. No core implementation is linked into ggml-base. |
-| CPU/CUDA registries | Normal private provider discovery and context-service attachment. CPU and CUDA do not link each other. |
+| CPU/CUDA registries | Normal private provider discovery and context-service attachment. CPU and CUDA do not link each other. On Windows the CUDA backend loads the driver's nvcuda.dll on first use, so a CUDA build starts where no NVIDIA driver is. |
 | Vulkan backend | Idle-submit keepalive every 20 ms; source-aware F16 `SET_ROWS` pipelines for F32/F16 destinations and I32/I64 indices, with unsupported conversions rejected. Shared copy shaders retain their F32 source variants. |
 | Backend operation files | New model operations and narrow native kernel entry points stay with their upstream operation/architecture files. Strict MXFP4 math is compiled separately with contraction and FTZ disabled. |
 | llama context | Runtime assembly, request phases, resource-aware graph reservation and failure recovery. Source, cache and telemetry owners reside in `src/ssd`. |
@@ -85,7 +85,7 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `ggml/src/ggml-cpu/quants.h` | 7 | 0 |
 | `ggml/src/ggml-cpu/unary-ops.cpp` | 271 | 1 |
 | `ggml/src/ggml-cpu/unary-ops.h` | 3 | 0 |
-| `ggml/src/ggml-cuda/CMakeLists.txt` | 5 | 0 |
+| `ggml/src/ggml-cuda/CMakeLists.txt` | 11 | 0 |
 | `ggml/src/ggml-cuda/argsort.cu` | 93 | 71 |
 | `ggml/src/ggml-cuda/argsort.cuh` | 6 | 0 |
 | `ggml/src/ggml-cuda/binbcast.cu` | 12 | 2 |
@@ -185,5 +185,5 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `tools/server/server-task.h` | 23 | 80 |
 | `tools/server/tests/utils.py` | 2 | 2 |
 
-Total: 17577 added, 5686 removed across 153 upstream paths.
+Total: 17583 added, 5686 removed across 153 upstream paths.
 <!-- END UPSTREAM INVENTORY -->

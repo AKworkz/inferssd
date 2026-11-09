@@ -9,22 +9,21 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    "platform,extension,listing",
+    "suffix,platform,extension,listing",
     [
-        ("darwin-arm64", ".tar.gz", "latest-macos.json"),
-        ("windows-x64", ".zip", "latest-windows.json"),
+        ("macos-arm64", "darwin-arm64", ".tar.gz", "latest-macos.json"),
+        ("windows-x64", "windows-x64", ".zip", "latest-windows.json"),
+        ("windows-x64-cuda", "windows-x64", ".zip", "latest-windows-cuda.json"),
     ],
 )
 def test_publish_verified_package_to_its_platform_list(
-    tmp_path, monkeypatch, platform, extension, listing
+    tmp_path, monkeypatch, suffix, platform, extension, listing
 ):
     script = Path(__file__).resolve().parents[2] / "scripts/publish-package.py"
     spec = importlib.util.spec_from_file_location("publisher", script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    name = "inferssd-261109.401.aaaaaaa-" + (
-        "macos-arm64" if platform == "darwin-arm64" else platform
-    )
+    name = "inferssd-261109.401.aaaaaaa-" + suffix
     archive = tmp_path / (name + extension)
     archive.write_bytes(b"verified package")
     package = {

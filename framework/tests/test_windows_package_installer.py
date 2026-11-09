@@ -41,8 +41,9 @@ def windows_install(tmp_path):
     # The installation itself cannot find developer tools or an external Python.
     env["PATH"] = str(Path(os.environ["WINDIR"]) / "System32")
 
-    def make_package(build, *, member=None, checksum=None):
-        name = f"inferssd-261109.{build}.aaaaaaa-windows-x64"
+    def make_package(build, *, member=None, checksum=None, backend=None, driver="576.57"):
+        suffix = "windows-x64-cuda" if backend == "cuda" else "windows-x64"
+        name = f"inferssd-261109.{build}.aaaaaaa-{suffix}"
         archive = tmp_path / (name + ".zip")
         metadata = {
             "version": "0.1.3",
@@ -70,6 +71,10 @@ def windows_install(tmp_path):
             "size": archive.stat().st_size,
             **metadata,
         }
+        if backend:
+            manifest["backend"] = backend
+        if backend == "cuda" and driver:
+            manifest["minimum_nvidia_driver"] = driver
         listing = tmp_path / (name + ".json")
         listing.write_text(json.dumps(manifest))
         return listing, name
@@ -216,3 +221,22 @@ def test_ps5_installs_deep_python_paths_without_duplicate_archive_root(
     assert installed.read_bytes() == b"python bytecode fixture"
     assert not (home / "current" / name).exists()
     assert len(str((home / "current").resolve() / relative)) < 260
+
+
+def test_installs_the_cuda_package_a_package_list_names(windows_install):
+    home, _, _, make_package, run = windows_install
+    listing, name = make_package(403, backend="cuda")
+    result = run(listing)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "261109.403.aaaaaaa, cuda" in result.stdout
+    assert (home / "current" / "bin" / "inferssd-server.exe").is_file()
+
+
+@pytest.mark.parametrize("driver", [None, "newest"])
+def test_a_cuda_package_without_its_driver_minimum_is_refused(windows_install, driver):
+    home, _, _, make_package, run = windows_install
+    listing, _ = make_package(404, backend="cuda", driver=driver)
+    result = run(listing)
+    assert result.returncode != 0
+    assert "invalid Windows package metadata" in result.stdout + result.stderr
+    assert not (home / "current").exists()
