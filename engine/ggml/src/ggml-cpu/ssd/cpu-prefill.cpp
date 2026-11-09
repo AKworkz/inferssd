@@ -53,9 +53,6 @@ static bool prefill_activation_valid(const kimi_cpu_sink_activation * activation
     }
 }
 
-// The route workspace a batch may take: above it a run fails before any read.
-constexpr uint64_t prefill_workspace_max = 512ull << 20;
-
 static void prefill_mxfp4_dot_pair(ggml_vec_dot_t dot, int n, float * out,
         const void * weights, const void * input0, const void * input1) {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -210,23 +207,31 @@ struct kimi_cpu_prefill {
         }
         const size_t columns = static_cast<size_t>(current.max_group_tokens);
         const bool swiglu = activation_config.kind == KIMI_CPU_SINK_ACTIVATION_SWIGLU;
-        // Each CPU route's weighted output, for the graph's slot-order sum per
-        // token. A route the GPU tier serves is never written or read here.
-        const uint64_t routed = uint64_t(ntokens) * uint64_t(nslots) * uint64_t(latent) * sizeof(float);
-        const uint64_t scratch = (uint64_t(columns) * hidden * (swiglu ? 2 : 1) +
-                (activation_config.post_exp_norm ? uint64_t(columns) * latent : 0)) * sizeof(float) +
-                uint64_t(columns) * quant_bytes_hidden + uint64_t(ntokens) * quant_bytes_input;
-        if (routed + scratch > prefill_workspace_max) {
-            throw std::runtime_error("grouped CPU prefill of " + std::to_string(ntokens) + " tokens needs " +
-                std::to_string((routed + scratch) >> 20) + " MiB of route workspace, above its " +
-                std::to_string(prefill_workspace_max >> 20) + " MiB limit: use a smaller ubatch");
+        // Each CPU route's weighted output (routed_output), for the graph's slot-order sum per token; a route the
+        // GPU tier serves is never written or read there. The workspace grows with the pass, as host memory outside
+        // the caches: before any read, the sink's host-memory ledger makes room for what it adds and refuses only
+        // what the envelope cannot hold. A buffer that grows is replaced whole, the old one alive until the new one
+        // holds its values, so each is priced at its new size.
+        const size_t routes = static_cast<size_t>(ntokens) * size_t(nslots) * size_t(latent);
+        const size_t sizes[] = {
+            columns * size_t(hidden), swiglu ? columns * size_t(hidden) : 0,
+            activation_config.post_exp_norm ? columns * size_t(latent) : 0, routes,
+            columns * quant_bytes_hidden, static_cast<size_t>(ntokens) * quant_bytes_input,
+        };
+        std::vector<float> * floats[] = { &activation, &activation_up, &post_exp_output, &routed_output };
+        std::vector<uint8_t> * bytes[] = { &quant_hidden, &quant_input };
+        uint64_t growth = 0;
+        for (size_t i = 0; i < 4; ++i) {
+            if (sizes[i] > floats[i]->capacity()) { growth += uint64_t(sizes[i]) * sizeof(float); }
         }
-        activation.resize(columns * hidden);
-        activation_up.resize(swiglu ? columns * hidden : 0);
-        post_exp_output.resize(activation_config.post_exp_norm ? columns * latent : 0);
-        quant_hidden.resize(columns * quant_bytes_hidden);
-        quant_input.resize(static_cast<size_t>(ntokens) * quant_bytes_input);
-        routed_output.resize(static_cast<size_t>(ntokens) * nslots * latent);
+        for (size_t i = 0; i < 2; ++i) {
+            if (sizes[4 + i] > bytes[i]->capacity()) { growth += uint64_t(sizes[4 + i]); }
+        }
+        kimi_cpu_sink_host_grow(sink, growth, [&] {
+            // reserve allocates exactly the priced size; resize then writes every new element
+            for (size_t i = 0; i < 4; ++i) { floats[i]->reserve(sizes[i]); floats[i]->resize(sizes[i]); }
+            for (size_t i = 0; i < 2; ++i) { bytes[i]->reserve(sizes[4 + i]); bytes[i]->resize(sizes[4 + i]); }
+        });
         consumed.assign(groups.size(), 0);
         size_t workspace = (activation.capacity() + activation_up.capacity()) * sizeof(float) +
                 quant_hidden.capacity() + quant_input.capacity() + routed_output.capacity() * sizeof(float) +

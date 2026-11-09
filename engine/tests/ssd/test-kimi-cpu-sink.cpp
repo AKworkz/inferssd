@@ -3948,18 +3948,25 @@ static void swiglu_tests(fixture_inputs & inputs, int depth) {
                 std::string(s.name) + ": SwiGLU prefill counters");
         }
         if (s.experts == 512) {
-            // a batch whose route outputs exceed the workspace limit fails before any read
+            // A batch whose route outputs pass the 512 MiB the workspace was once capped at: the host-memory ledger
+            // prices the workspace as it grows, so the batch runs where the envelope holds it, and where it does
+            // not the ledger refuses it before any read.
             const int ntokens = int((512ull << 20) / (uint64_t(nslots) * f.latent * sizeof(float))) + 1;
             std::vector<float> big(size_t(ntokens) * f.latent, .01f), out(big.size());
             std::vector<int32_t> ids(size_t(ntokens) * nslots);
             std::vector<float> weights(ids.size(), 1.0f / nslots);
             for (size_t i = 0; i < ids.size(); ++i) { ids[i] = s.stored[i % nslots]; }
             kimi_cpu_prefill_stats stats = {};
-            require(!kimi_cpu_prefill_run_activation(prefill.get(), meta2.role[0], meta2.role[1], meta2.role[2],
-                big.data(), ids.data(), weights.data(), nslots, ntokens, &swiglu, out.data(), &stats, error,
-                sizeof(error)) && std::strstr(error, "route workspace") && stats.stream.read_requests == 0,
-                std::string(s.name) + ": an oversized prefill batch was not refused before its reads");
-            std::printf("case=%s_prefill_workspace_limit tokens=%d status=PASS error=%s\n", s.name, ntokens, error);
+            const bool ran = kimi_cpu_prefill_run_activation(prefill.get(), meta2.role[0], meta2.role[1],
+                meta2.role[2], big.data(), ids.data(), weights.data(), nslots, ntokens, &swiglu, out.data(), &stats,
+                error, sizeof(error));
+            require(ran ? stats.workspace_bytes > (512ull << 20) && stats.stream.read_requests > 0 &&
+                    !stats.stream.read_errors && !stats.stream.pending_reads
+                    : std::strstr(error, "refused") && stats.stream.read_requests == 0,
+                std::string(s.name) + ": a prefill batch past 512 MiB of route workspace neither ran nor was refused "
+                "by the ledger before its reads: " + error);
+            std::printf("case=%s_prefill_workspace_past_512mib tokens=%d status=PASS %s\n", s.name, ntokens,
+                ran ? "ran" : error);
         }
 
         for (int n : counts) {

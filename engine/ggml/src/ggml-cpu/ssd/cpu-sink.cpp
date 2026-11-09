@@ -3073,6 +3073,15 @@ void kimi_cpu_sink_parallel_last(struct kimi_cpu_sink * sink,
     sink->parallel_phase(function, userdata, true);
 }
 
+void kimi_cpu_sink_host_grow(struct kimi_cpu_sink * sink, uint64_t bytes, const std::function<void()> & grow) {
+    if (!bytes) { grow(); return; }
+    auto ticket = sink->cache.ledger.client->take(sink->cache.allocation_cost(bytes), 0, ssd::host::requester::outside,
+        false, ssd::host::allocation_class::tracked);
+    if (!ticket) { throw std::runtime_error(ticket.error); }
+    grow();
+    ticket.value.commit();
+}
+
 bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
         const struct ggml_tensor * up, const struct ggml_tensor * gate,
         const struct ggml_tensor * down, const int32_t * ids, int nexperts,

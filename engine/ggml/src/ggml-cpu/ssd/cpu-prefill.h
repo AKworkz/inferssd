@@ -51,8 +51,9 @@ GGML_BACKEND_API void kimi_cpu_prefill_destroy(struct kimi_cpu_prefill * prefill
 // activation requirements match kimi_cpu_sink_run_activation. Every distinct
 // live expert is read once. Each token's routes are added in slot order from its
 // first live slot's product, as the graph does, for every batch size; the route
-// workspace (about ntokens * nslots * latent floats) must fit 512 MiB, or the run
-// fails before any read. Negative IDs are skipped. On failure discard output; no
+// workspace (about ntokens * nslots * latent floats) is priced to the sink's
+// host-memory ledger as it grows, and a run whose envelope cannot hold it fails
+// before any read. Negative IDs are skipped. On failure discard output; no
 // hidden mmap/GPU fallback is attempted and in-flight reads are drained.
 GGML_BACKEND_API bool kimi_cpu_prefill_run_activation(
         struct kimi_cpu_prefill * prefill,
