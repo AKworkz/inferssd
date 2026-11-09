@@ -12,7 +12,7 @@ No destructor exception is used as an error channel.
 Each line has `v`, `ev` and `seq`, plus the event payload:
 
 ```json
-{"v":1,"ev":"ssd.io.read","seq":1,"read_bytes":12345}
+{"v":1,"ev":"ssd.prefill.layer","seq":1,"layer":0,"n_tokens":2,"read_bytes":12345}
 ```
 
 The first effective-settings publication uses `ev=ssd.settings`. Its `values`

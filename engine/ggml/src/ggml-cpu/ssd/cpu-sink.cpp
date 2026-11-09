@@ -2149,30 +2149,22 @@ struct kimi_cpu_sink {
                 << ",\"vram_hits\":" << vram.hits << ",\"wall_us\":" << current.total_us
                 << ",\"wait_io_us\":" << current.wait_io_us << ",\"compute_us\":" << current.compute_us
                 << ",\"compute_thread_cpu_us\":" << current.compute_cpu_us << ",\"io_thread_cpu_us\":" << current.io_cpu_us
-                << ",\"caller_thread_cpu_us\":" << current.caller_cpu_us << '}';
-            if (!out) { return { ssd::status::resource, "telemetry serialization failed" }; }
-            const auto payload = out.str();
-            const auto read = configuration.events->event("ssd.io.read", payload);
-            if (!read) { return read; }
-            // These routes are the controller API, independent of optional debug
+                << ",\"caller_thread_cpu_us\":" << current.caller_cpu_us;
+            // One event a layer: its counters and its routes, the controller API, independent of optional debug
             // logging. Read only after the layer's workers and readers have drained.
-            std::ostringstream routes;
-            routes.imbue(std::locale::classic());
-            routes << payload.substr(0, payload.size() - 1) << ",\"selected_experts\":[";
-            for (size_t i = 0; i < requests.size(); ++i) { routes << (i ? "," : "") << requests[i].id; }
-            routes << "],\"vram_hit\":[";
+            out << ",\"selected_experts\":[";
+            for (size_t i = 0; i < requests.size(); ++i) { out << (i ? "," : "") << requests[i].id; }
+            out << "],\"vram_hit\":[";
             for (size_t i = 0; i < requests.size(); ++i) {
-                routes << (i ? "," : "") << (requests[i].vram_slot >= 0 ? "true" : "false");
+                out << (i ? "," : "") << (requests[i].vram_slot >= 0 ? "true" : "false");
             }
-            routes << "],\"cache_hit\":[";
+            out << "],\"cache_hit\":[";
             for (size_t i = 0; i < requests.size(); ++i) {
-                routes << (i ? "," : "") << (requests[i].cache_hit >= 0 ? "true" : "false");
+                out << (i ? "," : "") << (requests[i].cache_hit >= 0 ? "true" : "false");
             }
-            routes << "]}";
-            if (!routes) { return { ssd::status::resource, "controller route serialization failed" }; }
-            const auto place = configuration.events->event("ssd.place.layer", routes.str());
-            if (!place) { return place; }
-            return {};
+            out << "]}";
+            if (!out) { return { ssd::status::resource, "telemetry serialization failed" }; }
+            return configuration.events->event("ssd.place.layer", out.str());
         } catch (const std::bad_alloc &) {
             return { ssd::status::resource, "oom" };
         } catch (const std::exception & e) {
