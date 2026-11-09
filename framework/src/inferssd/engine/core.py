@@ -36,7 +36,9 @@ class Effects(Protocol):
 
 
 class NativeEffects:
-    def __init__(self) -> None:
+    def __init__(self, address: str) -> None:
+        """ADDRESS is where this machine reaches the owned server."""
+        self.address = address
         self.reservation: Optional[Reservation] = None
 
     def makedirs(self, path: str) -> None:
@@ -52,7 +54,7 @@ class NativeEffects:
         time.sleep(seconds)
 
     def health(self, port: int) -> bytes:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as response:
+        with urllib.request.urlopen(f"http://{self.address}:{port}/health", timeout=2) as response:
             value: bytes = response.read()
             return value
 
@@ -66,7 +68,7 @@ class NativeEffects:
 
     def port_busy(self, port: int) -> bool:
         with socket.socket() as connection:
-            return connection.connect_ex(("127.0.0.1", port)) == 0
+            return connection.connect_ex((self.address, port)) == 0
 
 
 def post(port: int, path: str, body: Record, timeout: float = 7200) -> object:

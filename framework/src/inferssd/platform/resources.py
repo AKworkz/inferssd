@@ -7,6 +7,8 @@ process RSS and system memory/compression/swap; it cannot promise a hard cap.
 from __future__ import annotations
 
 import re
+import socket
+import struct
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -193,7 +195,8 @@ class Resources:
                 raise RuntimeError("sampled swap growth exceeded policy")
         return row
 
-    def confirm_listener(self, pid: int, port: int) -> None:
+    def confirm_listener(self, pid: int, host: str, port: int) -> None:
+        """PID listens on IPv4 HOST at PORT; 0.0.0.0 is every interface."""
         if self.policy.platform == "darwin":
             raw = command(
                 [
@@ -208,9 +211,14 @@ class Resources:
                 ]
             )
             fields = [s.lstrip("\n") for s in raw.split("\0") if s.lstrip("\n")]
-            if f"p{pid}" not in fields or f"n127.0.0.1:{port}" not in fields:
+            # lsof names a listener on every interface *.
+            name = "n" + ("*" if host == "0.0.0.0" else host) + ":" + str(port)
+            if f"p{pid}" not in fields or name not in fields:
                 raise RuntimeError("health listener is not owned by the exact server PID")
             return
+        # /proc/net/tcp shows the address as its 32-bit word in hex, in memory order.
+        word = struct.unpack("=I", socket.inet_aton(host))[0]
+        address = f"{word:08X}:{port:04X}"
         sockets = {
             p.readlink().as_posix()[8:-1]
             for p in Path(f"/proc/{pid}/fd").iterdir()
@@ -218,6 +226,6 @@ class Resources:
         }
         for line in Path(f"/proc/{pid}/net/tcp").read_text().splitlines()[1:]:
             fields = line.split()
-            if fields[1] == f"0100007F:{port:04X}" and fields[3] == "0A" and fields[9] in sockets:
+            if fields[1] == address and fields[3] == "0A" and fields[9] in sockets:
                 return
         raise RuntimeError("health listener is not owned by the exact server PID")

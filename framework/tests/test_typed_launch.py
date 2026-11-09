@@ -220,13 +220,25 @@ def test_resource_preparation_refuses_before_materialized_settings(tmp_path, fac
     assert not (out / "settings.ssd").exists()
 
 
-def test_runtime_uses_typed_resolution_and_keeps_owned_process_port(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "host,address",
+    [("127.0.0.1", "127.0.0.1"), ("0.0.0.0", "127.0.0.1"), ("127.0.0.2", "127.0.0.2")],
+)
+def test_runtime_uses_typed_resolution_and_keeps_owned_process_port(
+    tmp_path, monkeypatch, host, address
+):
     inputs, spec, _, adapter, out, _ = setup(tmp_path)
+    spec = replace(spec, host=host)
     effects = Effects()
     owner = Owner(effects)
     captured = {}
     monkeypatch.setattr(runtime, "LiveArtifacts", lambda *a, **kw: adapter)
-    monkeypatch.setattr(runtime, "NativeEffects", lambda: effects)
+
+    def native(at):
+        captured["address"] = at
+        return effects
+
+    monkeypatch.setattr(runtime, "NativeEffects", native)
 
     def owned(result, directory, execution_policy, *, reservation):
         assert execution_policy.platform == "linux"
@@ -250,6 +262,8 @@ def test_runtime_uses_typed_resolution_and_keeps_owned_process_port(tmp_path, mo
         configured=parse(Path(spec.settings_file).read_text(), spec.settings_file),
     )
     assert engine.ok and captured["result"].argv[1:3] == ("-m", spec.model)
+    argv = captured["result"].argv
+    assert argv[argv.index("--host") + 1] == host and captured["address"] == address
     env = dict(captured["result"].effective_environment)
     assert "INFERSSD_DEBUG" not in env  # controller observes JSONL without debug logging
     assert "GGML_KIMI_CPU_SINK_TRACE" not in env and "LLAMA_SERVER_PORT" not in env
@@ -257,9 +271,16 @@ def test_runtime_uses_typed_resolution_and_keeps_owned_process_port(tmp_path, mo
     assert effects.events[-1] == ("busy", 8080)
 
 
+@pytest.mark.parametrize("host", ["localhost", "::1", "127.0.1"])
+def test_launch_refuses_a_host_that_is_not_an_ipv4_address(tmp_path, host):
+    inputs, spec, _, adapter, out, _ = setup(tmp_path)
+    with pytest.raises(ValueError, match="IPv4 address"):
+        resolve(inputs, replace(spec, host=host), adapter, out)
+
+
 def test_busy_port_refuses_before_claim_or_owner(tmp_path, monkeypatch):
     effects = Effects(busy=True)
-    monkeypatch.setattr(runtime, "NativeEffects", lambda: effects)
+    monkeypatch.setattr(runtime, "NativeEffects", lambda _address: effects)
     value = runtime.Runtime(
         LaunchInput("/unused", ()),
         policy(tmp_path),

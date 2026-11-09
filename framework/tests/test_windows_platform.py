@@ -398,11 +398,16 @@ def test_resources_refuse_a_memlock_minimum(job_host):
 
 
 def test_listener_must_belong_to_the_exact_server(monkeypatch):
-    monkeypatch.setattr(win32, "tcp_listeners", lambda: [("127.0.0.1", 8080, 9)])
+    monkeypatch.setattr(
+        win32, "tcp_listeners", lambda: [("127.0.0.1", 8080, 9), ("0.0.0.0", 8081, 9)]
+    )
     runtime = windows_resources.Resources(policy())
-    runtime.confirm_listener(9, 8080)
+    runtime.confirm_listener(9, "127.0.0.1", 8080)
+    runtime.confirm_listener(9, "0.0.0.0", 8081)
     with pytest.raises(RuntimeError, match="exact server PID"):
-        runtime.confirm_listener(10, 8080)
+        runtime.confirm_listener(10, "127.0.0.1", 8080)
+    with pytest.raises(RuntimeError, match="exact server PID"):
+        runtime.confirm_listener(9, "127.0.0.1", 8081)
 
 
 class Finished:

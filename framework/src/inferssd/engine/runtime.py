@@ -20,7 +20,13 @@ from inferssd.launch.machine import characteristics as machine_characteristics
 from inferssd.launch.prepare import prepare
 from inferssd.launch.recorded import run_indexer
 from inferssd.launch.resources import probe_paths, server_binary
-from inferssd.launch.typed import LaunchSpec, reject_legacy_environment, resolve_typed
+from inferssd.launch.typed import (
+    LOOPBACK,
+    LaunchSpec,
+    connect_host,
+    reject_legacy_environment,
+    resolve_typed,
+)
 from inferssd.launch.types import LaunchInput, Output, Resolution
 from inferssd.platform.policy import Policy
 
@@ -119,6 +125,8 @@ class Runtime:
         if envs:
             raise ValueError("production Engine does not accept legacy environment controls")
         reject_legacy_environment(dict(self.inputs.environment))
+        launch = specification or self.configuration
+        host = launch.host if launch is not None else LOOPBACK
 
         def environment_for(
             environment: Mapping[str, str], _port: int, _envs: str
@@ -141,13 +149,13 @@ class Runtime:
             hosts = [
                 value.argv[i + 1] for i, item in enumerate(value.argv[:-1]) if item == "--host"
             ]
-            if not ports or ports[-1] != str(port) or not hosts or hosts[-1] != "127.0.0.1":
-                raise ValueError("owned Engine requires its exact loopback health host and port")
+            if not ports or ports[-1] != str(port) or not hosts or hosts[-1] != host:
+                raise ValueError("owned Engine requires its exact health host and port")
             return value
 
         # Measure the machine, if it must be, before the run directory exists.
-        self.characteristics(specification or self.configuration)
-        effects = NativeEffects()
+        self.characteristics(launch)
+        effects = NativeEffects(connect_host(host))
 
         def own(result: Resolution, path: str) -> OwnedProcess:
             assert effects.reservation is not None

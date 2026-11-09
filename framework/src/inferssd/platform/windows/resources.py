@@ -92,6 +92,7 @@ class Resources:
                 raise RuntimeError("sampled swap growth exceeded policy")
         return row
 
-    def confirm_listener(self, pid: int, port: int) -> None:
-        if ("127.0.0.1", port, pid) not in win32.tcp_listeners():
+    def confirm_listener(self, pid: int, host: str, port: int) -> None:
+        """PID listens on IPv4 HOST at PORT; 0.0.0.0 is every interface."""
+        if (host, port, pid) not in win32.tcp_listeners():
             raise RuntimeError("health listener is not owned by the exact server PID")

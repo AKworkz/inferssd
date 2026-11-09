@@ -45,7 +45,7 @@ def historical_engine(inputs, directory, port, observe, emit, platform="linux"):
         "",
         [],
         environment=dict(inputs.environment),
-        effects=core.NativeEffects(),
+        effects=core.NativeEffects("127.0.0.1"),
         resolve=resolve,
         own=lambda *_: pytest.fail("historical refusal must not reach owner"),
     )

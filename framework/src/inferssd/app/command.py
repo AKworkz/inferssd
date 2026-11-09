@@ -14,6 +14,7 @@ from inferssd.app.hub import download, selection
 from inferssd.configuration.settings import host_platform
 from inferssd.launch import typed_command
 from inferssd.launch.resources import data_directory, installed_resources, read_resources
+from inferssd.launch.typed import LOOPBACK, connect_host, listen_host
 from inferssd.platform.captured_command import run_captured
 from inferssd.platform.windows import win32
 
@@ -37,6 +38,13 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
             type=Path,
             help="engine descriptor of a source build (the installer sets this)",
         )
+        if mode == "serve":
+            parser.add_argument(
+                "--host",
+                default=LOOPBACK,
+                help="IPv4 address to listen on: 127.0.0.1 (default) is this machine only; "
+                "0.0.0.0 also accepts other devices on your network",
+            )
         parser.add_argument("--port", type=int, default=8080)
         parser.add_argument("--context", type=int, default=8192)
         parser.add_argument(
@@ -88,6 +96,8 @@ def run(args: argparse.Namespace) -> int:
 
     if not 1 <= args.port <= 65535 or args.context < 1:
         raise ValueError("port must be 1..65535; context must be positive")
+    # Terminal chat talks to its own server, so only serve listens beyond this machine.
+    host = listen_host(args.host) if args.command == "serve" else LOOPBACK
     if args.command == "cli" and args.max_tokens < 1:
         raise ValueError("max-tokens must be positive")
     if args.machine and args.reprofile:
@@ -127,6 +137,8 @@ def run(args: argparse.Namespace) -> int:
         str(policy_path),
         "--model",
         str(model),
+        "--host",
+        host,
         "--port",
         str(args.port),
         "--context",
@@ -143,7 +155,12 @@ def run(args: argparse.Namespace) -> int:
         command.append("--reprofile")
     launch = parser.parse_args(command)
     if args.command == "serve":
-        print(f"Starting API at http://127.0.0.1:{args.port}/v1", file=sys.stderr)
+        print(f"Starting API at http://{connect_host(host)}:{args.port}/v1", file=sys.stderr)
+        if host == "0.0.0.0":
+            print(
+                f"Other devices reach it at this machine's network address, port {args.port}",
+                file=sys.stderr,
+            )
         return typed_command.run(launch)
     return run_native(
         launch,

@@ -99,7 +99,7 @@ inferssd cli -hf mrfakename/DeepSeek-V4.1-Flash-1017-GGUF
 inferssd serve -hf mrfakename/DeepSeek-V4.1-Flash-1017-GGUF
 ```
 
-For Muse, use `unsloth/Muse-Spark-Open-816B-A42B-GGUF`; for Qwen3.6, `unsloth/Qwen3.6-35B-A3B-GGUF`. With `serve`, open `http://127.0.0.1:8080` in your browser, or point any OpenAI-compatible client at `http://127.0.0.1:8080/v1`.
+For Muse, use `unsloth/Muse-Spark-Open-816B-A42B-GGUF`; for Qwen3.6, `unsloth/Qwen3.6-35B-A3B-GGUF`. With `serve`, open `http://127.0.0.1:8080` in your browser, or point any OpenAI-compatible client at `http://127.0.0.1:8080/v1`. Add `--host 0.0.0.0` to reach it from other devices on your network; the API has no authentication, so anyone who can reach the port can use it.
 
 The first run downloads the model files (about 470 GiB for DeepSeek or Muse, 21 GiB for Qwen3.6) to `~/.local/share/inferssd/models` and measures your machine. Use `--model-dir /path/on/ssd` to choose the drive, or `-m /path/to/first-shard.gguf` for files you already have. There is no memory setting to choose: InferSSD uses the memory available. Stop with **Ctrl+C**, or `/exit` in chat.
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import socket
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -9,6 +11,7 @@ from pathlib import Path
 import pytest
 from test_engine_runtime import policy
 
+from inferssd.engine import owned
 from inferssd.launch.live import Command, LiveArtifacts, NativeHost
 from inferssd.launch.resources import cmake_gpu_backends
 from inferssd.launch.types import Fact, LaunchInput
@@ -132,9 +135,45 @@ def test_exact_listener_pid_is_required(tmp_path, monkeypatch):
     runtime = resources.Resources(policy(tmp_path))
     monkeypatch.setattr(resources, "command", lambda _: "p999\0n127.0.0.1:8080\0")
     with pytest.raises(RuntimeError, match="exact server PID"):
-        runtime.confirm_listener(123, 8080)
+        runtime.confirm_listener(123, "127.0.0.1", 8080)
     monkeypatch.setattr(resources, "command", lambda _: "p123\0n127.0.0.1:8080\0")
-    runtime.confirm_listener(123, 8080)
+    runtime.confirm_listener(123, "127.0.0.1", 8080)
+
+
+@pytest.mark.parametrize("host,name", [("0.0.0.0", "*:8080"), ("127.0.0.2", "127.0.0.2:8080")])
+def test_listener_is_confirmed_at_the_address_the_server_binds(tmp_path, monkeypatch, host, name):
+    runtime = resources.Resources(policy(tmp_path))
+    # lsof -F0pn output, with the file descriptor field it also prints.
+    monkeypatch.setattr(resources, "command", lambda _: f"p123\0\nf3\0n{name}\0")
+    runtime.confirm_listener(123, host, 8080)
+    with pytest.raises(RuntimeError, match="exact server PID"):
+        runtime.confirm_listener(123, "127.0.0.1", 8080)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads this process's /proc/net/tcp")
+@pytest.mark.parametrize("host", ["127.0.0.1", "0.0.0.0"])
+def test_linux_listener_is_found_in_proc_net_tcp(tmp_path, host):
+    runtime = resources.Resources(policy(tmp_path, "linux"))
+    with socket.socket() as listener:
+        listener.bind((host, 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        runtime.confirm_listener(os.getpid(), host, port)
+        other = "0.0.0.0" if host == "127.0.0.1" else "127.0.0.1"
+        with pytest.raises(RuntimeError, match="exact server PID"):
+            runtime.confirm_listener(os.getpid(), other, port)
+
+
+@pytest.mark.parametrize(
+    "argv,host",
+    [
+        (["server", "--port", "8080"], "127.0.0.1"),
+        (["server", "--host", "0.0.0.0", "--port", "8080"], "0.0.0.0"),
+        (["server", "--host", "127.0.0.1", "--host", "127.0.0.2"], "127.0.0.2"),
+    ],
+)
+def test_owner_takes_the_listening_host_from_the_server_argv(argv, host):
+    assert owned.listening_host(argv) == host
 
 
 class Host:

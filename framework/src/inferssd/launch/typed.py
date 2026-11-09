@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import ntpath
 import posixpath
@@ -45,6 +46,8 @@ ARCHITECTURES = {
 SAMPLING: dict[str, tuple[str, ...]] = {
     "dsv": ("--temp", "1.0", "--top-p", "0.95", "--top-k", "0", "--min-p", "0"),
 }
+# The address of this machine only, where the server listens by default.
+LOOPBACK = "127.0.0.1"
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,25 @@ class LaunchSpec:
     # The directory that keeps each model's prompt cache across restarts, in a
     # subdirectory named after the model; None runs without a prompt cache.
     prompt_cache: Optional[str] = None
+    # The IPv4 address the server listens on; see listen_host.
+    host: str = LOOPBACK
+
+
+def listen_host(text: str) -> str:
+    """TEXT as the IPv4 address the server listens on.
+
+    127.0.0.1 is this machine only and 0.0.0.0 every network interface. The
+    launch confirms its listener by address, so a host name is not accepted.
+    """
+    try:
+        return str(ipaddress.IPv4Address(text))
+    except ValueError:
+        raise ValueError("host must be an IPv4 address, such as 127.0.0.1 or 0.0.0.0") from None
+
+
+def connect_host(host: str) -> str:
+    """The address at which this machine reaches a server listening on HOST."""
+    return LOOPBACK if host == "0.0.0.0" else host
 
 
 CONTEXT = 8192
@@ -177,6 +199,7 @@ def _resolve(
     sizes = [size for size in (spec.context, spec.batch, spec.ubatch) if size is not None]
     if not 1 <= spec.port <= 65535 or any(size < 1 for size in sizes):
         raise ValueError("invalid port, context or batch size")
+    listen_host(spec.host)
     threads = threadpools(spec.threads, platform)
     protected = {
         "-m",
@@ -490,7 +513,7 @@ def _resolve(
         ]
     command += [
         "--host",
-        "127.0.0.1",
+        spec.host,
         "--port",
         str(spec.port),
         "-np",

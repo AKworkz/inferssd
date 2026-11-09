@@ -89,7 +89,9 @@ owned processes and their memory budget.
 
 Use `--context`, `--settings`, `--set`, `--machine` and `--reprofile` to override
 launch choices. `--resources` selects a manually built engine descriptor. The
-server listens on loopback port 8080 (`--port` changes it). Terminal chat keeps
+server listens on loopback port 8080 (`--port` changes it). `serve --host 0.0.0.0`
+also accepts other devices on your network, without authentication: anyone who
+can reach the port can use the API. Terminal chat keeps
 conversation history; `/clear` starts a new conversation, `/exit` or EOF stops
 the service. Ctrl+C also stops it, including during startup or generation.
 Each launch keeps its receipts under `~/.local/share/inferssd/state/runs`.
@@ -198,7 +200,7 @@ inferssd serve \
   -m /path/to/model-00001-of-00010.gguf
 ```
 
-For Muse, Qwen3.8-Flash-Next or Qwen3.6-35B-A3B, select that model's first GGUF shard instead. The launch picks the model profile from the GGUF's `general.architecture`: `dsv` for DeepSeek-V4.1 (with its own sampling defaults, temperature 1.0, top-p 0.95), `muse` for Muse Spark, `qwen4exp` for Qwen3.8-Flash-Next and `qwen35moe` for Qwen3.6-35B-A3B; the two Qwen profiles keep the chat template embedded in their GGUF. The context defaults to 8192 tokens (`--context` sets it) and the batch sizes to what the launch chooses for this machine. The server listens on `127.0.0.1:8080`; pass `--port` to use another loopback port. Each launch keeps its logs and receipts under `~/.local/share/inferssd/state/runs`, and uses the whole machine: the engine keeps its own margin for the host.
+For Muse, Qwen3.8-Flash-Next or Qwen3.6-35B-A3B, select that model's first GGUF shard instead. The launch picks the model profile from the GGUF's `general.architecture`: `dsv` for DeepSeek-V4.1 (with its own sampling defaults, temperature 1.0, top-p 0.95), `muse` for Muse Spark, `qwen4exp` for Qwen3.8-Flash-Next and `qwen35moe` for Qwen3.6-35B-A3B; the two Qwen profiles keep the chat template embedded in their GGUF. The context defaults to 8192 tokens (`--context` sets it) and the batch sizes to what the launch chooses for this machine. The server listens on `127.0.0.1:8080`; `--port` chooses another port, and `--host` another IPv4 address to listen on, `0.0.0.0` for every network interface. Each launch keeps its logs and receipts under `~/.local/share/inferssd/state/runs`, and uses the whole machine: the engine keeps its own margin for the host.
 
 If `expert.source` is omitted, the framework builds an alias index from the GGUF metadata without duplicating weight payloads. Use the [deployment resources guide](engine-resources.md) when moving binaries and templates outside the checkout.
 

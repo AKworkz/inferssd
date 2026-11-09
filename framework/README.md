@@ -145,7 +145,8 @@ contract.
 ## How serve and cli run the server
 
 `inferssd serve` and `cli` resolve the launch for Linux, macOS or Windows from the live
-machine, then start one supervised server on a loopback port. Each launch writes
+machine, then start one supervised server on a loopback port, or for `serve`
+on the IPv4 address `--host` gives. Each launch writes
 a resource policy for the whole machine, `memory_budget_bytes` set to its
 physical memory, and claims a new run directory under
 `~/.local/share/inferssd/state/runs`.

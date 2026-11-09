@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
@@ -67,6 +68,12 @@ def server_log_tail(directory: Path) -> str:
     return "\nLast lines of server.log:\n" + "\n".join(lines[-SERVER_LOG_TAIL_LINES:])
 
 
+def listening_host(argv: Sequence[str]) -> str:
+    """The address the server binds: its last --host, else the server's default, loopback."""
+    hosts = [value for option, value in zip(argv, argv[1:]) if option == "--host"]
+    return hosts[-1] if hosts else "127.0.0.1"
+
+
 def worker_environment(environment: dict[str, str]) -> dict[str, str]:
     # Engine loaders/knobs belong to the server, not the Python lock owner.
     # Carry them privately in the process environment; never persist values in
@@ -109,6 +116,7 @@ class OwnedProcess:
         if Path(directory).resolve() != reservation.directory:
             raise ValueError("execution directory differs from reservation")
         self.directory, self.policy = reservation.directory, policy
+        self.host = listening_host(resolution.argv)
         self.connection: Optional[socket.socket] = None
         self.guardian: Optional[subprocess.Popen[bytes]] = None
         self._lock: Optional[int] = None
@@ -192,7 +200,7 @@ class OwnedProcess:
         pid = self.state()["pid"]
         if not isinstance(pid, int):
             raise RuntimeError("owned server PID has not been published")
-        Resources(self.policy).confirm_listener(pid, port)
+        Resources(self.policy).confirm_listener(pid, self.host, port)
 
     def stop(self) -> None:
         assert self.guardian is not None

@@ -552,7 +552,7 @@ def test_runtime_measures_once_before_the_run_directory(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runtime, "machine_characteristics", measured)
     monkeypatch.setattr(runtime, "LiveArtifacts", live)
-    monkeypatch.setattr(runtime, "NativeEffects", lambda: effects)
+    monkeypatch.setattr(runtime, "NativeEffects", lambda _address: effects)
     monkeypatch.setattr(runtime, "OwnedProcess", lambda *a, **k: owner)
     monkeypatch.setattr(effects, "reservation", object(), raising=False)
     source = MachineSource(reprofile=True)
