@@ -3182,6 +3182,8 @@ ggml_status llama_context::graph_compute(
             LLAMA_LOG_ERROR("%s: %s; no fallback\n", __func__, e.what());
             return GGML_STATUS_FAILED;
         }
+        // Decode runs on the pool's threads that the machine's other work leaves a CPU each; the others wait.
+        if (!batched) { n_threads = cpu_sink_runtime->decode_threads(n_threads); }
     }
 
     // set the number of threads for all the backends

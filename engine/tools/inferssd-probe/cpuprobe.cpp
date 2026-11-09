@@ -51,7 +51,7 @@ const char * const USAGE =
     "                         [--cpus 0,1,2]\n"
     "\n"
     "Measures DRAM read bandwidth and ggml CPU matrix multiplication throughput per weight format and\n"
-    "prints one JSON object (schema inferssd-cpuprobe/1) on stdout.\n"
+    "prints one JSON object (schema inferssd-cpuprobe/2) on stdout.\n"
     "\n"
     "  --threads LIST      thread counts (default: 1 and the logical CPUs this process may use)\n"
     "  --formats LIST      ggml weight types, case-insensitive\n"
@@ -63,7 +63,8 @@ const char * const USAGE =
     "                      (Linux and Windows; default: unpinned)\n"
     "\n"
     "DRAM: one buffer of max(1 GiB, 8 x last-level cache) is read with each thread count (disjoint slices).\n"
-    "Compute: the median time of ggml_mul_mat on the CPU backend with a persistent ggml threadpool. At\n"
+    "Compute: the median time of ggml_mul_mat on the CPU backend with a persistent ggml threadpool, and its\n"
+    "quartiles over the timed calls (us_q1, us_q3): how far one call's time spreads at that point. At\n"
     "tokens = 1 the call cycles through copies of the weight that together exceed the last-level cache,\n"
     "so every call reads the weight from DRAM as a decode step does.\n"
     "ggml_features: the instruction sets ggml's CPU kernels use in this build.\n";
@@ -76,10 +77,12 @@ double now_s() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-double median(std::vector<double> v) {
+// The q-quantile of v (0 <= q <= 1), interpolated between its sorted values.
+double quantile(std::vector<double> v, double q) {
     std::sort(v.begin(), v.end());
-    const size_t n = v.size();
-    return n % 2 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+    const double at = q * double(v.size() - 1);
+    const size_t i = (size_t) at;
+    return i + 1 < v.size() ? v[i] + (at - double(i)) * (v[i + 1] - v[i]) : v[i];
 }
 
 // JSON numbers: rates and times always carry a fraction or exponent so readers see a float.
@@ -307,7 +310,7 @@ std::vector<dram_point> measure_dram(uint64_t bytes, const std::vector<int> & th
         std::vector<double> samples;
         const double start = now_s();
         do { samples.push_back(pass()); } while (now_s() - start < min_seconds);
-        const double Bps = (double) (words * sizeof(uint64_t)) / median(samples);
+        const double Bps = (double) (words * sizeof(uint64_t)) / quantile(samples, 0.5);
         std::fprintf(stderr, "cpuprobe: dram threads=%d %.3g B/s (%zu passes)\n", threads, Bps, samples.size());
         out.push_back({ threads, (uint64_t) (words * sizeof(uint64_t)), Bps });
     }
@@ -387,8 +390,13 @@ std::vector<uint8_t> quantize_weight(ggml_type type, int64_t rows, int64_t cols)
 
 struct compute_point {
     int    tokens;
-    double us;
-    double rate;  // weight bytes/s at one token, FLOP/s otherwise
+    double us, us_q1, us_q3;  // one call's median time and its quartiles
+    double rate;              // weight bytes/s at one token, FLOP/s otherwise, at the median
+};
+
+// One point's timed calls: the median and the quartiles of a call's seconds.
+struct call_times {
+    double median, q1, q3;
 };
 
 struct compute_row {
@@ -437,7 +445,7 @@ struct ggml_buffer_deleter {
     void operator()(ggml_backend_buffer_t buf) const { ggml_backend_buffer_free(buf); }
 };
 
-double time_calls(ggml_backend_t backend, const std::vector<ggml_cgraph *> & graphs, double min_seconds) {
+call_times time_calls(ggml_backend_t backend, const std::vector<ggml_cgraph *> & graphs, double min_seconds) {
     auto call = [&](size_t i) {
         const double t0 = now_s();
         const ggml_status status = ggml_backend_graph_compute(backend, graphs[i % graphs.size()]);
@@ -453,7 +461,7 @@ double time_calls(ggml_backend_t backend, const std::vector<ggml_cgraph *> & gra
     const double start = now_s();
     size_t i = 1;
     do { samples.push_back(call(i++)); } while (now_s() - start < min_seconds);
-    return median(samples);
+    return { quantile(samples, 0.5), quantile(samples, 0.25), quantile(samples, 0.75) };
 }
 
 // Runs every thread count for one format. Returns false (with *why) when the CPU backend cannot run it.
@@ -528,9 +536,10 @@ bool measure_format(ggml_backend_t backend, const format_spec & format, int64_t 
         compute_row row{ format.name, threads, (uint64_t) weight_bytes, {} };
         try {
             for (size_t i = 0; i < tokens.size(); ++i) {
-                const double s = time_calls(backend, graphs[i], min_seconds);
+                const call_times t = time_calls(backend, graphs[i], min_seconds);
+                const double s = t.median;
                 const double rate = tokens[i] == 1 ? weight_bytes / s : 2.0 * rows * cols * tokens[i] / s;
-                row.points.push_back({ tokens[i], s * 1e6, rate });
+                row.points.push_back({ tokens[i], s * 1e6, t.q1 * 1e6, t.q3 * 1e6, rate });
                 std::fprintf(stderr, "cpuprobe: %s threads=%d tokens=%d %.1f us %.3g %s\n", format.name.c_str(),
                              threads, tokens[i], s * 1e6, rate, tokens[i] == 1 ? "B/s" : "FLOP/s");
             }
@@ -689,7 +698,7 @@ int run(int argc, char ** argv) {
         }
     }
 
-    std::string json = "{\"schema\": \"inferssd-cpuprobe/1\",\n \"ggml_features\": [";
+    std::string json = "{\"schema\": \"inferssd-cpuprobe/2\",\n \"ggml_features\": [";
     const std::vector<std::string> features = ggml_features();
     for (size_t i = 0; i < features.size(); ++i) { json += (i ? ", " : "") + quote(features[i]); }
     json += "],\n \"cpus\": [";
@@ -709,7 +718,7 @@ int run(int argc, char ** argv) {
         for (size_t j = 0; j < r.points.size(); ++j) {
             const compute_point & p = r.points[j];
             json += std::string(j ? ", " : "") + "{\"tokens\": " + std::to_string(p.tokens) + ", \"us\": " + num(p.us) +
-                    (p.tokens == 1 ? ", \"weight_Bps\": " : ", \"flops\": ") + num(p.rate) + "}";
+                    ", \"us_q1\": " + num(p.us_q1) + ", \"us_q3\": " + num(p.us_q3) + (p.tokens == 1 ? ", \"weight_Bps\": " : ", \"flops\": ") + num(p.rate) + "}";
         }
         json += "]}";
     }

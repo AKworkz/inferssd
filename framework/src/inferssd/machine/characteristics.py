@@ -21,7 +21,7 @@ SCHEMA = "inferssd-machine/1"
 # Probe output schemas this version reads, by the section group each one measures.
 PROBE_SCHEMAS = {
     "ssd": "inferssd-ssdprobe/1",
-    "cpu": "inferssd-cpuprobe/1",
+    "cpu": "inferssd-cpuprobe/2",
     "memory": "inferssd-memprobe/1",
 }
 BASE_SECTIONS = ("cpu", "memory", "compute", "gpus")
@@ -173,6 +173,9 @@ class _ComputePoint(TypedDict):
 class ComputePoint(_ComputePoint, total=False):
     weight_Bps: float  # tokens == 1
     flops: float  # tokens > 1, FLOP/s
+    # One call's time at the point's first and third quartile, as us is its median.
+    us_q1: float
+    us_q3: float
 
 
 class _ComputeRow(TypedDict):
@@ -320,7 +323,10 @@ COUNT = integer(0)
 POSITIVE = integer(1)
 TRANSFERS = array(record({"bytes": POSITIVE, "Bps": NUMBER}))
 LATENCY = record({"mean": NUMBER, "p50": NUMBER, "p90": NUMBER, "p99": NUMBER})
-COMPUTE_POINT = record({"tokens": POSITIVE, "us": NUMBER}, {"weight_Bps": NUMBER, "flops": NUMBER})
+COMPUTE_POINT = record(
+    {"tokens": POSITIVE, "us": NUMBER},
+    {"weight_Bps": NUMBER, "flops": NUMBER, "us_q1": NUMBER, "us_q3": NUMBER},
+)
 COMPUTE_ROW = record(
     {
         "format": TEXT,

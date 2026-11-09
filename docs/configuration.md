@@ -30,7 +30,7 @@ an engine built or running without that tier refuses it when it is set. Expert c
 ggml's threads (`-t`, `-tb`, `-C`, `-Cb`, `--cpu-strict`; see
 [how it works](architecture.md#threads)); `cpu.io_cpus` places the executor's
 own I/O, prefetch and watch threads, and macOS, which cannot pin threads, only
-validates it. Zero decode participants leaves the measured/default policy; a
+validates it. Zero decode participants computes each decode phase on every decode thread; a
 positive value counts the leading ggml threads of each decode phase, and a
 decode call with fewer threads fails. Non-applicable platform keys cannot be
 explicitly set. The `vram.*` keys size the CUDA expert tier. Its slots each hold

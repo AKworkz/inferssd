@@ -91,7 +91,7 @@ def test_linux_profile_end_to_end(tmp_path):
     }
     # The first shard brings its set; the two shards of at least 1 GiB are read, largest first.
     assert runner.calls == [
-        (["/opt/inferssd/bin/inferssd-cpuprobe", "--threads", "1,4"], 1800.0),
+        (["/opt/inferssd/bin/inferssd-cpuprobe", "--threads", "1,2,4"], 1800.0),
         (["/opt/inferssd/bin/inferssd-memprobe"], 900.0),
         (["/opt/inferssd/bin/inferssd-ssdprobe", "--file", files[1], "--file", files[0]], 1800.0),
     ]
@@ -420,7 +420,7 @@ def test_linux_clusters_follow_the_engine_split(tmp_path, capacities, max_khz, f
     ]
 
 
-def test_split_fastest_matches_the_engine_rule():
+def test_split_fastest_cuts_at_the_largest_drop():
     assert split_fastest([(0, 100.0), (1, 95.0), (2, 90.0)]) == ([0, 1, 2], [])
     assert split_fastest([(0, 100.0), (1, 95.0), (2, 85.0)]) == ([0, 1], [2])
     assert split_fastest([(3, 50.0), (0, 100.0), (1, 80.0)]) == ([0, 1], [3])
@@ -470,7 +470,7 @@ def test_darwin_profile_end_to_end(tmp_path):
     value, _ = run(host, [str(models)], runner)
     validate(value)
     assert executables(runner) == ["inferssd-cpuprobe", "inferssd-ssdprobe"]
-    assert runner.calls[0][0][1:] == ["--threads", "1,4,10"]
+    assert runner.calls[0][0][1:] == ["--threads", "1,2,4,8,10"]
     assert value["cpu"]["affinity_supported"] is False
     assert [(row["kind"], len(row["cpus"])) for row in value["cpu"]["clusters"]] == [
         ("performance", 4),
@@ -505,7 +505,15 @@ class PinnedRunner(FakeRunner):
             "rows": 4096,
             "cols": 4096,
             "weight_bytes": 9437184,
-            "points": [{"tokens": 1, "us": 100.0, "weight_Bps": self.rates[listed]}],
+            "points": [
+                {
+                    "tokens": 1,
+                    "us": 100.0,
+                    "us_q1": 98.0,
+                    "us_q3": 103.0,
+                    "weight_Bps": self.rates[listed],
+                }
+            ],
         }
         return Completed(0, json.dumps(dict(CPU_REPORT, compute=[row], cpus=cpus, skipped=[])))
 
@@ -521,7 +529,7 @@ def test_two_clusters_measure_one_token_pinned_to_each_and_to_every_cpu(tmp_path
     ]
     pinned = [argv[1:] for argv, _ in runner.calls if "--cpus" in argv]
     assert pinned == [
-        ["--cpus", "1,2", "--threads", "2", "--tokens", "1"],
+        ["--cpus", "1,2", "--threads", "1,2", "--tokens", "1"],
         ["--cpus", "0,3", "--threads", "2", "--tokens", "1"],
         ["--cpus", "0,1,2,3", "--threads", "4", "--tokens", "1"],
     ]
@@ -534,7 +542,8 @@ def test_two_clusters_measure_one_token_pinned_to_each_and_to_every_cpu(tmp_path
     ]
     assert value["sections"]["compute"]["status"] == "ok"
     assert value["sections"]["compute"]["method"].endswith(
-        "; one token pinned to each cluster and to every CPU"
+        "; one token pinned to each cluster and to every CPU, to the performance cluster's first "
+        "1, 2, 4, ... CPUs too"
     )
     assert any("pinned to each of CPUs 1,2" in line for line in lines)
 

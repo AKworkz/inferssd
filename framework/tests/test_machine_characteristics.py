@@ -53,7 +53,7 @@ def sample():
                 "gpu_driver": "580.65.06",
                 "probe_versions": {
                     "ssd": "inferssd-ssdprobe/1",
-                    "cpu": "inferssd-cpuprobe/1",
+                    "cpu": "inferssd-cpuprobe/2",
                     "memory": "inferssd-memprobe/1",
                 },
             },

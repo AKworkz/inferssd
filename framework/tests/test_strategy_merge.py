@@ -17,7 +17,7 @@ COSTS = '"cpu_fixed_us=150.5,cpu_route_us=40.25,drive_gbps=7.5"'
 def strategy(platform="linux", threads=Threads(11, 11, (0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11))):
     settings = {
         "cpu.io_cpus": Choice('"5"' if threads.cpus else '""', "placement"),
-        "cpu.decode_participants": Choice("0", "the engine measures its decode participants"),
+        "cpu.decode_participants": Choice("0", "decode computes on every thread of its pool"),
         "place.costs": Choice(COSTS, "cpu line; drive at its knee"),
     }
     if platform == "linux":
@@ -52,7 +52,7 @@ def test_defaults_take_every_proposal():
         "cpu.io_cpus": ('"5"', " source=strategy; input=placement"),
         "cpu.decode_participants": (
             "0",
-            " source=strategy; input=the engine measures its decode participants",
+            " source=strategy; input=decode computes on every thread of its pool",
         ),
         "place.costs": (
             '"cpu_fixed_us=150.5,cpu_route_us=40.25,drive_gbps=7.5"',

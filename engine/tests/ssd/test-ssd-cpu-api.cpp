@@ -30,6 +30,9 @@ int main() {
     changed = *api;
     --changed.runtime_services_size;
     if (ssd::cpu::valid(&changed)) { return 6; }
+    changed = *api;
+    changed.decode_threads = nullptr;
+    if (ssd::cpu::valid(&changed)) { return 7; }
     std::puts("CPU_EXECUTOR_REGISTRY_ABI_PASS");
     return 0;
 }

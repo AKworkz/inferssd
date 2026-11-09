@@ -146,7 +146,12 @@ REPORTS: Mapping[str, Check] = {
                         "weight_bytes": POSITIVE,
                         "points": array(
                             record(
-                                {"tokens": POSITIVE, "us": NUMBER},
+                                {
+                                    "tokens": POSITIVE,
+                                    "us": NUMBER,
+                                    "us_q1": NUMBER,
+                                    "us_q3": NUMBER,
+                                },
                                 {"weight_Bps": NUMBER, "flops": NUMBER},
                                 extra=True,
                             )
@@ -290,13 +295,18 @@ def dram_rates(report: Any) -> list[ThreadRate]:
 
 
 def compute_rows(report: Any) -> list[ComputeRow]:
-    """The report's rows; a report pinned to CPUs names them in every row."""
+    """The report's rows; pinned, thread i ran on the i-th CPU, so a row names the first ones."""
     rows: list[ComputeRow] = []
     pinned = sorted(report.get("cpus", []))
     for row in report["compute"]:
         points: list[ComputePoint] = []
         for point in row["points"]:
-            value: ComputePoint = {"tokens": point["tokens"], "us": float(point["us"])}
+            value: ComputePoint = {
+                "tokens": point["tokens"],
+                "us": float(point["us"]),
+                "us_q1": float(point["us_q1"]),
+                "us_q3": float(point["us_q3"]),
+            }
             if point["tokens"] == 1:
                 value["weight_Bps"] = float(point["weight_Bps"])
             else:
@@ -311,7 +321,7 @@ def compute_rows(report: Any) -> list[ComputeRow]:
             "points": points,
         }
         if pinned:
-            value_row["cpus"] = pinned
+            value_row["cpus"] = pinned[: row["threads"]]
         rows.append(value_row)
     return rows
 

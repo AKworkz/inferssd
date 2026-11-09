@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Platform thread layer: topology, pinning with read-back, scoped restore,
-// thread roles and per-thread CPU time. Optional arguments "<fast> <slow>"
-// check the cluster sizes of a known machine.
+// Platform thread layer: process CPUs, pinning with read-back, scoped restore,
+// thread roles, per-thread CPU time and the CPUs' busy time.
 #if defined(_WIN32) && !defined(_WIN32_WINNT)
 #define _WIN32_WINNT 0x0A00 // GetThreadSelectedCpuSets
 #endif
@@ -11,7 +10,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -25,8 +23,6 @@
 #elif defined(__APPLE__)
 #include <pthread.h>
 #elif defined(__linux__)
-#include <fstream>
-#include <functional>
 #include <pthread.h>
 #include <sched.h>
 #endif
@@ -85,70 +81,13 @@ static bool runs_within(const cpu_list & cpus) {
     return false;
 }
 
-static void test_split() {
-    cpu_topology t;
-    require(!detail::split_fastest({}, t), "no values, no topology");
-    require(detail::split_fastest({ {0, 400}, {1, 1024}, {2, 400}, {3, 1024}, {4, 400}, {5, 1024}, {6, 400}, {7, 1024} }, t) &&
-            t.fast == cpu_list{1, 3, 5, 7} && t.slow == cpu_list{0, 2, 4, 6}, "big.LITTLE capacities split in two");
-    require(detail::split_fastest({ {0, 3000000}, {1, 2800000}, {2, 2700000} }, t) && t.fast.size() == 3 && t.slow.empty(),
-            "steps under 10% are one cluster");
-    require(detail::split_fastest({ {0, 5000}, {1, 5000}, {2, 3800}, {3, 3800}, {4, 2500} }, t) &&
-            t.fast == cpu_list{0, 1, 2, 3} && t.slow == cpu_list{4}, "three tiers split at the largest relative drop");
-    require(detail::split_fastest({ {3, 1024}, {9, 1024} }, t) && t.fast == cpu_list{3, 9} && t.slow.empty(),
-            "a homogeneous machine is one cluster");
-}
-
-#if defined(__linux__)
-// The rule cpu-sink.cpp applied before the platform layer, verbatim: the
-// platform topology must give the same fast count on this machine.
-static int reference_fast_cpus() {
-    cpu_set_t allowed;
-    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) { return 0; }
-    std::vector<double> values;
-    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) {
-        if (!CPU_ISSET(cpu, &allowed)) { continue; }
-        double value = 0;
-        for (const char * file : { "cpu_capacity", "cpufreq/cpuinfo_max_freq" }) {
-            std::ifstream in("/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/" + file);
-            if (in >> value && value > 0) { break; }
-            value = 0;
-        }
-        if (value <= 0) { return CPU_COUNT(&allowed); }
-        values.push_back(value);
-    }
-    if (values.empty()) { return 0; }
-    std::sort(values.begin(), values.end(), std::greater<double>());
-    size_t cut = values.size();
-    double step = 0.10;
-    for (size_t i = 1; i < values.size(); ++i) {
-        const double drop = 1.0 - values[i] / values[i - 1];
-        if (drop > step) { step = drop; cut = i; }
-    }
-    return int(cut);
-}
-#endif
-
-static cpu_list test_topology(int expect_fast, int expect_slow) {
+static cpu_list test_process_cpus() {
     cpu_list cpus;
     std::string why;
     require(process_cpus(cpus, &why), "process_cpus: " + why);
     require(!cpus.empty() && std::is_sorted(cpus.begin(), cpus.end()) &&
             std::adjacent_find(cpus.begin(), cpus.end()) == cpus.end(), "process CPUs are ascending and distinct");
-    cpu_topology t;
-    require(topology(t, &why), "topology: " + why);
-    std::printf("process_cpus=%s fast=%s slow=%s affinity=%d\n", show(cpus).c_str(), show(t.fast).c_str(),
-                show(t.slow).c_str(), int(affinity_supported()));
-    require(!t.fast.empty(), "the fast cluster is not empty");
-    for (int cpu : t.fast) { require(contains(cpus, cpu) && !contains(t.slow, cpu), "fast CPUs are process CPUs, not slow"); }
-    for (int cpu : t.slow) { require(contains(cpus, cpu), "slow CPUs are process CPUs"); }
-#if defined(__linux__)
-    require(int(t.fast.size()) == reference_fast_cpus(), "Linux fast count matches the previous sink rule");
-    require(t.fast.size() + t.slow.size() == cpus.size(), "Linux clusters cover the allowed CPUs");
-#endif
-    if (expect_fast >= 0) {
-        require(int(t.fast.size()) == expect_fast && int(t.slow.size()) == expect_slow,
-                "expected " + std::to_string(expect_fast) + " fast and " + std::to_string(expect_slow) + " slow CPUs");
-    }
+    std::printf("process_cpus=%s affinity=%d\n", show(cpus).c_str(), int(affinity_supported()));
     return cpus;
 }
 
@@ -234,12 +173,37 @@ static void test_clock() {
     require(affinity_supported() ? cpu >= 0 : cpu == -1, "current_cpu");
 }
 
-int main(int argc, char ** argv) {
+// The CPUs' busy time covers this thread's spin and no more than the CPUs' wall time, within a tick on each CPU.
+static void test_busy(const cpu_list & cpus) {
+    uint64_t before = 0, after = 0, tick = 0;
+    std::string why;
+    if (!cpus_busy_ns(cpus, before, tick, &why)) {
+#if defined(_WIN32)
+        std::printf("cpus_busy_ns: %s\n", why.c_str());
+        return;
+#else
+        require(false, "cpus_busy_ns: " + why);
+#endif
+    }
+    const uint64_t cpu = thread_cpu_time_ns();
+    const auto start = std::chrono::steady_clock::now();
+    volatile uint64_t work = 0;
+    while (std::chrono::steady_clock::now() - start < std::chrono::milliseconds(300)) { work = work + 1; }
+    const uint64_t spun = thread_cpu_time_ns() - cpu;
+    const double wall = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count();
+    require(cpus_busy_ns(cpus, after, tick, &why), "cpus_busy_ns again: " + why);
+    const double busy = double(after) - double(before), slack = double(tick) * double(cpus.size());
+    std::printf("cpus_busy advanced %.1f ms over %.1f ms; this thread spun %.1f ms; tick %.1f ms\n", busy * 1e-6,
+                wall * 1e-6, double(spun) * 1e-6, double(tick) * 1e-6);
+    require(after >= before && tick > 0, "busy time is monotonic and counted in ticks");
+    require(busy + slack >= double(spun) && busy <= wall * double(cpus.size()) + slack,
+            "busy time covers this thread's spin and no more than the CPUs' wall time");
+}
+
+int main() {
     try {
-        const int expect_fast = argc > 2 ? std::atoi(argv[1]) : -1;
-        const int expect_slow = argc > 2 ? std::atoi(argv[2]) : -1;
-        test_split();
-        const cpu_list cpus = test_topology(expect_fast, expect_slow);
+        const cpu_list cpus = test_process_cpus();
+        test_busy(cpus);
         test_pin(cpus);
         test_roles();
         test_clock();

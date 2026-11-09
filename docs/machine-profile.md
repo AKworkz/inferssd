@@ -77,10 +77,14 @@ Each launch then combines the file with the model's GGUF header and with what
 it reads at that moment (the CPUs it may use, the usable GPUs and their free
 memory, the available memory) to choose:
 
-- the decode and prefill thread counts, each leaving a CPU to the sink's I/O
-  thread, and, where the CPUs allow it, which CPUs the decode threads use: the
-  performance cluster alone, one thread pinned to each CPU, when one token
-  streams the model's weight format faster there than on every CPU;
+- the decode thread count: the fewest threads that stream the model's weight
+  format at one token as fast as the best count measured, judged by the
+  calls' middle half (more threads add no bandwidth, only waits; the engine
+  runs decode on fewer while the machine's other work needs their CPUs); where
+  the CPUs allow it, which CPUs the decode threads use: the performance cluster
+  alone, its first CPUs, one thread pinned to each, when one token streams the
+  format faster there than on every CPU;
+- the prefill thread count, leaving a CPU to the sink's I/O thread;
 - the starting estimates the engine uses to place experts between the CPU and
   the GPU (it refines them as it runs);
 - `vram.budget = 0` when the engine has CUDA and no CUDA GPU is usable, and on
@@ -112,7 +116,7 @@ directory and to the settings file the launch generates.
 | --- | --- | --- |
 | `cpu` | sysfs on Linux, `sysctl` on macOS, CPU Sets on Windows; ISA from `inferssd-cpuprobe` | Logical CPUs with core, package, SMT siblings, `cpu_capacity` and maximum frequency; performance and efficiency clusters; whether threads can be pinned; the instruction-set features ggml reports (build options such as OpenMP or repacking are left out) |
 | `memory` | `/proc/meminfo`, `hw.memsize` or `GlobalMemoryStatusEx`; `inferssd-cpuprobe` | Total memory, page size, whether the GPU shares system memory, DRAM read bandwidth per thread count |
-| `compute` | `inferssd-cpuprobe` | ggml CPU matrix-multiply speed per weight format and thread count: weight bytes per second for one token, FLOP/s for more tokens; on Linux machines with several CPU clusters, also one token with a thread pinned to each CPU of each cluster and of every CPU (rows with `cpus`) |
+| `compute` | `inferssd-cpuprobe` | ggml CPU matrix-multiply speed per weight format at 1, 2, 4, ... threads up to every CPU and at the performance cluster's size: weight bytes per second for one token, FLOP/s for more tokens, with each point's median call and quartiles; on Linux machines with several CPU clusters, also one token with a thread pinned to each CPU of each cluster and of every CPU, and on the performance cluster's first 1, 2, 4, ... CPUs (rows with `cpus`) |
 | `gpus` | `inferssd-memprobe` (Linux with NVIDIA GPUs) | VRAM size, host-to-device (pinned and pageable), device-to-host and device-to-device copy rates, and device read bandwidth, for every GPU `nvidia-smi` lists |
 | `storage:<drive>` | `inferssd-ssdprobe`, one per drive | Random-read bandwidth and latency by request size and queue depth, read with the engine's own reader; the knee queue depth per size |
 

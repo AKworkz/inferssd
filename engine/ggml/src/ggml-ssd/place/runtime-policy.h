@@ -4,7 +4,9 @@
 // handles. The executor gathers observations and applies each action at its
 // existing synchronization point. All learned state belongs to one executor.
 #include "layer-plan.h"
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <deque>
 #include <utility>
 
@@ -45,29 +47,18 @@ inline double observe_layer(decode_learning & s, uint64_t read_bytes, double io_
     s.fixed_us = s.fixed_us > 0 ? 0.9 * s.fixed_us + 0.1 * fixed : fixed;
     return fixed;
 }
-struct thread_learning {
-    static constexpr uint64_t probe_experts = 400, recheck_experts = 40000;
-    int candidates[2] = {}, current = 0, decided = -1;
-    bool locked = false;
-    double us[2] = {};
-    uint64_t samples[2] = {}, since_decision = 0;
-};
-struct thread_decision { bool changed; double mean0 = 0, mean1 = 0; };
-inline thread_decision observe_threads(thread_learning & c, double expert_us) {
-    if (c.locked) { return {false}; }
-    if (c.decided >= 0) {
-        if (c.candidates[0] == c.candidates[1] || ++c.since_decision < c.recheck_experts) { return {false}; }
-        c.decided = -1; c.current = 0; c.us[0] = c.us[1] = 0; c.samples[0] = c.samples[1] = 0;
-        return {false};
-    }
-    c.us[c.current] += expert_us;
-    if (++c.samples[c.current] < c.probe_experts) { return {false}; }
-    if (c.current == 0) { c.current = 1; return {false}; }
-    const double mean0 = c.us[0] / double(c.samples[0]), mean1 = c.us[1] / double(c.samples[1]);
-    c.decided = mean1 < mean0 ? 1 : 0;
-    c.since_decision = 0;
-    return {true, mean0, mean1};
+// The CPUs a decode pool leaves to the machine's other work while decode runs (the GPU backend's threads, the reads,
+// other processes): the work's measured CPUs, other_ns of busy time over wall_ns, rounded up. The counters put the
+// sums within error_ns; while that band holds a whole number of CPUs the current choice stays, since the measurement
+// cannot tell the two counts apart.
+inline int decode_reserve(int current, double other_ns, double wall_ns, double error_ns) {
+    if (!(wall_ns > 0)) { return current; }
+    const int low = std::max(0, int(std::ceil((other_ns - error_ns) / wall_ns)));
+    const int high = std::max(0, int(std::ceil((other_ns + error_ns) / wall_ns)));
+    return low == high ? low : current;
 }
+// Decode's threads: its pool, within the CPUs the reserve leaves of `cpus`, at least one.
+inline int decode_participants(int pool, int cpus, int reserve) { return std::max(1, std::min(pool, cpus - reserve)); }
 
 struct cost_lines {
     double cpu_fixed_us = 204.0, cpu_route_us = 87.0;

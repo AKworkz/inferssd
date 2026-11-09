@@ -8,13 +8,13 @@ none, inside a test file of random data written there and removed after; on
 Linux with an NVIDIA GPU the memory probe measures transfers. Sections the
 saved file still describes correctly are reused (see ``plan_refresh``).
 
-CPU clusters follow the engine's split (``ssd::platform::topology``): Linux
-takes each CPU's ``cpu_capacity``, else ``cpuinfo_max_freq``, sorts them in
-descending order and cuts at the largest relative drop above 10%; one CPU
-without either value makes one cluster. macOS takes ``hw.perflevel0.logicalcpu``
-as the performance cluster and the remaining CPUs as efficiency. Windows takes
-the CPUs of the highest CPU Set efficiency class as the performance cluster;
-without a CPU Set for every CPU of processor group 0 the machine is one cluster.
+CPU clusters: Linux takes each CPU's ``cpu_capacity``, else
+``cpuinfo_max_freq``, sorts them in descending order and cuts at the largest
+relative drop above 10%; one CPU without either value makes one cluster. macOS
+takes ``hw.perflevel0.logicalcpu`` as the performance cluster and the remaining
+CPUs as efficiency. Windows takes the CPUs of the highest CPU Set efficiency
+class as the performance cluster; without a CPU Set for every CPU of processor
+group 0 the machine is one cluster.
 """
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ def section(start: float, end: float, method: str, status: str, detail: str = ""
 
 
 def split_fastest(values: Sequence[tuple[int, float]]) -> tuple[list[int], list[int]]:
-    """The engine's split: cut the descending values at the largest relative drop above 10%."""
+    """Cut the descending values at the largest relative drop above 10%."""
     ordered = sorted(values, key=lambda item: -item[1])
     cut, step = len(ordered), 0.10
     for index in range(1, len(ordered)):
@@ -226,13 +226,26 @@ TOPOLOGY = {
 }
 
 
+def curve_threads(count: int) -> list[int]:
+    """1, 2, 4, ... below COUNT, then COUNT.
+
+    Decode's CPU experts stream weights from memory, which saturates before the
+    CPUs run out; the strategy takes the fewest threads at the best rate.
+    """
+    counts, n = [], 1
+    while n < count:
+        counts.append(n)
+        n *= 2
+    return counts + [count]
+
+
 def probe_threads(cpu: CPU) -> list[int]:
-    """1, the performance-cluster size and every logical CPU, without repeats."""
+    """1, 2, 4, ... up to every logical CPU, and the performance-cluster size."""
     total = len(cpu["logical"])
     fast = next(
         (len(row["cpus"]) for row in cpu["clusters"] if row["kind"] == "performance"), total
     )
-    return sorted({1, fast, total})
+    return sorted({*curve_threads(total), fast})
 
 
 def pinned_sets(cpu: CPU) -> list[list[int]]:
@@ -363,10 +376,15 @@ def measure_cpu(
         cpu["isa"] = [name for name in report["ggml_features"] if name not in BUILD_OPTIONS]
         memory["dram_read_Bps"] = dram_rates(report)
         compute["cpu"] = compute_rows(report)
+        performance = next(
+            (sorted(row["cpus"]) for row in cpu["clusters"] if row["kind"] == "performance"), None
+        )
         for group in pinned_sets(cpu):
             listed = ",".join(map(str, group))
+            # Decode may run on the performance cluster alone: its curve, the first CPUs first.
+            counts = curve_threads(len(group)) if group == performance else [len(group)]
             progress(f"CPU probe: one token with a thread pinned to each of CPUs {listed}")
-            arguments = ["--cpus", listed, "--threads", str(len(group)), "--tokens", "1"]
+            arguments = ["--cpus", listed, "--threads", ",".join(map(str, counts)), "--tokens", "1"]
             try:
                 pinned = probes.run("cpu", arguments)
             except ProbeError as error:
@@ -374,7 +392,10 @@ def measure_cpu(
                 continue
             compute["cpu"] += compute_rows(pinned)
         if pinned_sets(cpu):
-            method += "; one token pinned to each cluster and to every CPU"
+            method += (
+                "; one token pinned to each cluster and to every CPU, to the performance "
+                "cluster's first 1, 2, 4, ... CPUs too"
+            )
     end = clock()
     failed = "the CPU probe failed (see compute)" if probe_error else ""
     isa_missing = f"ISA unknown: {failed}" if failed else ""

@@ -123,7 +123,7 @@ jobs:
         shell: bash
         run: |
           build-linux-cpu/bin/inferssd-cpuprobe --rows 64 --cols 256 --tokens 1,2 --min-seconds 0 --threads 1 \
-            | python3 -c 'import json, sys; d = json.load(sys.stdin); assert d["schema"] == "inferssd-cpuprobe/1" and d["dram"] and d["compute"] and not d["skipped"], d'
+            | python3 -c 'import json, sys; d = json.load(sys.stdin); assert d["schema"] == "inferssd-cpuprobe/2" and d["dram"] and d["compute"] and not d["skipped"], d'
 
   macos:
     if: github.event_name == 'workflow_dispatch' || (!github.event.repository.private && (github.event_name != 'pull_request' || !github.event.pull_request.draft))
@@ -151,7 +151,7 @@ jobs:
           if grep -E '\bSKIP\b|\*\*\*Not Run|\*\*\*Skipped' mac-tests.log; then exit 1; fi
           (cd engine && ../build-macos-metal/bin/test-chat --template muse-spark)
           build-macos-metal/bin/inferssd-cpuprobe --rows 64 --cols 256 --tokens 1,2 --min-seconds 0 --threads 1 \
-            | python3 -c 'import json, sys; d = json.load(sys.stdin); assert d["schema"] == "inferssd-cpuprobe/1" and d["dram"] and d["compute"] and not d["skipped"], d'
+            | python3 -c 'import json, sys; d = json.load(sys.stdin); assert d["schema"] == "inferssd-cpuprobe/2" and d["dram"] and d["compute"] and not d["skipped"], d'
       - name: Quantized CPU operator checks on Apple Silicon
         shell: bash
         run: |
@@ -192,4 +192,4 @@ jobs:
           ctest --test-dir build-windows-llvm --output-on-failure --no-tests=error -R '^(sched_inplace|ssd_model_adapter|ssd_runtime_policy|test-dsv41-engram|kimi_prefill_cost|moe_pack_copy_plan|ssd_prepared_graph|ssd_cuda_reserve|ssd_context_telemetry|test-graph-overhead|test_resources|ssd_settings_telemetry|ssd_cpu_api|ssd_source_index|ssd_host_budget|ssd_platform_threads|ssd_platform_memory|ssd_platform_file|ssd_read_ring|kimi_cpu_sink|kimi_cpu_sink_threadpool|kimi_cpu_sink_threadpool_poll|kimi_cpu_sink_activation_t2_d1_ready1|kimi_cpu_sink_swiglu|kimi_cpu_sink_muse_q8_0|kimi_cpu_sink_muse_bf16|kimi_cpu_sink_registered|kimi_cpu_prefill|kimi_cpu_prefill_registered)$' | tee windows-tests.log
           if grep -E '\bSKIP\b|\*\*\*Not Run|\*\*\*Skipped' windows-tests.log; then exit 1; fi
           build-windows-llvm/bin/inferssd-cpuprobe --rows 64 --cols 256 --tokens 1,2 --min-seconds 0 --threads 1 \
-            | python -c 'import json, sys; d = json.load(sys.stdin); assert d["schema"] == "inferssd-cpuprobe/1" and d["dram"] and d["compute"] and not d["skipped"], d'
+            | python -c 'import json, sys; d = json.load(sys.stdin); assert d["schema"] == "inferssd-cpuprobe/2" and d["dram"] and d["compute"] and not d["skipped"], d'

@@ -52,6 +52,11 @@ GGML_BACKEND_API void kimi_cpu_sink_destroy(struct kimi_cpu_sink * sink);
 GGML_BACKEND_API bool kimi_cpu_sink_call_open(struct kimi_cpu_sink * sink, int nth, char * error, size_t error_size);
 GGML_BACKEND_API void kimi_cpu_sink_call_close(struct kimi_cpu_sink * sink);
 GGML_BACKEND_API void kimi_cpu_sink_call_join(struct kimi_cpu_sink * sink, int ith, int nth);
+// The threads of a decode pool of `pool` that a decode graph runs on: all of them, less the CPUs the machine's other
+// work took over the decode tokens so far, so that no thread of the graph waits behind that work at a barrier;
+// `pool` where cpu.decode_participants fixes the count or the CPUs' busy time cannot be read. Call before the graph,
+// with no run in progress.
+GGML_BACKEND_API int kimi_cpu_sink_decode_threads(struct kimi_cpu_sink * sink, int pool);
 // Next-layer expert prefetch: the experts that `layer` is predicted to select,
 // best first, given before the decode run of the layer before it. Ignored when prefetch is off.
 GGML_BACKEND_API void kimi_cpu_sink_prefetch_hint(struct kimi_cpu_sink * sink, int32_t layer, const int32_t * experts, int n);

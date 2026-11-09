@@ -274,14 +274,6 @@ struct sink_worker_profile {
 
 using sink_request = ssd::host::expert_request;
 
-// How many CPUs this process may run on belong to the fastest cluster of a heterogeneous CPU (Arm big.LITTLE,
-// Intel P/E cores); every CPU on a homogeneous or unreadable machine, 0 when the CPUs cannot be read. Only a
-// candidate: decode measures it against all threads (decode_threads_setup).
-static int sink_fast_cpus() {
-    ssd::platform::cpu_topology topology;
-    return ssd::platform::topology(topology) ? int(topology.fast.size()) : 0;
-}
-
 // Device facts are selected by L3 from this context's actual GPU backend.
 static bool sink_unified_memory(const sink_configuration & value) {
     return value.has_gpu && value.gpu.device_is_unified(value.gpu_device);
@@ -706,9 +698,8 @@ struct kimi_cpu_sink {
     // the decode plan would move an expert from, one at a time, in the drive's shadow; unlocked before their pages go
     // (sink_cache::before_discard).
     kimi_host_lock host_lock;
-    // Diagnostic switches for A/B runs; both on by default.
+    // A diagnostic switch for A/B runs; on by default.
     const bool host_gpu_enabled = true;
-    const bool decode_thread_choice = true;
     std::vector<uint8_t> staged_quant_hidden;
     const bool profile_enabled;
     const bool trace_enabled;
@@ -738,16 +729,27 @@ struct kimi_cpu_sink {
     // Participants of the run in progress: the open call's, or the coordinator alone. Set by the run's thread
     // before its first phase.
     int threads = 1;
-    // Participants of a compute phase: all for prefill; for decode, the choice below.
+    // Participants of a compute phase: every thread of the call for a parallel phase or row weights, else
+    // run_participants.
     int active_threads = 0;
-    // Decode compute is a few short matvecs per expert, so a slow core's last chunk can hold every expert
-    // back, while prefill wants every core. Decode compares the participants that fit the fastest cluster with
-    // all of them on live experts (mean CPU time per expert over probe_experts each) and keeps the faster one,
-    // re-checking every recheck_experts. Learned for decode_threads_for participants; a run with another count
-    // starts over.
-    ssd::place::thread_learning decode_threads;
-    int decode_threads_for = 0;
-    const int fast_cpus; // CPUs of the fastest cluster (sink_fast_cpus)
+    // The participants this run's phases use (decode_threads_setup); the call thread count the decode one was
+    // reported for.
+    int run_participants = 0, decode_threads_for = 0;
+    // What a decode graph leaves to the machine's other work (decode_threads): over decode tokens in a row, the busy
+    // time of the CPUs this process may run on that the graph's threads did not take, and the wall time
+    // (measure_decode_share). Each thread adds the CPU time it used since its previous call to its index
+    // (mark_thread_cpu); a non-decode boundary starts a new generation, after which a thread starts over. Before any
+    // measurement the reserve is the least one can give: the kernel and other threads always run, and any work at
+    // all takes a CPU.
+    struct decode_share {
+        ssd::platform::cpu_list cpus;
+        bool readable = true;
+        int run = 0, reserve = 1, reported = -1;
+        uint64_t epoch = 0, token = 0, busy = 0, pool = 0, wall = 0, tick = 0, gap = 0, last_call = 0;
+        double other_ns = 0, wall_ns = 0, error_ns = 0;
+    } share;
+    std::unique_ptr<std::atomic<uint64_t>[]> thread_cpu{ new std::atomic<uint64_t>[sink_max_participants]() };
+    std::atomic<uint64_t> cpu_generation{0};
     kimi_cpu_sink_parallel_fn parallel_fn = nullptr;
     void * parallel_userdata = nullptr;
     int latent = 0, hidden = 0;
@@ -790,8 +792,7 @@ struct kimi_cpu_sink {
         row_weights(configuration.policy.row_weights),
         io_cpus(sink_cpus(configuration.policy.io_cpus)),
         profile_enabled(configuration.debug.profile), trace_enabled(configuration.debug.trace),
-        timeline_enabled(configuration.debug.trace), mrc(configuration.debug.mrc), worker_profiles(1),
-        fast_cpus(sink_fast_cpus()) {
+        timeline_enabled(configuration.debug.trace), mrc(configuration.debug.mrc), worker_profiles(1) {
         if (poll_us < 0 || poll_us > 10000 || dynamic_chunk_rows < 16 || dynamic_chunk_rows > 16384 || dynamic_chunk_rows % 16 ||
                 configuration.policy.decode_participants < 0 || configuration.policy.decode_participants > sink_max_participants) {
             throw std::runtime_error("invalid explicit executor schedule");
@@ -799,6 +800,7 @@ struct kimi_cpu_sink {
         if (configuration.policy.prefetch_depth < 0 || configuration.policy.prefetch_depth > 64) {
             throw std::runtime_error("prefetch depth must be 0..64");
         }
+        if (!ssd::platform::process_cpus(share.cpus)) { share.cpus.clear(); }
         if (configuration.policy.prefetch_depth && (!ready_first || !nonblocking_down_sched)) {
             throw std::runtime_error("next-layer prefetch requires the ordered nonblocking scheduler");
         }
@@ -1289,6 +1291,7 @@ struct kimi_cpu_sink {
             std::abort();
         }
         cache.ledger.client->clear_reclaimer(); // before anything a reclaim on another thread uses
+        end_decode_run();
         prefetch_stop();
         host_lock_stop(); // the tier and the arena are both still here
         place_report("destroy");
@@ -1533,6 +1536,7 @@ struct kimi_cpu_sink {
                 call_participants);
             std::abort();
         }
+        mark_thread_cpu(ith);
         const uint32_t call = now.call();
         uint32_t seen = call_generation;
         if (joined.fetch_add(1) + 1 == uint32_t(nth - 1)) { coordinator.notify(); }
@@ -1571,37 +1575,97 @@ struct kimi_cpu_sink {
             throw std::runtime_error("explicit row weights need one entry per participant: " +
                 std::to_string(row_weights.size()) + " for " + std::to_string(threads));
         }
-        if (decode) { decode_threads_setup(); }
+        run_participants = threads;
+        mark_thread_cpu(0);
+        if (decode) {
+            const uint64_t now = uint64_t(ggml_time_us()) * 1000;
+            if (share.last_call) { share.gap = std::max(share.gap, now - share.last_call); }
+            share.last_call = now;
+            decode_threads_setup();
+        }
     }
 
-    // The decode participants for this run's threads: all of them, or the first ones that fit the fastest cluster,
-    // one of whose CPUs stays with the threads that read beside them (the prefetch's readers, and the I/O thread
-    // outside a decode run that reads for itself); cpu.decode_participants fixes the count. With strict placement
-    // ggml thread i runs on the i-th CPU of its mask.
+    // This thread's CPU time since its previous call of the generation, added to its index (decode_share).
+    void mark_thread_cpu(int ith) {
+        thread_local const kimi_cpu_sink * owner = nullptr;
+        thread_local uint64_t generation = 0, last = 0;
+        const uint64_t now = ssd::platform::thread_cpu_time_ns(), current = cpu_generation.load(std::memory_order_relaxed);
+        if (owner == this && generation == current && now >= last) {
+            thread_cpu[size_t(ith)].fetch_add(now - last, std::memory_order_relaxed);
+        }
+        owner = this; generation = current; last = now;
+    }
+
+    // At a token boundary (cache_begin). Between two decode tokens in a row the CPUs' busy time less the threads' CPU
+    // is the other work; over a run of such tokens the sums carry each CPU's counter up to one tick behind and each
+    // thread's CPU between a boundary and its next call (at most the longest gap between calls) at both ends, so each
+    // run adds that much error. The reserve follows (ssd::place::decode_reserve).
+    void measure_decode_share(bool decode, uint64_t epoch, uint64_t token) {
+        const bool consecutive = decode && share.run > 0 && epoch == share.epoch && token == share.token + 1;
+        share.epoch = epoch; share.token = token;
+        if (!consecutive) { end_decode_run(); }
+        if (!decode) { cpu_generation.fetch_add(1, std::memory_order_relaxed); return; }
+        uint64_t busy = 0, tick = 0;
+        std::string why;
+        if (!share.readable || share.cpus.empty()) { return; }
+        if (!ssd::platform::cpus_busy_ns(share.cpus, busy, tick, &why)) {
+            share.readable = false;
+            std::fprintf(stderr, "[kimi_cpu_sink_threads] other work unmeasured: %s\n", why.c_str());
+            return;
+        }
+        uint64_t pool = 0;
+        for (int i = 0; i < sink_max_participants; ++i) { pool += thread_cpu[size_t(i)].load(std::memory_order_relaxed); }
+        const uint64_t wall = uint64_t(ggml_time_us()) * 1000;
+        if (consecutive) {
+            share.other_ns += double(busy) - double(share.busy) - (double(pool) - double(share.pool));
+            share.wall_ns += double(wall - share.wall);
+        }
+        share.run += 1; share.busy = busy; share.pool = pool; share.wall = wall; share.tick = tick;
+        const double open = share.run > 1 ?
+            double(share.cpus.size()) * double(tick) + 2.0 * double(threads) * double(share.gap) : 0.0;
+        share.reserve = ssd::place::decode_reserve(share.reserve, share.other_ns, share.wall_ns, share.error_ns + open);
+    }
+
+    // A run of decode tokens ends (a non-decode or non-consecutive boundary, or the sink's end): its error joins the
+    // sums', and the sums are reported.
+    void end_decode_run() {
+        if (share.run > 1) {
+            share.error_ns += double(share.cpus.size()) * double(share.tick) + 2.0 * double(threads) * double(share.gap);
+            std::fprintf(stderr, "[kimi_cpu_sink_threads] decode_share tokens=%d other_cpus=%.2f error_cpus=%.2f"
+                " over_s=%.1f reserve=%d cpus=%zu\n", share.run - 1, share.other_ns / share.wall_ns,
+                share.error_ns / share.wall_ns, share.wall_ns / 1e9, share.reserve, share.cpus.size());
+        }
+        share.run = 0; share.gap = 0; share.last_call = 0;
+    }
+
+    // The threads of a decode pool of `pool` a decode graph runs on (kimi_cpu_sink_decode_threads).
+    int decode_threads(int pool) {
+        if (configuration.policy.decode_participants || share.cpus.empty()) { return pool; }
+        const int n = ssd::place::decode_participants(pool, int(share.cpus.size()), share.reserve);
+        if (n != share.reported) {
+            share.reported = n;
+            std::fprintf(stderr, "[kimi_cpu_sink_threads] decode_threads=%d pool=%d cpus=%zu reserve=%d other_cpus=%.2f"
+                " over_s=%.1f\n", n, pool, share.cpus.size(), share.reserve,
+                share.wall_ns > 0 ? share.other_ns / share.wall_ns : 0.0, share.wall_ns / 1e9);
+        }
+        return n;
+    }
+
+    // A decode run's phases use every thread of its call, or the first cpu.decode_participants of them. The strategy
+    // sizes the decode pool to the threads that raise the rate decode streams expert weights at, so none of them
+    // only waits: each one is waited for at every call's close and at ggml's barrier after its node. With strict
+    // placement ggml thread i runs on the i-th CPU of its mask.
     void decode_threads_setup() {
         const int fixed = configuration.policy.decode_participants;
         if (fixed > threads) {
             throw std::runtime_error("cpu.decode_participants=" + std::to_string(fixed) + " exceeds the call's " +
                 std::to_string(threads) + " threads");
         }
+        run_participants = fixed ? fixed : threads;
         if (decode_threads_for == threads) { return; }
-        decode_threads = {};
         decode_threads_for = threads;
-        const int fast_participants = std::max(1, std::min(threads, fast_cpus - 1));
-        decode_threads.candidates[0] = threads;
-        decode_threads.candidates[1] = fast_cpus > 0 && fast_participants < threads ? fast_participants : threads;
-        if (decode_threads.candidates[1] == threads || !decode_thread_choice) {
-            decode_threads.decided = 0;
-            decode_threads.locked = true;
-        }
-        if (fixed) {
-            decode_threads.candidates[1] = fixed;
-            decode_threads.decided = 1;
-            decode_threads.locked = true;
-        }
-        std::fprintf(stderr, "[kimi_cpu_sink_threads] participants=%d fast_cluster_cpus=%d decode_candidates=%d,%d"
-                " decode_fixed=%d\n", threads, fast_cpus, decode_threads.candidates[0], decode_threads.candidates[1],
-                decode_threads.locked ? decode_threads.candidates[decode_threads.decided] : 0);
+        std::fprintf(stderr, "[kimi_cpu_sink_threads] participants=%d decode_participants=%d\n", threads,
+                run_participants);
     }
 
     // At load, storage before any request, so that no request waits for its page population. On unified memory the
@@ -1978,20 +2042,11 @@ struct kimi_cpu_sink {
         vram.set_miss_cost(ssd::place::miss_cost(ram, ssd, learning.cpu_expert_us, current.io_us,
             costs.in_place != 0, host));
     }
-    void observe_decode_threads(double expert_us) {
-        auto & c = decode_threads;
-        const auto decision = ssd::place::observe_threads(c, expert_us);
-        if (!decision.changed) { return; }
-        const double mean0 = decision.mean0, mean1 = decision.mean1;
-        std::fprintf(stderr, "[kimi_cpu_sink_threads] decode_participants=%d us_per_expert=%.1f (%d participants: %.1f)\n",
-                c.candidates[c.decided], c.decided ? mean1 : mean0, c.candidates[1 - c.decided], c.decided ? mean0 : mean1);
-    }
     // `last`: the run dispatches no phase after this one, so its participants next wait for the close.
     void compute_phase(bool is_down, bool last = false) {
         begin_dynamic_phase(is_down);
         // Row weights fix one bound per participant, so they keep every thread.
-        active_threads = parallel_fn || !row_weights.empty() ? threads :
-            decode_threads.candidates[decode_threads.decided >= 0 ? decode_threads.decided : decode_threads.current];
+        active_threads = parallel_fn || !row_weights.empty() ? threads : run_participants;
         pending.store(uint32_t(active_threads - 1));
         if (profile_enabled) { phase_dispatch = sink_clock::now(); }
         ++generation;
@@ -2952,7 +3007,6 @@ struct kimi_cpu_sink {
                 // share of the phases it ran in.
                 const double expert_us = expert_cpu_us[i] + down_us / double(batch.size());
                 ssd::place::observe_expert(learning, { expert_us, expert_cpu_us[i], io_requests.empty(), moved });
-                observe_decode_threads(expert_us);
                 if (!expert_upload_started[i]) {
                     const void * data[3] = { payload(i, 0), payload(i, 1), payload(i, 2) };
                     vram.admit(i, data, request.cache_hit >= 0 || request.cache_admit >= 0);
@@ -3454,6 +3508,12 @@ extern "C" void kimi_cpu_sink_call_join(struct kimi_cpu_sink * sink, int ith, in
     if (sink) { sink->join_call(ith, nth); }
 }
 
+extern "C" int kimi_cpu_sink_decode_threads(struct kimi_cpu_sink * sink, int pool) {
+    if (!sink) { return pool; }
+    std::lock_guard<sink_run_mutex> serial(sink->run_mutex);
+    return sink->decode_threads(pool);
+}
+
 namespace ssd {
 namespace cpu {
 namespace {
@@ -3578,6 +3638,7 @@ extern "C" bool kimi_cpu_sink_cache_begin(struct kimi_cpu_sink * sink, uint64_t 
     std::lock_guard<sink_run_mutex> serial(sink->run_mutex); sink->prefetch_drain();
     try {
         sink->end_margin_interval(decode, epoch, token);
+        sink->measure_decode_share(decode, epoch, token);
         sink->refresh_floor(decode ? "decode" : "prefill");
         sink->file_identities.clear();
         sink->vram.begin(epoch, token, decode, sink->cache);

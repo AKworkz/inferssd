@@ -224,6 +224,13 @@ struct llama_kimi_cpu_sink_runtime {
         initialize(registry);
     }
 
+    // The threads of the decode pool (`pool`) a decode graph with sink nodes runs on, after prepare_graph: the pool
+    // less the CPUs the machine's other work takes (kimi_cpu_sink_decode_threads).
+    int decode_threads(int pool) {
+        std::lock_guard<std::mutex> lock(mutex);
+        return cpu_api->decode_threads(sink, pool);
+    }
+
     void print_cache_stats(const char * reason, bool decode, uint64_t token) {
         if (!sink || !cache_budget) { return; }
         kimi_cpu_sink_cache_stats stats = {};

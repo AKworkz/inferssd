@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 
 #if defined(_WIN32)
@@ -18,11 +19,13 @@
 #endif
 #include <windows.h>
 #elif defined(__APPLE__)
+#include <mach/mach.h>
 #include <os/os_sync_wait_on_address.h>
 #include <pthread.h>
 #include <sched.h>
 #include <sys/sysctl.h>
 #include <time.h>
+#include <unistd.h>
 #elif defined(__linux__)
 #include <climits>
 #include <fstream>
@@ -44,26 +47,6 @@ static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t) && std::atomic<u
 static void set_why(std::string * why, std::string text) {
     if (why) { *why = std::move(text); }
 }
-
-namespace detail {
-bool split_fastest(const std::vector<std::pair<int, double>> & values, cpu_topology & out) {
-    if (values.empty()) { return false; }
-    std::vector<std::pair<int, double>> sorted(values);
-    std::stable_sort(sorted.begin(), sorted.end(), [](const auto & a, const auto & b) { return a.second > b.second; });
-    size_t cut = sorted.size();
-    double step = 0.10;
-    for (size_t i = 1; i < sorted.size(); ++i) {
-        const double drop = 1.0 - sorted[i].second / sorted[i - 1].second;
-        if (drop > step) { step = drop; cut = i; }
-    }
-    out.fast.clear();
-    out.slow.clear();
-    for (size_t i = 0; i < sorted.size(); ++i) { (i < cut ? out.fast : out.slow).push_back(sorted[i].first); }
-    std::sort(out.fast.begin(), out.fast.end());
-    std::sort(out.slow.begin(), out.slow.end());
-    return true;
-}
-} // namespace detail
 
 bool pin_current_thread(const cpu_list & cpus) {
 #if defined(_WIN32)
@@ -92,33 +75,6 @@ bool process_cpus(cpu_list & cpus, std::string * why) {
 // sched_getaffinity(0) reads the calling thread's mask.
 bool current_thread_cpus(cpu_list & cpus, std::string * why) { return process_cpus(cpus, why); }
 
-// Per-CPU capacity from the kernel (Arm big.LITTLE, Intel P/E cores), else the
-// maximum frequency. One unreadable CPU makes the machine one cluster.
-bool topology(cpu_topology & out, std::string * why) {
-    cpu_list cpus;
-    if (!process_cpus(cpus, why)) { return false; }
-    if (cpus.empty()) {
-        set_why(why, "no allowed CPUs");
-        return false;
-    }
-    std::vector<std::pair<int, double>> values;
-    for (int cpu : cpus) {
-        double value = 0;
-        for (const char * file : { "cpu_capacity", "cpufreq/cpuinfo_max_freq" }) {
-            std::ifstream in("/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/" + file);
-            if (in >> value && value > 0) { break; }
-            value = 0;
-        }
-        if (value <= 0) {
-            out.fast = std::move(cpus);
-            out.slow.clear();
-            return true;
-        }
-        values.emplace_back(cpu, value);
-    }
-    return detail::split_fastest(values, out);
-}
-
 bool affinity_supported() { return true; }
 
 bool pin_thread(std::thread::native_handle_type thread, const cpu_list & cpus) {
@@ -137,6 +93,38 @@ bool pin_thread(std::thread::native_handle_type thread, const cpu_list & cpus) {
 bool set_thread_role(thread_role) { return true; }
 
 int current_cpu() { return sched_getcpu(); }
+
+// /proc/stat per CPU: user nice system idle iowait irq softirq steal guest guest_nice, in USER_HZ ticks; guest time
+// is already in user.
+bool cpus_busy_ns(const cpu_list & cpus, uint64_t & busy_ns, uint64_t & tick_ns, std::string * why) {
+    const long hz = sysconf(_SC_CLK_TCK);
+    std::ifstream in("/proc/stat");
+    if (hz <= 0 || !in) {
+        set_why(why, "/proc/stat is not readable");
+        return false;
+    }
+    tick_ns = uint64_t(1000000000 / hz);
+    uint64_t ticks = 0;
+    size_t found = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        int cpu = -1;
+        unsigned long long user, nice, system, idle, iowait, irq, softirq, steal = 0;
+        if (std::sscanf(line.c_str(), "cpu%d %llu %llu %llu %llu %llu %llu %llu %llu", &cpu, &user, &nice, &system, &idle,
+                        &iowait, &irq, &softirq, &steal) < 8) {
+            continue;
+        }
+        if (!std::binary_search(cpus.begin(), cpus.end(), cpu)) { continue; }
+        ticks += user + nice + system + irq + softirq + steal;
+        ++found;
+    }
+    if (found != cpus.size()) {
+        set_why(why, "/proc/stat lists " + std::to_string(found) + " of " + std::to_string(cpus.size()) + " CPUs");
+        return false;
+    }
+    busy_ns = ticks * tick_ns;
+    return true;
+}
 
 void wait_on(const std::atomic<uint32_t> & word, uint32_t expected) noexcept {
     syscall(SYS_futex, &word, FUTEX_WAIT_PRIVATE, expected, nullptr, nullptr, 0);
@@ -168,18 +156,6 @@ bool process_cpus(cpu_list & cpus, std::string * why) {
 // No thread affinity: every thread may run on every CPU.
 bool current_thread_cpus(cpu_list & cpus, std::string * why) { return process_cpus(cpus, why); }
 
-// perflevel0 is the fastest level; the other levels (perflevel1 on current
-// Apple silicon) are the rest. Intel Macs report no levels: one cluster.
-bool topology(cpu_topology & out, std::string * why) {
-    cpu_list cpus;
-    if (!process_cpus(cpus, why)) { return false; }
-    const int fast = sysctl_int("hw.perflevel0.logicalcpu");
-    const size_t cut = fast > 0 && size_t(fast) < cpus.size() ? size_t(fast) : cpus.size();
-    out.fast.assign(cpus.begin(), cpus.begin() + std::ptrdiff_t(cut));
-    out.slow.assign(cpus.begin() + std::ptrdiff_t(cut), cpus.end());
-    return true;
-}
-
 // macOS has no thread affinity; QoS roles steer cluster placement instead.
 bool affinity_supported() { return false; }
 
@@ -191,6 +167,34 @@ bool set_thread_role(thread_role role) {
 }
 
 int current_cpu() { return -1; }
+
+// Each CPU's user, system and nice ticks (host_processor_info), counted at the clock tick rate.
+bool cpus_busy_ns(const cpu_list & cpus, uint64_t & busy_ns, uint64_t & tick_ns, std::string * why) {
+    natural_t count = 0;
+    processor_info_array_t info = nullptr;
+    mach_msg_type_number_t words = 0;
+    if (host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &count, &info, &words) != KERN_SUCCESS) {
+        set_why(why, "host_processor_info failed");
+        return false;
+    }
+    const auto * load = reinterpret_cast<const processor_cpu_load_info_data_t *>(info);
+    uint64_t ticks = 0;
+    bool ok = true;
+    for (int cpu : cpus) {
+        if (cpu < 0 || natural_t(cpu) >= count) { ok = false; break; }
+        ticks += uint64_t(load[cpu].cpu_ticks[CPU_STATE_USER]) + load[cpu].cpu_ticks[CPU_STATE_SYSTEM] +
+                 load[cpu].cpu_ticks[CPU_STATE_NICE];
+    }
+    vm_deallocate(mach_task_self(), vm_address_t(info), vm_size_t(words) * sizeof(integer_t));
+    const long hz = sysconf(_SC_CLK_TCK);
+    if (!ok || hz <= 0) {
+        set_why(why, ok ? "no clock tick rate" : "a CPU beyond the processors the host reports");
+        return false;
+    }
+    tick_ns = uint64_t(1000000000 / hz);
+    busy_ns = ticks * tick_ns;
+    return true;
+}
 
 // Before macOS 14.4 there is no public wait on an address; the waiter yields and rechecks.
 void wait_on(const std::atomic<uint32_t> & word, uint32_t expected) noexcept {
@@ -282,22 +286,6 @@ bool process_cpus(cpu_list & cpus, std::string * why) {
     for (int cpu = 0; cpu < mask_bits; ++cpu) {
         if ((mask >> cpu) & 1) { cpus.push_back(cpu); }
     }
-    return true;
-}
-
-// The highest EfficiencyClass is the fast cluster; without CPU Sets the
-// machine is one cluster.
-bool topology(cpu_topology & out, std::string * why) {
-    cpu_list cpus;
-    if (!process_cpus(cpus, why)) { return false; }
-    const auto & sets = cpu_sets();
-    int best = -1;
-    if (sets.available) {
-        for (int cpu : cpus) { best = std::max(best, sets.efficiency[size_t(cpu)]); }
-    }
-    out.fast.clear();
-    out.slow.clear();
-    for (int cpu : cpus) { (best < 0 || sets.efficiency[size_t(cpu)] == best ? out.fast : out.slow).push_back(cpu); }
     return true;
 }
 
@@ -402,6 +390,28 @@ uint64_t thread_cpu_time_ns() {
     if (!GetThreadTimes(GetCurrentThread(), &creation, &exit, &kernel, &user)) { return 0; }
     const auto ticks = [](const FILETIME & t) { return (uint64_t(t.dwHighDateTime) << 32) | t.dwLowDateTime; };
     return (ticks(kernel) + ticks(user)) * 100; // 100 ns units
+}
+
+// GetSystemTimes sums every processor of the group, its kernel time including idle time, as the clock interrupt
+// advances it.
+bool cpus_busy_ns(const cpu_list & cpus, uint64_t & busy_ns, uint64_t & tick_ns, std::string * why) {
+    const DWORD count = GetActiveProcessorCount(0);
+    if (!single_group() || cpus.size() != count || (count && cpus.back() != int(count) - 1)) {
+        set_why(why, "Windows reads the busy time of every processor of the group only");
+        return false;
+    }
+    FILETIME idle, kernel, user;
+    DWORD adjustment = 0, increment = 0;
+    BOOL disabled = FALSE;
+    if (!GetSystemTimes(&idle, &kernel, &user) || !GetSystemTimeAdjustment(&adjustment, &increment, &disabled) ||
+        !increment) {
+        set_why(why, "GetSystemTimes failed");
+        return false;
+    }
+    const auto ticks = [](const FILETIME & t) { return (uint64_t(t.dwHighDateTime) << 32) | t.dwLowDateTime; };
+    tick_ns = uint64_t(increment) * 100;
+    busy_ns = (ticks(kernel) + ticks(user) - ticks(idle)) * 100; // 100 ns units
+    return true;
 }
 
 int current_cpu() {

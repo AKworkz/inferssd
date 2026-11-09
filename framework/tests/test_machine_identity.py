@@ -220,7 +220,7 @@ def test_linux_identity(tmp_path):
             "gpu_driver": "580.65.06",
             "probe_versions": {
                 "ssd": "inferssd-ssdprobe/1",
-                "cpu": "inferssd-cpuprobe/1",
+                "cpu": "inferssd-cpuprobe/2",
                 "memory": "inferssd-memprobe/1",
             },
         },
@@ -367,7 +367,7 @@ def test_darwin_identity(tmp_path):
             "os_release": "macOS 26.4 (25E246)",
             "kernel": "25.4.0",
             "gpu_driver": None,
-            "probe_versions": {"ssd": "inferssd-ssdprobe/1", "cpu": "inferssd-cpuprobe/1"},
+            "probe_versions": {"ssd": "inferssd-ssdprobe/1", "cpu": "inferssd-cpuprobe/2"},
         },
     }
 

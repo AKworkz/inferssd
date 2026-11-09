@@ -27,18 +27,15 @@ static void learning_contract() {
     const size_t before = s.reads.size(); observe_layer(s, 0, 99, 100, 110);
     check(s.reads.size() == before, "cache-only layers cannot evict read observations");
 
-    thread_learning t; t.candidates[0] = 8; t.candidates[1] = 4;
-    for (int i = 0; i < 400; ++i) { check(!observe_threads(t, 100).changed, "first thread probe does not decide"); }
-    check(t.current == 1 && t.decided == -1, "thread probe changes candidates at400 experts");
-    for (int i = 0; i < 399; ++i) { check(!observe_threads(t, 80).changed, "second probe waits for full window"); }
-    const auto chosen = observe_threads(t, 80);
-    check(chosen.changed && t.decided == 1 && chosen.mean0 == 100 && chosen.mean1 == 80, "thread choice uses measured means");
-    for (int i = 0; i < 39999; ++i) { observe_threads(t, 999); }
-    check(t.decided == 1, "chosen participants survive until recheck boundary");
-    observe_threads(t, 999);
-    check(t.decided == -1 && t.current == 0 && t.samples[0] == 0 && t.samples[1] == 0, "recheck resets only at40000 experts");
-    t.locked = true; observe_threads(t, 10);
-    check(t.samples[0] == 0, "explicit participants do not learn or recheck");
+    // 0.7 CPUs of other work over 10 s, the counters within 0.5 CPU-s: one CPU stays with it.
+    check(decode_reserve(0, 7e9, 10e9, 0.5e9) == 1, "measured other work rounds up to whole CPUs");
+    check(decode_reserve(0, 0.2e9, 10e9, 0.1e9) == 1 && decode_reserve(3, 0, 10e9, 0) == 0, "any work keeps a CPU, none keeps none");
+    // A band across a whole CPU (0.95..1.05) keeps the current choice; a narrower one decides.
+    check(decode_reserve(1, 10e9, 10e9, 0.5e9) == 1 && decode_reserve(2, 10e9, 10e9, 0.5e9) == 2, "a straddling band keeps the choice");
+    check(decode_reserve(1, 15e9, 10e9, 0.5e9) == 2, "a band past a whole CPU moves the choice");
+    check(decode_reserve(2, 1e9, 0, 0) == 2, "no wall time measured keeps the choice");
+    check(decode_participants(18, 18, 1) == 17 && decode_participants(16, 61, 2) == 16 && decode_participants(4, 4, 9) == 1,
+          "decode keeps its pool within the CPUs the reserve leaves, and at least one thread");
 }
 
 static void prefetch_contract() {

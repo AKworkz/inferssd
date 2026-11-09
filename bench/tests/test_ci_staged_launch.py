@@ -116,7 +116,7 @@ def sandbox_record(tmp_path, side="candidate", model="muse", patch=None, setting
 def records(tmp_path_factory):
     """Real resolutions: the base's framework, and a candidate whose strategy derives one setting differently."""
     tmp_path = tmp_path_factory.mktemp("resolutions")
-    patch = ('choices["cpu.decode_participants"] = ("0", "the engine measures its decode participants")',
+    patch = ('choices["cpu.decode_participants"] = ("0", "decode computes on every thread of its pool")',
              'choices["cpu.decode_participants"] = ("1", "one decode participant")')
     return dict(base=sandbox_record(tmp_path, "base"), candidate=sandbox_record(tmp_path, "candidate"),
                 changed=sandbox_record(tmp_path, "candidate", patch=patch, label="changed"))
@@ -235,7 +235,7 @@ def test_a_pr_whose_strategy_derives_another_setting_is_compared_and_shows_the_c
     launch = decision["derived_launch"]
     assert launch["changes"] == ["cpu.decode_participants"]
     assert launch["sides"]["base"]["settings"]["cpu.decode_participants"] == dict(
-        value=0, origin="strategy", reason="the engine measures its decode participants")
+        value=0, origin="strategy", reason="decode computes on every thread of its pool")
     assert launch["sides"]["candidate"]["settings"]["cpu.decode_participants"] == dict(
         value=1, origin="strategy", reason="one decode participant")
     unchanged = compare.decide_cell(*cell_inputs(records, "candidate"), POLICY, protocol=protocol_for(),
@@ -459,7 +459,7 @@ def derived_job(tmp_path, monkeypatch, baseline=False):
     from test_ci_selection import POLICY as SELECTION_POLICY
     from ci import impact, selected_integration as execution, selected_preflight as preflight, staged_build
     from ci.selection_contract import performance_protocol
-    patch = ('choices["cpu.decode_participants"] = ("0", "the engine measures its decode participants")',
+    patch = ('choices["cpu.decode_participants"] = ("0", "decode computes on every thread of its pool")',
              'choices["cpu.decode_participants"] = ("1", "one decode participant")')
     outputs = {"machine-profile": staged_launch.MARKER + json.dumps(dict(returncode=1, characteristics=MACHINE))}
     for side in ("base", "candidate"):

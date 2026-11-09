@@ -61,7 +61,7 @@ SSD_REPORT = {
     ],
 }
 CPU_REPORT = {
-    "schema": "inferssd-cpuprobe/1",
+    "schema": "inferssd-cpuprobe/2",
     "ggml_features": ["AVX2", "FMA", "F16C"],
     "dram": [
         {"threads": 1, "bytes": 1073741824, "Bps": 1.2e10},
@@ -75,8 +75,8 @@ CPU_REPORT = {
             "cols": 4096,
             "weight_bytes": 9437184,
             "points": [
-                {"tokens": 1, "us": 210.0, "weight_Bps": 4.5e10},
-                {"tokens": 32, "us": 900.0, "flops": 1.2e12},
+                {"tokens": 1, "us": 210.0, "us_q1": 205.0, "us_q3": 220.0, "weight_Bps": 4.5e10},
+                {"tokens": 32, "us": 900.0, "us_q1": 890.0, "us_q3": 915.0, "flops": 1.2e12},
             ],
         }
     ],
@@ -188,7 +188,14 @@ def test_reports_may_carry_more_fields():
         ("cpu", {"dram": [{"threads": 0, "bytes": 1, "Bps": 1.0}]}, r"dram\[0\].threads must be"),
         (
             "cpu",
-            {"compute": [dict(CPU_REPORT["compute"][0], points=[{"tokens": 32, "us": 1.0}])]},
+            {
+                "compute": [
+                    dict(
+                        CPU_REPORT["compute"][0],
+                        points=[{"tokens": 32, "us": 1.0, "us_q1": 1.0, "us_q3": 1.0}],
+                    )
+                ]
+            },
             "Q4_K 32 tokens lack flops",
         ),
         ("memory", {"devices": [{"index": 0}]}, r"devices\[0\].name is required"),
@@ -329,6 +336,12 @@ def test_storage_entry_takes_medians_and_the_median_run_latency():
 def test_cpu_and_memory_conversions():
     assert dram_rates(CPU_REPORT) == [{"threads": 1, "Bps": 1.2e10}, {"threads": 4, "Bps": 3.6e10}]
     assert compute_rows(CPU_REPORT) == CPU_REPORT["compute"]
+    # Pinned, thread i ran on the i-th CPU: each row names the first ones.
+    row = CPU_REPORT["compute"][0]
+    pinned = dict(
+        CPU_REPORT, cpus=[16, 5, 15, 6], compute=[dict(row, threads=n) for n in (1, 2, 4)]
+    )
+    assert [r["cpus"] for r in compute_rows(pinned)] == [[5], [5, 6], [5, 6, 15, 16]]
     assert skipped(CPU_REPORT) == ["MXFP4 (no CPU kernel)"]
     rows = gpu_rows(MEMORY_REPORT)
     expected = dict(MEMORY_REPORT["devices"][0])

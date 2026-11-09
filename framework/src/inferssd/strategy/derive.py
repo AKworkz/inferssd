@@ -145,6 +145,47 @@ def _unpinned(characteristics: Characteristics) -> list[ComputeRow]:
     return [row for row in characteristics["compute"]["cpu"] if not row.get("cpus")]
 
 
+def decode_threads(rows: Sequence[ComputeRow], name: str, most: int) -> Optional[tuple[int, str]]:
+    """The fewest threads, up to MOST, at the best one-token NAME rate of ROWS, and why.
+
+    Decode streams its CPU experts' weights from memory, which saturates before
+    the CPUs run out. Past that a thread adds no rate, and at every layer the
+    sink's call closes only once each thread of the pool joined it and ggml's
+    barrier after the node waits for each one. A count reaches the best rate
+    when its fastest quarter of calls streams as fast as the best count's
+    slowest quarter. A best rate at the most threads measured, short of MOST,
+    may still rise: decode then takes MOST. None when nothing was measured.
+    """
+    rates: dict[int, tuple[float, float, float]] = {}
+    for row in rows:
+        if row["format"].upper() != name or row["threads"] > most:
+            continue
+        for p in row["points"]:
+            if p["tokens"] == 1 and p.get("weight_Bps", 0) > 0:
+                rate, us = p["weight_Bps"], p["us"]
+                rates[row["threads"]] = (
+                    rate,
+                    rate * us / p.get("us_q3", us),
+                    rate * us / p.get("us_q1", us),
+                )
+    if not rates:
+        return None
+    best = max(rates, key=lambda count: (rates[count][0], -count))
+    if best == max(rates) < most:
+        return most, (
+            f"{name} streams fastest at one token on the most threads measured, "
+            f"{best} ({rates[best][0] / GB:.1f} GB/s), fewer than {most}"
+        )
+    count = min(count for count, (_, _, fast) in rates.items() if fast >= rates[best][1])
+    if count == best:
+        rate = rates[best][0] / GB
+        return count, f"{name} streams fastest at one token on {best} threads ({rate:.1f} GB/s)"
+    return count, (
+        f"the fewest threads that stream {name} at one token as fast as the best: {count} "
+        f"({rates[count][0] / GB:.1f} GB/s) against {best} ({rates[best][0] / GB:.1f} GB/s)"
+    )
+
+
 def _measured_counts(
     characteristics: Characteristics,
     model: ModelFacts,
@@ -152,49 +193,47 @@ def _measured_counts(
     notes: list[str],
     measured_cap: Optional[int] = None,
 ) -> Threads:
-    """The measured unpinned thread counts that run the dominant format fastest.
-
-    As where threads are pinned, each pool leaves a CPU to the sink's I/O thread.
+    """The measured unpinned thread counts: decode on the fewest threads at the best rate
+    (decode_threads), prefill on the count that computes the dominant format fastest, of the
+    counts up to MEASURED_CAP where given; prefill leaves a CPU to the sink's I/O thread, as
+    where threads are pinned.
     """
     name = model.dominant_format.upper()
     rows = [
         row
         for row in _unpinned(characteristics)
-        if row["format"].upper() == name and row["threads"] <= (measured_cap or len(allowed))
+        if row["format"].upper() == name and row["threads"] <= len(allowed)
     ]
-    one = [
-        (point["weight_Bps"], row["threads"])
-        for row in rows
-        for point in row["points"]
-        if point["tokens"] == 1 and point.get("weight_Bps", 0) > 0
-    ]
+    capped = [row for row in rows if row["threads"] <= (measured_cap or len(allowed))]
     tokens = max(
-        (p["tokens"] for row in rows for p in row["points"] if p["tokens"] > 1 and p.get("flops")),
+        (
+            p["tokens"]
+            for row in capped
+            for p in row["points"]
+            if p["tokens"] > 1 and p.get("flops")
+        ),
         default=0,
     )
     many = [
         (point["flops"], row["threads"])
-        for row in rows
+        for row in capped
         for point in row["points"]
         if point["tokens"] == tokens and point.get("flops", 0) > 0
     ]
     most = max(1, min(MAX_THREADS, len(allowed) - 1))
     fallback = len(_performance(characteristics) & set(allowed)) or len(allowed)
+    chosen = decode_threads(rows, name, min(MAX_THREADS, len(allowed)))
+    decode, why = chosen if chosen else (fallback, f"the performance cluster ({name} not measured)")
+    notes.append(f"threads: decode {decode}, {why}")
     # The fastest rate wins; between equal rates, fewer threads.
-    decode = max(one, key=lambda item: (item[0], -item[1]))[1] if one else fallback
     batch = max(many, key=lambda item: (item[0], -item[1]))[1] if many else fallback
     left = f", at most {most} so that a CPU stays with the I/O thread"
-    if one:
-        why = f"the measured count with the most {name} weight bytes/s at one token"
-    else:
-        why = f"the performance cluster ({name} not measured)"
-    notes.append(f"threads: decode {min(decode, most)}, {why}{left if decode > most else ''}")
     if many:
         why = f"the measured count with the most {name} FLOP/s at {tokens} tokens"
     else:
         why = f"the performance cluster ({name} not measured)"
     notes.append(f"threads: batch {min(batch, most)}, {why}{left if batch > most else ''}")
-    return Threads(min(decode, most), min(batch, most), ())
+    return Threads(decode, min(batch, most), ())
 
 
 def pinned_rate(
@@ -218,8 +257,11 @@ def placement(
     Decode streams each expert's weights once a token, so it runs where one
     token streams them fastest: on the performance cluster alone, pinned one
     thread a CPU, when the profile measured that faster than every CPU;
-    otherwise on every allowed CPU but one, unpinned. A prompt pass computes,
-    so the batch pool always takes every allowed CPU but one, unpinned.
+    otherwise unpinned. Either way on the fewest threads at the best measured
+    rate there (decode_threads): on the cluster its first CPUs, as the pinned
+    measurement placed them. The engine runs decode on fewer of them while the
+    machine's other work needs their CPUs. A prompt pass computes, so the batch
+    pool always takes every allowed CPU but one, unpinned.
     """
     logical = {row["id"] for row in characteristics["cpu"]["logical"]}
     allowed = sorted(set(runtime.cpus) & logical)
@@ -233,14 +275,15 @@ def placement(
     slow = [cpu for cpu in allowed if cpu not in performance]
     count = min(MAX_THREADS, max(1, len(allowed) - 1))
     shape = f"{len(fast)} performance and {len(slow)} other" if fast and slow else "uniform"
+    name = model.dominant_format.upper()
     if characteristics["identity"]["hard"]["platform"] == "windows" and allowed == sorted(logical):
         rows = [
             row
             for row in _unpinned(characteristics)
-            if row["format"].upper() == model.dominant_format.upper() and row["threads"] <= count
+            if row["format"].upper() == name and row["threads"] <= len(allowed)
         ]
         one = {row["threads"]: rate for row in rows for rate, _ in [_rates(row)] if rate}
-        if one and any(_rates(row)[1] for row in rows):
+        if one and any(_rates(row)[1] for row in rows if row["threads"] <= count):
             pools = _measured_counts(characteristics, model, allowed, [], measured_cap=count)
             assert pools.decode is not None
             why = f"{pools.decode} measured unpinned threads"
@@ -252,12 +295,19 @@ def placement(
                 and fast == sorted(performance)
                 else None
             )
-            if on_fast is not None and on_fast > one[pools.decode]:
+            if on_fast is not None and pools.decode in one and on_fast > one[pools.decode]:
+                # Pinned rows on the cluster's first CPUs, the whole cluster's among them.
+                prefixes = [
+                    row
+                    for row in characteristics["compute"]["cpu"]
+                    if row.get("cpus") == fast[: row["threads"]]
+                ]
+                decode, _ = decode_threads(prefixes, name, len(fast)) or (len(fast), "")
                 why = (
-                    f"the performance cluster {span(fast)}, pinned ({on_fast / GB:.1f} against "
-                    f"{one[pools.decode] / GB:.1f} GB/s on {pools.decode} unpinned threads)"
+                    f"{decode} of the performance cluster {span(fast)}, pinned ({on_fast / GB:.1f} "
+                    f"against {one[pools.decode] / GB:.1f} GB/s on {pools.decode} unpinned threads)"
                 )
-                pools = Threads(len(fast), pools.batch, (), tuple(fast))
+                pools = Threads(decode, pools.batch, (), tuple(fast[:decode]))
             reason = (
                 f"decode on {why}; prefill on {pools.batch} measured unpinned threads; no I/O CPU"
             )
@@ -265,7 +315,6 @@ def placement(
             return pools, (), reason
     why = "one CPU cluster"
     if fast and slow:
-        name = model.dominant_format.upper()
         on_fast = pinned_rate(characteristics, model, fast) if fast == sorted(performance) else None
         on_all = (
             pinned_rate(characteristics, model, allowed) if allowed == sorted(logical) else None
@@ -280,22 +329,34 @@ def placement(
         elif fast[-1] > MAX_CPU:
             why = f"the performance CPUs up to CPU {fast[-1]} exceed a CPU mask"
         else:
+            # Pinned rows on the cluster's first CPUs, the whole cluster's among them.
+            prefixes = [
+                row
+                for row in characteristics["compute"]["cpu"]
+                if row.get("cpus") == fast[: row["threads"]]
+            ]
+            decode, chosen = decode_threads(prefixes, name, len(fast)) or (len(fast), "")
             reason = (
                 f"decode on the performance cluster {span(fast)}: pinned, one token streams "
                 f"{name} at {on_fast / GB:.1f} GB/s there against {on_all / GB:.1f} GB/s on every "
                 f"CPU; prefill on {count} unpinned threads; no I/O CPU"
             )
             notes.append("threads: " + reason)
-            return Threads(len(fast), count, (), tuple(fast)), (), reason
+            if chosen:
+                notes.append(f"threads: decode {decode} of them, {chosen}")
+            return Threads(decode, count, (), tuple(fast[:decode])), (), reason
+    measured = decode_threads(_unpinned(characteristics), name, min(MAX_THREADS, len(allowed)))
+    decode, chosen = measured or (count, f"{name} not measured at one token")
     notes.append(
-        f"threads: all placement, {count} unpinned threads for the {len(allowed)} allowed CPUs "
-        f"{span(allowed)} ({shape}); decode not on a cluster alone: {why}"
+        f"threads: all placement, decode {decode} and prefill {count} unpinned threads for the "
+        f"{len(allowed)} allowed CPUs {span(allowed)} ({shape}); decode not on a cluster alone: "
+        f"{why}; {chosen}"
     )
     return (
-        Threads(count, count, ()),
+        Threads(decode, count, ()),
         (),
-        f"all placement: no I/O CPU, {count} unpinned threads for the {len(allowed)} allowed "
-        f"CPUs {span(allowed)}; decode not on a cluster alone: {why}",
+        f"all placement: no I/O CPU, decode {decode} and prefill {count} unpinned threads for the "
+        f"{len(allowed)} allowed CPUs {span(allowed)}; decode not on a cluster alone: {why}",
     )
 
 
@@ -601,7 +662,7 @@ def derive(
     choices: dict[str, tuple[str, str]] = {}
     threads, io, why = placement(characteristics, model, runtime, notes)
     choices["cpu.io_cpus"] = (span(io) if io else "", why)
-    choices["cpu.decode_participants"] = ("0", "the engine measures its decode participants")
+    choices["cpu.decode_participants"] = ("0", "decode computes on every thread of its pool")
     conflicts = launch_conflicts(threads, io, 0, platform)
     if conflicts or threads.batch is None:
         raise AssertionError("derived thread pools the launcher refuses: " + "; ".join(conflicts))

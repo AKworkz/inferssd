@@ -90,8 +90,9 @@ def test_recorded_strategy_fills_what_the_user_left_unset(tmp_path):
     assert result.code == 0 and stderr == ""
     assert STRATEGY_FACTS <= {fact.name for fact in result.observations}
     argv = list(result.argv)
-    # 61 uniform CPUs: 60 unpinned threads, one left for the I/O thread.
-    assert argv[argv.index("-t") : argv.index("-t") + 4] == ["-t", "60", "-tb", "60"]
+    # 61 uniform CPUs, one token measured on 1 and 61 threads: decode on 61, prefill on 60
+    # unpinned threads, one left for the I/O thread.
+    assert argv[argv.index("-t") : argv.index("-t") + 4] == ["-t", "61", "-tb", "60"]
     assert "-C" not in argv and argv[-2:] == ["--ctx-checkpoints", "1"]
     # With the CUDA GPU a prompt is prefilled in one pass as large as the context.
     assert argv[argv.index("-c") : argv.index("-c") + 6] == [
@@ -118,7 +119,7 @@ def test_recorded_strategy_fills_what_the_user_left_unset(tmp_path):
     assert settings.at("prefetch.depth").origin == "cli"
     receipt = json.loads((out / "strategy.json").read_text())
     assert line["strategy"] == receipt
-    assert line["launch"]["decode_threads"] == line["launch"]["batch_threads"] == 60
+    assert (line["launch"]["decode_threads"], line["launch"]["batch_threads"]) == (61, 60)
     assert receipt["inputs"]["model_drive"] == X86_DRIVE
     assert receipt["inputs"]["model_paths"] == [spec.model]
     assert sorted(receipt["chosen"]["settings"]) == [
@@ -131,7 +132,7 @@ def test_recorded_strategy_fills_what_the_user_left_unset(tmp_path):
     assert any(
         note.startswith("prefill: the CPU route for every pass") for note in receipt["notes"]
     )
-    assert receipt["chosen"]["threads"] == {"decode": 60, "batch": 60}
+    assert receipt["chosen"]["threads"] == {"decode": 61, "batch": 60}
     assert receipt["chosen"]["server_args"] == ["--ctx-checkpoints", "1"]
     assert receipt["chosen"]["one_pass"] is True
     assert (line["launch"]["context"], line["launch"]["batch"], line["launch"]["ubatch"]) == (

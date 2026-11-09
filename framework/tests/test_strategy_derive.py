@@ -28,6 +28,7 @@ from inferssd.machine.characteristics import dumps, load
 from inferssd.strategy.derive import (
     SERVER_ARGS,
     cpu_line,
+    decode_threads,
     derive,
     drive_rate,
     launch_conflicts,
@@ -86,7 +87,8 @@ def test_x86_uniform_machine_with_a_discrete_gpu(models):
     c = machine(X86)
     gpu = GPUState(X86_GPU, 30 << 30, 0)
     s = derive(c, models["dsv"], runtime(range(61), [gpu]), "linux", model_drive_key=drive(c))
-    assert s.threads == Threads(60, 60, ())
+    # The file measured one token on 1 and 61 threads only: 61 stream MXFP4 fastest.
+    assert s.threads == Threads(61, 60, ())
     assert s.settings["cpu.io_cpus"].value_text == '""'
     assert s.settings["cpu.decode_participants"].value_text == "0"
     assert "vram.budget" not in s.settings  # auto stays the registry default
@@ -229,8 +231,9 @@ def test_arm_unified_memory(models):
     c = machine(ARM)
     gpu = GPUState(ARM_GPU, None, 0)
     s = derive(c, models["muse"], runtime(range(20), [gpu]), "linux", model_drive_key=drive(c))
-    # Without pinned measurements decode stays on every CPU but one, unpinned.
-    assert s.threads == Threads(19, 19, ())
+    # Without pinned measurements decode stays unpinned, on the 10 threads that stream Q4_K at
+    # 113.0 GB/s against 80.5 on 20.
+    assert s.threads == Threads(10, 19, ())
     assert s.settings["cpu.io_cpus"].value_text == '""'
     assert "no pinned one-token Q4_K measurement" in s.settings["cpu.io_cpus"].reason
     terms = costs(s)
@@ -313,10 +316,96 @@ def test_decode_on_every_cpu(models, allowed, rates, reason):
         pin(c, fast, rates[0])
         pin(c, fast + slow, rates[1])
     s = derive(c, models["dsv"], runtime(allowed), "linux", model_drive_key=drive(c))
+    # One token was measured on 1 and 61 threads: within the allowed CPUs the rate may still
+    # rise past one thread, so decode takes them all.
     count = len(list(allowed)) - 1
-    assert s.threads == Threads(count, count, ())
+    assert s.threads == Threads(count + 1, count, ())
     assert s.settings["cpu.io_cpus"].value_text == '""'
     assert reason in s.settings["cpu.io_cpus"].reason
+
+
+# One token on the 61 vCPUs of the x86 file's machine, in GB/s: the median call and the middle
+# half of calls, by thread count.
+X86_CURVE = {
+    "MXFP4": {
+        1: (10.1, 10.0, 10.1),
+        2: (19.6, 19.4, 19.7),
+        4: (38.3, 37.6, 39.0),
+        8: (74.0, 69.5, 74.9),
+        16: (117.5, 110.4, 120.7),
+        32: (111.0, 107.1, 114.1),
+        61: (116.5, 111.1, 119.7),
+    },
+    "Q4_K": {
+        8: (90.0, 86.2, 92.4),
+        16: (110.0, 106.4, 112.5),
+        32: (116.5, 111.7, 119.3),
+        61: (114.9, 111.2, 117.1),
+    },
+}
+
+
+def curve_rows(fmt, rates, cpus=None):
+    """One-token rows of FMT at RATES (GB/s by thread count), pinned to the first of CPUS."""
+    rows = []
+    for threads, (median, low, high) in rates.items():
+        size = 8912896
+        point = {"tokens": 1, "weight_Bps": median * 1e9, "us": size / median / 1e3}
+        point.update(us_q1=size / high / 1e3, us_q3=size / low / 1e3)
+        row = {"format": fmt, "threads": threads, "rows": 4096, "cols": 4096}
+        row.update(weight_bytes=size, points=[point])
+        if cpus is not None:
+            row["cpus"] = sorted(cpus)[:threads]
+        rows.append(row)
+    return rows
+
+
+def test_decode_takes_the_fewest_threads_at_the_best_rate():
+    # MXFP4 is fastest on 16 threads; Q4_K on 32, whose slowest quarter of calls 16 reach.
+    for fmt in X86_CURVE:
+        assert decode_threads(curve_rows(fmt, X86_CURVE[fmt]), fmt, 61)[0] == 16
+    count, why = decode_threads(curve_rows("Q4_K", X86_CURVE["Q4_K"]), "Q4_K", 61)
+    assert why == (
+        "the fewest threads that stream Q4_K at one token as fast as the best: "
+        "16 (110.0 GB/s) against 32 (116.5 GB/s)"
+    )
+    # 8 threads do not reach 16: their fastest quarter is slower than its slowest.
+    rates = {n: X86_CURVE["MXFP4"][n] for n in (1, 8, 16)}
+    assert decode_threads(curve_rows("MXFP4", rates), "MXFP4", 16)[0] == 16
+    # Still rising at the most threads measured, short of the CPUs: all of them.
+    rates = {n: X86_CURVE["MXFP4"][n] for n in (1, 2, 4, 8)}
+    assert decode_threads(curve_rows("MXFP4", rates), "MXFP4", 12)[0] == 12
+    assert decode_threads(curve_rows("MXFP4", rates), "Q8_0", 12) is None
+
+
+def test_decode_on_the_threads_the_curve_saturates_at(models):
+    c = machine(X86)
+    for fmt, rates in X86_CURVE.items():
+        c["compute"]["cpu"] += curve_rows(fmt, {n: r for n, r in rates.items() if n not in (1, 61)})
+    s = derive(c, models["dsv"], runtime(range(61)), "linux", model_drive_key=drive(c))
+    assert s.threads == Threads(16, 60, ())
+    assert launch_conflicts(s.threads, (), 0, "linux") == []
+
+
+def test_decode_on_the_first_cpus_of_the_performance_cluster(models):
+    fast, slow = list(range(6, 12)), list(range(6))
+    c = two_clusters(fast, slow)
+    pin(c, fast + slow, 80e9)
+    c["compute"]["cpu"] += curve_rows(
+        "MXFP4",
+        {
+            1: (20.0, 19.0, 21.0),
+            2: (40.0, 38.0, 42.0),
+            4: (108.0, 104.0, 112.0),
+            6: (110.0, 106.0, 114.0),
+        },
+        fast,
+    )
+    s = derive(c, models["dsv"], runtime(range(12)), "linux", model_drive_key=drive(c))
+    assert s.threads == Threads(4, 11, (), (6, 7, 8, 9))
+    assert "110.0 GB/s there against 80.0 GB/s" in s.settings["cpu.io_cpus"].reason
+    assert threadpools(s.threads, "linux") == s.threads
+    assert launch_conflicts(s.threads, (), 0, "linux") == []
 
 
 def test_prefill_split_crossing(models):
@@ -350,7 +439,7 @@ def test_prefill_split_crossing(models):
 def test_affinity_limits_the_threads_and_the_cpu_line(models):
     c = machine(X86)
     s = derive(c, models["dsv"], runtime([3, 4, 5, 6, 7, 99]), "linux", model_drive_key=None)
-    assert s.threads == Threads(4, 4, ())
+    assert s.threads == Threads(5, 4, ())
     assert "on 4 threads (the 1- and 61-thread measurements)" in s.settings["place.costs"].reason
     one = derive(c, models["dsv"], runtime([3]), "linux", model_drive_key=None)
     assert one.threads == Threads(1, 1, ())
@@ -363,13 +452,12 @@ def test_macos_measured_thread_counts_and_budget(models):
     s = derive(
         c, models["dsv"], runtime(range(10), budget=12 << 30), "darwin", model_drive_key=drive(c)
     )
-    # 10 threads stream MXFP4 weights fastest and compute it fastest at 512 tokens; both pools
-    # leave a CPU to the I/O thread.
-    assert s.threads == Threads(9, 9, ())
-    assert (
-        "threads: decode 9, the measured count with the most MXFP4 weight bytes/s at one token, "
-        "at most 9 so that a CPU stays with the I/O thread"
-    ) in s.notes
+    # 10 threads stream MXFP4 weights fastest and compute it fastest at 512 tokens; the batch
+    # pool leaves a CPU to the I/O thread.
+    assert s.threads == Threads(10, 9, ())
+    assert "threads: decode 10, MXFP4 streams fastest at one token on 10 threads (115.6 GB/s)" in (
+        s.notes
+    )
     assert s.settings["cpu.io_cpus"].value_text == '""'
     assert s.settings["host.budget_mib"].value_text == "12288"
     # macOS keeps the engine's host margin: no share of memory is kept out of the RAM cache.
@@ -651,8 +739,12 @@ def test_windows_chooses_measured_eligible_pools_and_keeps_their_placement(
     pin(c, fast, fast_rate, name)
     pin(c, list(range(8)), 75e9, name)
     s = derive(c, models["dsv"], runtime(range(8)), "windows", model_drive_key=drive(c))
-    assert s.threads == Threads(4, 4, (), tuple(fast) if pinned else ())
-    assert "4 measured unpinned threads" in s.settings["cpu.io_cpus"].reason
+    # Decode takes 8 threads where they stream fastest, as the engine then leaves the other work
+    # its CPUs; 4 when 8 are slow, and pinned to the cluster where it streams faster still.
+    decode = 8 if full_rate > 50e9 else 4
+    on_cluster = pinned and decode == 4
+    assert s.threads == Threads(decode, 4, (), tuple(fast) if on_cluster else ())
+    assert f"{decode} measured unpinned threads" in s.settings["cpu.io_cpus"].reason
 
 
 def test_windows_selects_decode_and_batch_from_their_own_measurements(models):
@@ -676,9 +768,12 @@ def test_windows_without_complete_eligible_measurements_keeps_its_fallback(model
         if row["format"] == name and row.get("cpus"):
             row["points"][0]["weight_Bps"] = 80e9 if len(row["cpus"]) == 8 else 60e9
     s = derive(c, models["dsv"], runtime(range(8)), "windows", model_drive_key=drive(c))
-    assert s.threads == Threads(7, 7, ())
+    # Without one-token rows decode keeps every CPU but one; with them the 8 threads that stream
+    # fastest.
+    decode = 7 if missing == "one" else 8
+    assert s.threads == Threads(decode, 7, ())
     assert s.settings["cpu.io_cpus"].reason == (
-        "all placement: no I/O CPU, 7 unpinned threads for the 8 allowed CPUs 0-7; "
-        f"decode not on a cluster alone: every CPU streams {name} at one token as fast or faster "
-        "(80.0 against 60.0 GB/s pinned)"
+        f"all placement: no I/O CPU, decode {decode} and prefill 7 unpinned threads for the 8 "
+        f"allowed CPUs 0-7; decode not on a cluster alone: every CPU streams {name} at one token "
+        "as fast or faster (80.0 against 60.0 GB/s pinned)"
     )

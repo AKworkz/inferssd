@@ -30,22 +30,6 @@ bool process_cpus(cpu_list & cpus, std::string * why = nullptr);
 // Sets it selected where they meet it (Windows); process_cpus (macOS).
 bool current_thread_cpus(cpu_list & cpus, std::string * why = nullptr);
 
-// The process CPUs split into the fastest cluster and the rest. A homogeneous
-// or unreadable machine has every CPU in `fast`. Only a candidate for thread
-// placement; callers still measure.
-struct cpu_topology {
-    cpu_list fast;
-    cpu_list slow;
-};
-bool topology(cpu_topology & out, std::string * why = nullptr);
-
-namespace detail {
-// The Linux cluster rule on (cpu, capacity or max frequency) pairs, all
-// positive: split at the largest relative drop between sorted values; a drop
-// under 10% means one cluster. Exposed so tests can feed synthetic machines.
-bool split_fastest(const std::vector<std::pair<int, double>> & values, cpu_topology & out);
-} // namespace detail
-
 // False on macOS, where pinning is a successful no-op.
 bool affinity_supported();
 
@@ -65,6 +49,13 @@ bool set_thread_role(thread_role role);
 // CPU time consumed by the calling thread; 0 if unreadable. Windows advances
 // in scheduler ticks, so short intervals can read as zero.
 uint64_t thread_cpu_time_ns();
+
+// The time `cpus` spent running anything, summed over them, whatever the
+// process: user, system and interrupt time, and on Linux the time a hypervisor
+// took from them (steal). The system counts it per CPU in ticks of `tick_ns`,
+// so a reading is up to one tick behind on each CPU. False where these CPUs'
+// times cannot be read: Windows reads only every processor of the group.
+bool cpus_busy_ns(const cpu_list & cpus, uint64_t & busy_ns, uint64_t & tick_ns, std::string * why = nullptr);
 
 // The CPU the calling thread runs on, or -1 (macOS, or not in group 0).
 int current_cpu();
