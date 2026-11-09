@@ -3632,8 +3632,9 @@ extern "C" bool kimi_cpu_sink_cache_configure(struct kimi_cpu_sink * sink, uint6
     catch (const std::exception & e) { sink_error(error, error_size, e.what()); return false; }
 }
 
-extern "C" bool kimi_cpu_sink_cache_begin(struct kimi_cpu_sink * sink, uint64_t epoch,
-        uint64_t token, bool decode, char * error, size_t error_size) {
+// kimi_cpu_sink_cache_begin, and with `request` kimi_cpu_sink_request_begin.
+static bool sink_phase_begin(struct kimi_cpu_sink * sink, uint64_t epoch, uint64_t token, bool decode, bool request,
+        char * error, size_t error_size) {
     sink_error(error, error_size, "");
     if (!sink) { sink_error(error, error_size, "null CPU sink"); return false; }
     std::lock_guard<sink_run_mutex> serial(sink->run_mutex); sink->prefetch_drain();
@@ -3642,7 +3643,7 @@ extern "C" bool kimi_cpu_sink_cache_begin(struct kimi_cpu_sink * sink, uint64_t 
         sink->measure_decode_share(decode, epoch, token);
         sink->refresh_floor(decode ? "decode" : "prefill");
         sink->file_identities.clear();
-        sink->vram.begin(epoch, token, decode, sink->cache);
+        sink->vram.begin(epoch, token, decode, sink->cache, request);
         sink->cache.begin(epoch, token, decode);
         sink->begin_margin_interval(decode);
     } catch (const std::exception & e) {
@@ -3659,6 +3660,15 @@ extern "C" bool kimi_cpu_sink_cache_begin(struct kimi_cpu_sink * sink, uint64_t 
             "\"epoch\":%llu,\"token\":%llu}\n", (unsigned long long) epoch, (unsigned long long) token);
     }
     return true;
+}
+
+extern "C" bool kimi_cpu_sink_cache_begin(struct kimi_cpu_sink * sink, uint64_t epoch,
+        uint64_t token, bool decode, char * error, size_t error_size) {
+    return sink_phase_begin(sink, epoch, token, decode, false, error, error_size);
+}
+
+extern "C" bool kimi_cpu_sink_request_begin(struct kimi_cpu_sink * sink, uint64_t epoch, char * error, size_t error_size) {
+    return sink_phase_begin(sink, epoch, 0, false, true, error, error_size);
 }
 
 extern "C" bool kimi_cpu_sink_vram_phase_complete(

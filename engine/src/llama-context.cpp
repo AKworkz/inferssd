@@ -973,7 +973,7 @@ bool llama_context::moe_prefill_phase_workspace(bool active, uint32_t requested_
     // prompts. Release before every early return or prefill workspace reserve.
     if (active && cpu_sink_runtime) {
         if (sched) { synchronize(); }
-        cpu_sink_runtime->begin(nullptr, 0, false);
+        cpu_sink_runtime->begin_request();
         cpu_sink_cache_batch_decode = false;
     }
     const bool graph_phase_gate_enabled = dense_gpu_phase_gate_enabled;

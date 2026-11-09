@@ -33,6 +33,9 @@ int main() {
     changed = *api;
     changed.decode_threads = nullptr;
     if (ssd::cpu::valid(&changed)) { return 7; }
+    changed = *api;
+    changed.request_begin = nullptr;
+    if (ssd::cpu::valid(&changed)) { return 8; }
     std::puts("CPU_EXECUTOR_REGISTRY_ABI_PASS");
     return 0;
 }

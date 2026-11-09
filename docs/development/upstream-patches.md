@@ -78,7 +78,7 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `ggml/src/ggml-cpu/arch/arm/quants.c` | 0 | 1 |
 | `ggml/src/ggml-cpu/arch/x86/quants.c` | 138 | 7 |
 | `ggml/src/ggml-cpu/ggml-cpu.c` | 3711 | 3650 |
-| `ggml/src/ggml-cpu/ggml-cpu.cpp` | 142 | 6 |
+| `ggml/src/ggml-cpu/ggml-cpu.cpp` | 146 | 6 |
 | `ggml/src/ggml-cpu/ops.cpp` | 751 | 12 |
 | `ggml/src/ggml-cpu/ops.h` | 6 | 0 |
 | `ggml/src/ggml-cpu/quants.c` | 1 | 0 |
@@ -185,5 +185,5 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `tools/server/server-task.h` | 23 | 80 |
 | `tools/server/tests/utils.py` | 2 | 2 |
 
-Total: 17652 added, 5686 removed across 153 upstream paths.
+Total: 17656 added, 5686 removed across 153 upstream paths.
 <!-- END UPSTREAM INVENTORY -->

@@ -261,7 +261,7 @@ struct sink_vram {
         }
         placement_due = false;
     }
-    void begin(uint64_t epoch, uint64_t token, bool decode, sink_cache & cache) {
+    void begin(uint64_t epoch, uint64_t token, bool decode, sink_cache & cache, bool request = false) {
         if (!context) { return; }
         placement_due = true;
         // Graph-layer prefill calls repeat the context boundary transition.
@@ -269,8 +269,10 @@ struct sink_vram {
         // scheduler reserve would incorrectly re-arm OOM reclamation mid-graph.
         // A prefill phase stays open until phase_complete(true) or a decode
         // begin, not until the next decode graph: a request that samples no
-        // decode step must still let the next request reopen prefill.
-        if (prefill_open && !decode) { return; }
+        // decode step must still let the next request reopen prefill. A
+        // request's boundary opens a new phase even then: a prompt evaluated
+        // outside any request leaves its phase open.
+        if (prefill_open && !decode && !request) { return; }
         if (deferred_upload) {
             // Anything but the next decode token of this epoch may release the arena or the RAM cache.
             const bool next = decode && this->decode && have_token && epoch == this->epoch && token == this->token + 1;

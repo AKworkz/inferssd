@@ -61,6 +61,7 @@ struct llama_kimi_cpu_sink_runtime {
     decltype(&kimi_cpu_sink_destroy) destroy = nullptr;
     decltype(&kimi_cpu_sink_cache_configure) cache_configure = nullptr;
     decltype(&kimi_cpu_sink_cache_begin) cache_begin = nullptr;
+    decltype(&kimi_cpu_sink_request_begin) request_begin = nullptr;
     decltype(&kimi_cpu_sink_vram_phase_complete) vram_phase_complete = nullptr;
     decltype(&kimi_cpu_sink_cache_get_stats) cache_get_stats = nullptr;
     decltype(&ssd::cpu::cache_make_room_configured) cache_make_room = nullptr; // optional
@@ -87,7 +88,7 @@ struct llama_kimi_cpu_sink_runtime {
     llama_seq_id sequence = 0;
     bool cache_decode_active = false;
     // A prefill phase is open from a prefill begin() until phase_complete(true) or a decode begin(); the graph
-    // reserves inside it repeat the request-boundary transition and are skipped.
+    // reserves inside it repeat the request-boundary transition and are skipped. begin_request() opens a new one.
     bool prefill_open = false;
     bool cache_keep_across_requests = false;
     // The file pages the weight rows of the last prefill graph reserved gather (prefill_room): the load step leaves
@@ -197,6 +198,7 @@ struct llama_kimi_cpu_sink_runtime {
         destroy = cpu_api->destroy;
         cache_configure = cpu_api->cache_configure;
         cache_begin = cpu_api->cache_begin;
+        request_begin = cpu_api->request_begin;
         vram_phase_complete = cpu_api->vram_phase_complete;
         cache_get_stats = cpu_api->cache_get_stats;
         prefetch_hint = cpu_api->prefetch_hint;
@@ -260,17 +262,30 @@ struct llama_kimi_cpu_sink_runtime {
 
     void begin(ggml_backend_reg_t registry, uint64_t token, bool decode, llama_seq_id seq = 0) {
         std::lock_guard<std::mutex> lock(mutex);
+        transition(registry, token, decode, seq, false);
+    }
+    // A request's prefill boundary (llama_ssd_prefill_phase): a new prefill phase, also when one is open. A prompt
+    // evaluated outside any request leaves its phase open, since no decode token follows it: the server evaluates two
+    // tokens at load to probe sequence removal, and its first request would otherwise run inside that phase.
+    void begin_request() {
+        std::lock_guard<std::mutex> lock(mutex);
+        transition(nullptr, 0, false, 0, true);
+    }
+    // Requires mutex.
+    void transition(ggml_backend_reg_t registry, uint64_t token, bool decode, llama_seq_id seq, bool request) {
         const bool observe = services.debug && (services.debug->trace || services.debug->profile);
         if (!cache_budget && !vram_budget && !observe) { return; }
         if (decode) { initialize(registry); }
-        if (!sink || (!decode && prefill_open)) { return; }
+        if (!sink || (!decode && prefill_open && !request)) { return; }
         char error[512] = {};
         if (decode && sequence_known && sequence != seq) {
             if (!cache_begin(sink, epoch, token, false, error, sizeof(error))) {
                 GGML_ABORT("CPU sink cache sequence reset failed: %s; no fallback", error);
             }
         }
-        if (!cache_begin(sink, epoch, token, decode, error, sizeof(error))) {
+        const bool begun = request ? request_begin(sink, epoch, error, sizeof(error)) :
+            cache_begin(sink, epoch, token, decode, error, sizeof(error));
+        if (!begun) {
             GGML_ABORT("CPU sink cache phase/token transition failed: %s; no fallback", error);
         }
         sequence_known = decode;

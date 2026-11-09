@@ -93,6 +93,11 @@ GGML_BACKEND_API bool kimi_cpu_sink_cache_configure(
 GGML_BACKEND_API bool kimi_cpu_sink_cache_begin(
         struct kimi_cpu_sink * sink, uint64_t epoch, uint64_t token, bool decode,
         char * error, size_t error_size);
+// A request's prefill boundary: cache_begin with decode=false, which also opens a
+// new prefill phase when one is open. Repeated cache_begin(false) calls stay in an
+// open phase, and a prompt evaluated outside any request leaves its phase open.
+GGML_BACKEND_API bool kimi_cpu_sink_request_begin(
+        struct kimi_cpu_sink * sink, uint64_t epoch, char * error, size_t error_size);
 // Completes the phase transition after the scheduler reserve. decode=false
 // only disarms the prefill OOM reclaimer; decode=true also grows the optional
 // global VRAM tier. No-op when the elastic extension is unavailable or off.
