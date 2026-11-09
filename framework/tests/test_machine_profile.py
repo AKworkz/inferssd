@@ -91,7 +91,7 @@ def test_linux_profile_end_to_end(tmp_path):
     }
     # The first shard brings its set; the two shards of at least 1 GiB are read, largest first.
     assert runner.calls == [
-        (["/opt/inferssd/bin/inferssd-cpuprobe", "--threads", "1,2,4"], 1800.0),
+        (["/opt/inferssd/bin/inferssd-cpuprobe", "--threads", "1,2,3,4"], 1800.0),
         (["/opt/inferssd/bin/inferssd-memprobe"], 900.0),
         (["/opt/inferssd/bin/inferssd-ssdprobe", "--file", files[1], "--file", files[0]], 1800.0),
     ]
@@ -470,7 +470,7 @@ def test_darwin_profile_end_to_end(tmp_path):
     value, _ = run(host, [str(models)], runner)
     validate(value)
     assert executables(runner) == ["inferssd-cpuprobe", "inferssd-ssdprobe"]
-    assert runner.calls[0][0][1:] == ["--threads", "1,2,4,8,10"]
+    assert runner.calls[0][0][1:] == ["--threads", "1,2,4,8,9,10"]
     assert value["cpu"]["affinity_supported"] is False
     assert [(row["kind"], len(row["cpus"])) for row in value["cpu"]["clusters"]] == [
         ("performance", 4),

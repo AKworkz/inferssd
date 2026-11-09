@@ -186,54 +186,46 @@ def decode_threads(rows: Sequence[ComputeRow], name: str, most: int) -> Optional
     )
 
 
-def _measured_counts(
-    characteristics: Characteristics,
-    model: ModelFacts,
-    allowed: Sequence[int],
-    notes: list[str],
-    measured_cap: Optional[int] = None,
-) -> Threads:
-    """The measured unpinned thread counts: decode on the fewest threads at the best rate
-    (decode_threads), prefill on the count that computes the dominant format fastest, of the
-    counts up to MEASURED_CAP where given; prefill leaves a CPU to the sink's I/O thread, as
-    where threads are pinned.
+def prefill_threads(rows: Sequence[ComputeRow], name: str, most: int) -> Optional[tuple[int, str]]:
+    """The measured thread count, up to MOST, that computes NAME fastest at the longest prompt
+    measured, and why; between equal rates, fewer threads. None when nothing was measured.
+
+    A prompt pass computes its CPU experts. Past some count a thread adds little and every one
+    more waits at each barrier for the slowest: on CPUs with slower cores, or where the CPUs are
+    shared with other work, the fastest count is short of every CPU. The CPU probe measures
+    every CPU but one too (probe_threads), so MOST is itself measured. A profile without it
+    whose fastest count up to MOST is the most threads it measured there, with a count above
+    MOST faster still, computes faster still on more threads: prefill then takes MOST, as
+    decode_threads takes MOST where its rate may still rise.
     """
-    name = model.dominant_format.upper()
-    rows = [
-        row
-        for row in _unpinned(characteristics)
-        if row["format"].upper() == name and row["threads"] <= len(allowed)
-    ]
-    capped = [row for row in rows if row["threads"] <= (measured_cap or len(allowed))]
+    own = [row for row in rows if row["format"].upper() == name]
     tokens = max(
-        (
-            p["tokens"]
-            for row in capped
-            for p in row["points"]
-            if p["tokens"] > 1 and p.get("flops")
-        ),
+        (p["tokens"] for row in own for p in row["points"] if p["tokens"] > 1 and p.get("flops")),
         default=0,
     )
-    many = [
-        (point["flops"], row["threads"])
-        for row in capped
+    rates = {
+        row["threads"]: point["flops"]
+        for row in own
         for point in row["points"]
         if point["tokens"] == tokens and point.get("flops", 0) > 0
-    ]
-    most = max(1, min(MAX_THREADS, len(allowed) - 1))
-    fallback = len(_performance(characteristics) & set(allowed)) or len(allowed)
-    chosen = decode_threads(rows, name, min(MAX_THREADS, len(allowed)))
-    decode, why = chosen if chosen else (fallback, f"the performance cluster ({name} not measured)")
-    notes.append(f"threads: decode {decode}, {why}")
-    # The fastest rate wins; between equal rates, fewer threads.
-    batch = max(many, key=lambda item: (item[0], -item[1]))[1] if many else fallback
-    left = f", at most {most} so that a CPU stays with the I/O thread"
-    if many:
-        why = f"the measured count with the most {name} FLOP/s at {tokens} tokens"
-    else:
-        why = f"the performance cluster ({name} not measured)"
-    notes.append(f"threads: batch {min(batch, most)}, {why}{left if batch > most else ''}")
-    return Threads(decode, min(batch, most), ())
+    }
+    within = {count: flops for count, flops in rates.items() if count <= most}
+    if not within:
+        return None
+    count = max(within, key=lambda n: (within[n], -n))
+    faster = [n for n, flops in rates.items() if n > most and flops > within[count]]
+    if count == max(within) < most and faster:
+        return most, (
+            f"{name} computes fastest at {tokens} tokens on the most threads measured up to "
+            f"{most}, {count} ({within[count] / 1e9:.0f} GFLOP/s), and faster on {max(faster)} "
+            f"({rates[max(faster)] / 1e9:.0f} GFLOP/s), so up to {most}, which leaves a CPU to the "
+            "I/O threads"
+        )
+    return count, (
+        f"the measured count with the most {name} FLOP/s at {tokens} tokens "
+        f"({within[count] / 1e9:.0f} GFLOP/s), of up to {most} so that a CPU stays with the I/O "
+        "threads"
+    )
 
 
 def pinned_rate(
@@ -249,82 +241,87 @@ def pinned_rate(
     return None
 
 
+def io_cpu(allowed: Sequence[int], strict: Sequence[int], performance: set[int]) -> tuple[int, ...]:
+    """The CPU the sink's I/O threads keep: the one CPU the batch pool leaves them.
+
+    The I/O thread submits the expert reads and takes their completions. Unpinned beside a
+    batch pool on every other CPU, it moves between CPUs, and its drive queue and completion
+    interrupts move with it, onto CPUs that sleep between them: on a DGX Spark a cold
+    523-token DeepSeek-V4.1 prefill read 11.3 against 12.0 GB/s at the same queue depth, and
+    took 17.8 against 16.8 s, until the thread kept one CPU. That CPU is outside the strict
+    compute CPUs and, on a machine with a faster cluster, outside it: the highest such CPU.
+    None when fewer than two CPUs are allowed.
+    """
+    free = [cpu for cpu in allowed if cpu not in set(strict)]
+    if len(allowed) < 2 or not free:
+        return ()
+    other = [cpu for cpu in free if cpu not in performance]
+    return ((other or free)[-1],)
+
+
 def placement(
     characteristics: Characteristics, model: ModelFacts, runtime: RuntimeFacts, notes: list[str]
 ) -> tuple[Threads, tuple[int, ...], str]:
-    """The thread pools, the I/O CPUs and the reason for both.
+    """The thread pools, the I/O CPUs and the reason for both, by one rule on every platform.
 
-    Decode streams each expert's weights once a token, so it runs where one
-    token streams them fastest: on the performance cluster alone, pinned one
-    thread a CPU, when the profile measured that faster than every CPU;
-    otherwise unpinned. Either way on the fewest threads at the best measured
-    rate there (decode_threads): on the cluster its first CPUs, as the pinned
-    measurement placed them. The engine runs decode on fewer of them while the
-    machine's other work needs their CPUs. A prompt pass computes, so the batch
-    pool always takes every allowed CPU but one, unpinned.
+    A prompt pass computes: it runs unpinned on the measured count that computes the dominant
+    format fastest (prefill_threads), at most every allowed CPU but one, which the sink's I/O
+    threads keep wherever threads can be pinned (io_cpu). Decode streams each expert's weights
+    once a token, so it runs where one token streams them fastest: on the fewest unpinned
+    threads at the best measured rate (decode_threads), or, where threads can be pinned and the
+    profile measured it faster than those threads, on the performance cluster alone, one thread
+    a CPU, its first CPUs as the pinned measurement placed them. The engine runs decode on fewer
+    of them while the machine's other work needs their CPUs.
     """
     logical = {row["id"] for row in characteristics["cpu"]["logical"]}
     allowed = sorted(set(runtime.cpus) & logical)
     if not allowed:
         raise ValueError("none of the CPUs this process may use is in the machine characteristics")
+    name = model.dominant_format.upper()
+    unpinned = _unpinned(characteristics)
+    most = min(MAX_THREADS, max(1, len(allowed) - 1))
+    batch, batch_why = prefill_threads(unpinned, name, most) or (
+        most,
+        f"every allowed CPU but one, which stays with the I/O threads ({name} not measured at a "
+        "prompt)",
+    )
+    decode, decode_why = decode_threads(unpinned, name, min(MAX_THREADS, len(allowed))) or (
+        most,
+        f"{name} not measured at one token",
+    )
+    notes.append(f"threads: decode {decode}, {decode_why}")
+    notes.append(f"threads: prefill {batch}, {batch_why}")
     if not characteristics["cpu"]["affinity_supported"]:
-        threads = _measured_counts(characteristics, model, allowed, notes)
-        return threads, (), "no I/O CPU: threads cannot be pinned on this platform"
+        return (
+            Threads(decode, batch, ()),
+            (),
+            "no I/O CPU: threads cannot be pinned on this platform",
+        )
     performance = _performance(characteristics)
     fast = [cpu for cpu in allowed if cpu in performance]
     slow = [cpu for cpu in allowed if cpu not in performance]
-    count = min(MAX_THREADS, max(1, len(allowed) - 1))
     shape = f"{len(fast)} performance and {len(slow)} other" if fast and slow else "uniform"
-    name = model.dominant_format.upper()
-    if characteristics["identity"]["hard"]["platform"] == "windows" and allowed == sorted(logical):
-        rows = [
-            row
-            for row in _unpinned(characteristics)
-            if row["format"].upper() == name and row["threads"] <= len(allowed)
-        ]
-        one = {row["threads"]: rate for row in rows for rate, _ in [_rates(row)] if rate}
-        if one and any(_rates(row)[1] for row in rows if row["threads"] <= count):
-            pools = _measured_counts(characteristics, model, allowed, [], measured_cap=count)
-            assert pools.decode is not None
-            why = f"{pools.decode} measured unpinned threads"
-            on_fast = (
-                pinned_rate(characteristics, model, fast)
-                if fast
-                and len(fast) <= count
-                and fast[-1] <= MAX_CPU
-                and fast == sorted(performance)
-                else None
-            )
-            if on_fast is not None and pools.decode in one and on_fast > one[pools.decode]:
-                # Pinned rows on the cluster's first CPUs, the whole cluster's among them.
-                prefixes = [
-                    row
-                    for row in characteristics["compute"]["cpu"]
-                    if row.get("cpus") == fast[: row["threads"]]
-                ]
-                decode, _ = decode_threads(prefixes, name, len(fast)) or (len(fast), "")
-                why = (
-                    f"{decode} of the performance cluster {span(fast)}, pinned ({on_fast / GB:.1f} "
-                    f"against {one[pools.decode] / GB:.1f} GB/s on {pools.decode} unpinned threads)"
-                )
-                pools = Threads(decode, pools.batch, (), tuple(fast[:decode]))
-            reason = (
-                f"decode on {why}; prefill on {pools.batch} measured unpinned threads; no I/O CPU"
-            )
-            notes.append("threads: " + reason)
-            return pools, (), reason
     why = "one CPU cluster"
     if fast and slow:
         on_fast = pinned_rate(characteristics, model, fast) if fast == sorted(performance) else None
-        on_all = (
-            pinned_rate(characteristics, model, allowed) if allowed == sorted(logical) else None
+        on_pool = next(
+            (
+                one
+                for row in unpinned
+                if row["format"].upper() == name and row["threads"] == decode
+                for one, _ in [_rates(row)]
+                if one
+            ),
+            None,
         )
-        if on_fast is None or on_all is None:
-            why = f"no pinned one-token {name} measurement of the performance cluster and every CPU"
-        elif on_fast <= on_all:
+        if on_fast is None:
+            why = f"no one-token {name} measurement of the performance cluster pinned"
+        elif on_pool is None:
+            why = f"no one-token {name} measurement of {decode} unpinned threads"
+        elif on_fast <= on_pool:
             why = (
-                f"every CPU streams {name} at one token as fast or faster "
-                f"({on_all / GB:.1f} against {on_fast / GB:.1f} GB/s pinned)"
+                f"{decode} unpinned threads stream {name} at one token as fast or faster "
+                f"({on_pool / GB:.1f} against {on_fast / GB:.1f} GB/s pinned)"
             )
         elif fast[-1] > MAX_CPU:
             why = f"the performance CPUs up to CPU {fast[-1]} exceed a CPU mask"
@@ -335,29 +332,34 @@ def placement(
                 for row in characteristics["compute"]["cpu"]
                 if row.get("cpus") == fast[: row["threads"]]
             ]
-            decode, chosen = decode_threads(prefixes, name, len(fast)) or (len(fast), "")
+            pinned, chosen = decode_threads(prefixes, name, len(fast)) or (len(fast), "")
+            io = io_cpu(allowed, fast[:pinned], performance)
             reason = (
                 f"decode on the performance cluster {span(fast)}: pinned, one token streams "
-                f"{name} at {on_fast / GB:.1f} GB/s there against {on_all / GB:.1f} GB/s on every "
-                f"CPU; prefill on {count} unpinned threads; no I/O CPU"
+                f"{name} at {on_fast / GB:.1f} GB/s there against {on_pool / GB:.1f} GB/s on "
+                f"{decode} unpinned threads; prefill on {batch} unpinned threads; {_io_reason(io)}"
             )
             notes.append("threads: " + reason)
             if chosen:
-                notes.append(f"threads: decode {decode} of them, {chosen}")
-            return Threads(decode, count, (), tuple(fast[:decode])), (), reason
-    measured = decode_threads(_unpinned(characteristics), name, min(MAX_THREADS, len(allowed)))
-    decode, chosen = measured or (count, f"{name} not measured at one token")
+                notes.append(f"threads: decode {pinned} of them, {chosen}")
+            return Threads(pinned, batch, (), tuple(fast[:pinned])), io, reason
+    io = io_cpu(allowed, (), performance)
     notes.append(
-        f"threads: all placement, decode {decode} and prefill {count} unpinned threads for the "
+        f"threads: all placement, decode {decode} and prefill {batch} unpinned threads for the "
         f"{len(allowed)} allowed CPUs {span(allowed)} ({shape}); decode not on a cluster alone: "
-        f"{why}; {chosen}"
+        f"{why}"
     )
     return (
-        Threads(decode, count, ()),
-        (),
-        f"all placement: no I/O CPU, decode {decode} and prefill {count} unpinned threads for the "
-        f"{len(allowed)} allowed CPUs {span(allowed)}; decode not on a cluster alone: {why}",
+        Threads(decode, batch, ()),
+        io,
+        f"all placement: {_io_reason(io)}, decode {decode} and prefill {batch} unpinned "
+        f"threads for the {len(allowed)} allowed CPUs {span(allowed)}; decode not on a "
+        f"cluster alone: {why}",
     )
+
+
+def _io_reason(io: Sequence[int]) -> str:
+    return f"I/O on CPU {span(io)}" if io else "no I/O CPU: no CPU to spare"
 
 
 def launch_conflicts(

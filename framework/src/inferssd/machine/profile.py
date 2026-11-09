@@ -240,12 +240,16 @@ def curve_threads(count: int) -> list[int]:
 
 
 def probe_threads(cpu: CPU) -> list[int]:
-    """1, 2, 4, ... up to every logical CPU, and the performance-cluster size."""
+    """1, 2, 4, ... up to every logical CPU, the performance-cluster size, and every CPU but one.
+
+    A prompt pass runs on the measured count that computes fastest of those that
+    leave the sink's I/O threads a CPU, so every CPU but one is measured as well.
+    """
     total = len(cpu["logical"])
     fast = next(
         (len(row["cpus"]) for row in cpu["clusters"] if row["kind"] == "performance"), total
     )
-    return sorted({*curve_threads(total), fast})
+    return sorted({*curve_threads(total), fast, *([total - 1] if total > 1 else [])})
 
 
 def pinned_sets(cpu: CPU) -> list[list[int]]:

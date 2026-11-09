@@ -83,8 +83,17 @@ memory, the available memory) to choose:
   runs decode on fewer while the machine's other work needs their CPUs); where
   the CPUs allow it, which CPUs the decode threads use: the performance cluster
   alone, its first CPUs, one thread pinned to each, when one token streams the
-  format faster there than on every CPU;
-- the prefill thread count, leaving a CPU to the sink's I/O thread;
+  format faster there than on those decode threads unpinned;
+- the prefill thread count: the measured count that computes the format fastest at
+  the longest prompt measured, of the counts that leave one CPU to the sink's I/O
+  threads (every CPU but one is measured too; a profile without that count takes it
+  when the most threads it measured below it are the fastest there and more threads
+  measured faster still); the same rule on every platform;
+- the CPU the sink's I/O threads keep, where threads can be pinned (`cpu.io_cpus`):
+  outside the pinned decode CPUs, on the slower cluster where there is one, the
+  highest such. Unpinned beside a prefill pool on every other CPU, the I/O thread and
+  its drive queue and completion interrupts move between CPUs that sleep in between,
+  and the drive reads slower;
 - the starting estimates the engine uses to place experts between the CPU and
   the GPU (it refines them as it runs);
 - `vram.budget = 0` when the engine has CUDA and no CUDA GPU is usable, and on
@@ -95,14 +104,8 @@ memory, the available memory) to choose:
   VRAM tier for decode) and one prefill pass per prompt; on
   a GPU sharing host memory, a host margin of 4096 MiB (`host.headroom_mib`).
 
-On Windows, when the process can use all profiled CPUs and eligible single-
-and multi-token measurements exist, the launch selects measured unpinned
-counts within the CPU reserve cap. It compares the
-chosen decode count with an eligible pinned performance-cluster measurement
-and preserves the selected count and CPU mask; prefill follows the fastest
-measured multi-token rate. A measured full-machine count is never relabeled as
-one fewer thread. Without eligible single-token or multi-token measurements,
-the existing fallback remains.
+Without a measurement of the model's weight format, both pools take every
+allowed CPU but one.
 
 Only the prefill route and the pass size change the model's output, the way
 any GPU kernel or batch shape does; the rest keeps it bit for bit. The launch fills only the settings
@@ -116,7 +119,7 @@ directory and to the settings file the launch generates.
 | --- | --- | --- |
 | `cpu` | sysfs on Linux, `sysctl` on macOS, CPU Sets on Windows; ISA from `inferssd-cpuprobe` | Logical CPUs with core, package, SMT siblings, `cpu_capacity` and maximum frequency; performance and efficiency clusters; whether threads can be pinned; the instruction-set features ggml reports (build options such as OpenMP or repacking are left out) |
 | `memory` | `/proc/meminfo`, `hw.memsize` or `GlobalMemoryStatusEx`; `inferssd-cpuprobe` | Total memory, page size, whether the GPU shares system memory, DRAM read bandwidth per thread count |
-| `compute` | `inferssd-cpuprobe` | ggml CPU matrix-multiply speed per weight format at 1, 2, 4, ... threads up to every CPU and at the performance cluster's size: weight bytes per second for one token, FLOP/s for more tokens, with each point's median call and quartiles; on Linux machines with several CPU clusters, also one token with a thread pinned to each CPU of each cluster and of every CPU, and on the performance cluster's first 1, 2, 4, ... CPUs (rows with `cpus`) |
+| `compute` | `inferssd-cpuprobe` | ggml CPU matrix-multiply speed per weight format at 1, 2, 4, ... threads up to every CPU, at the performance cluster's size and at every CPU but one: weight bytes per second for one token, FLOP/s for more tokens, with each point's median call and quartiles; on Linux machines with several CPU clusters, also one token with a thread pinned to each CPU of each cluster and of every CPU, and on the performance cluster's first 1, 2, 4, ... CPUs (rows with `cpus`) |
 | `gpus` | `inferssd-memprobe` (Linux with NVIDIA GPUs) | VRAM size, host-to-device (pinned and pageable), device-to-host and device-to-device copy rates, and device read bandwidth, for every GPU `nvidia-smi` lists |
 | `storage:<drive>` | `inferssd-ssdprobe`, one per drive | Random-read bandwidth and latency by request size and queue depth, read with the engine's own reader; the knee queue depth per size |
 
