@@ -58,7 +58,9 @@ struct files {
     std::atomic<uint64_t> limit{8*GiB}, current{GiB}, available{8*GiB}, file{0}, refault{0};
     std::atomic<bool> readable{true};
     std::atomic<bool> fail_usage{false};
+    mutable std::atomic<uint64_t> reads{0};
     bool read(const std::string & path, std::string & text) const {
+        ++reads;
         if (!readable) { return false; }
         if (path == "/proc/self/cgroup") { text = "0::/fixture\n"; }
         else if (path == "/sys/fs/cgroup/fixture/memory.max") { text = std::to_string(limit.load()); }
@@ -568,12 +570,27 @@ static void margin_learning() {
     dm.available -= 5*GiB;
     require(!d->end_interval(true, 0, untracked) && d->state().margin == 512*MiB, "a discrete GPU learned a margin");
 }
+// A take of nothing is admitted whatever the room, so it reads no file; a take of something measures the room.
+static void zero_takes_measure_nothing() {
+    files f; auto owner = std::make_shared<test_owner>(f.reader()); auto a = owner->make_client(); a->configure(config());
+    const uint64_t before = f.reads;
+    { auto t = a->take(0); require(bool(t), "a take of nothing was refused"); t.commit(); }
+    { auto t = a->take(0, 0, requester::ram_cache, true, allocation_class::tracked); require(bool(t), "a cache's take of nothing was refused"); t.commit(); }
+    { auto t = a->take(0, 256*MiB, requester::gpu_tier, false, allocation_class::tracked); require(bool(t), "a discrete GPU's take was refused"); t.commit(); }
+    require(f.reads == before, "a take of nothing measured the room");
+    f.readable = false;
+    { auto t = a->take(0, 0, requester::ram_cache, true, allocation_class::tracked); require(bool(t), "an unreadable room refused a take of nothing"); }
+    f.readable = true;
+    { auto t = a->take(MiB); require(bool(t), "a take of one MiB was refused"); }
+    require(f.reads > before, "a take of something did not measure the room");
+}
+
 int main() {
     try {
         serial_equivalence(); holds_and_pending(); races_and_reclaim(); process_reserves_and_rollback();
         interval_isolation_and_close(); close_waits_for_reclaimer();
         result_errors_and_tracked_allocations(); unified_device_held(); reclaim_order(); needed_allocations();
-        margin_learning();
-        std::cout << "host arbiter: serial equations, holds, atomic tickets, reclaim order, needed allocations, margin learning, interval, close and unified device gates passed\n";
+        margin_learning(); zero_takes_measure_nothing();
+        std::cout << "host arbiter: serial equations, holds, atomic tickets, reclaim order, needed allocations, margin learning, interval, close, unified device gates and unmeasured takes of nothing passed\n";
     } catch (const std::exception & error) { std::cerr << error.what() << '\n'; return 1; }
 }

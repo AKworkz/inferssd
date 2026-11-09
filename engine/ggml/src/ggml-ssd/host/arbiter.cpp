@@ -352,15 +352,19 @@ result<allocation_ticket> context_client::take(uint64_t host, uint64_t device, r
         const auto admit = [&](bool by_limits) -> result<allocation_ticket> {
             std::lock_guard<std::mutex> lock(owner.mutex);
             if (const auto * error = owner.invalid(*state_)) { return failed<allocation_ticket>(status::invalid, error); }
-            auto observed = owner.measure(extra, true);
-            const bool readable = by_limits ? observed.limits != room_unreadable :
-                (observed.system || observed.cgroup != room_unreadable) &&
-                !(observed.cgroup == room_unreadable && (finite || !owner.budget.unbounded()));
-            // Nothing asked for needs no room: a shortage must not stop a run over memory it already holds.
-            const bool admitted = by_limits ? observed.within_limits(extra) : readable && (!extra || observed.fits());
-            if (!admitted) {
-                return {allocation_ticket({}, {}, 0, observed), readable ? status::resource : status::io,
-                        by_limits ? "host memory limit refused" : "host budget refused"};
+            // Nothing asked for needs no room: a shortage must not stop a run over memory it already holds. So a take of
+            // nothing measures nothing; a decode layer takes once or twice, mostly nothing, and a measurement reads
+            // the cgroup's and /proc's memory files.
+            room observed;
+            if (extra) {
+                observed = owner.measure(extra, true);
+                const bool readable = by_limits ? observed.limits != room_unreadable :
+                    (observed.system || observed.cgroup != room_unreadable) &&
+                    !(observed.cgroup == room_unreadable && (finite || !owner.budget.unbounded()));
+                if (!(by_limits ? observed.within_limits(extra) : readable && observed.fits())) {
+                    return {allocation_ticket({}, {}, 0, observed), readable ? status::resource : status::io,
+                            by_limits ? "host memory limit refused" : "host budget refused"};
+                }
             }
             const uint64_t held_pages = owner.pages();
             if (extra == UINT64_MAX || held_pages == UINT64_MAX || extra > UINT64_MAX - owner.pending ||
