@@ -10,6 +10,7 @@
 
 // TODO: prevent including the whole server-common.h as we only use server_tokens
 #include "server-common.h"
+#include "inferssd/usage.h"
 
 using json = nlohmann::ordered_json;
 
@@ -155,6 +156,9 @@ struct server_task {
     // note: accessing to elements is invalid after the task is moved to server_slot
     std::vector<server_task> child_tasks;
 
+    // the usage record of the HTTP request this task belongs to, or nullptr; a slot takes it at launch
+    server_usage_request_ptr usage;
+
     // used by SERVER_TASK_TYPE_INFERENCE
     task_params   params;
     server_tokens tokens;
@@ -251,6 +255,7 @@ struct server_task {
         copy.type      = type;
         copy.tokens    = tokens.clone();
         copy.id_slot   = -1; // child tasks cannot specify slot
+        copy.usage     = usage;
 
         // use different sampling seed for each child
         // note: https://github.com/ggml-org/llama.cpp/pull/18700#discussion_r2675115723

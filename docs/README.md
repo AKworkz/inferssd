@@ -11,6 +11,7 @@
 - [Configuration](configuration.md): the typed `inferssd-settings 1` contract.
 - [Deployment resources](engine-resources.md): engine descriptors for installations outside a checkout.
 - [Machine profile](machine-profile.md): what `inferssd profile` measures, where it keeps the result, and its speed estimates.
+- [Usage events](usage-events.md): the request and token counts the server records for its host.
 - [Framework commands](../framework/README.md): `serve`, `cli` and `profile`, typed settings and the owned launch.
 
 ## Design

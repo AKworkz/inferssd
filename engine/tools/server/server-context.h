@@ -67,6 +67,9 @@ struct server_context {
     // terminate main loop (will unblock start_loop)
     void terminate();
 
+    // write the final usage of every request still open, as it stands; call after start_loop() has returned
+    void finish_usage();
+
     // get the underlaying llama_context, can return nullptr if sleeping
     // not thread-safe, should only be used from the main thread
     llama_context * get_llama_context() const;
@@ -128,7 +131,10 @@ private:
             server_task_type type,
             const json & data,
             const std::vector<raw_buffer> & files,
-            task_response_type res_type);
+            task_response_type res_type,
+            server_usage_request_ptr usage = nullptr);
+    // the usage record of a request to a counted route, or nullptr when usage events are off
+    server_usage_request_ptr begin_usage() const;
     std::unique_ptr<server_res_generator> handle_slots_save(const server_http_req & req, int id_slot);
     std::unique_ptr<server_res_generator> handle_slots_restore(const server_http_req & req, int id_slot);
     std::unique_ptr<server_res_generator> handle_slots_erase(const server_http_req &, int id_slot);

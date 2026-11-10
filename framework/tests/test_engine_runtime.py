@@ -12,6 +12,7 @@ from observe_engine_reference import Effects as FEffects
 from observe_engine_reference import api as reference_api
 
 from inferssd.engine import core, owned
+from inferssd.launch.typed import reject_legacy_environment
 from inferssd.launch.types import Resolution
 from inferssd.platform.policy import Policy
 from inferssd.platform.run_directory import reserve
@@ -289,6 +290,17 @@ def test_loader_environment_only_restored_for_server():
     }
     transported = owned.worker_environment(env)
     assert not any(k in transported for k in env if k not in ("PATH", "TOKEN"))
+    restored = dict(transported)
+    restored.update(json.loads(restored.pop("INFERSSD_INTERNAL_SERVER_ENV")))
+    assert restored == env
+
+
+def test_usage_directory_reaches_the_server():
+    # The host's INFERSSD_USAGE_DIR is the server's; the launch neither rejects nor drops it.
+    env = {"PATH": "/fixture/bin", "INFERSSD_USAGE_DIR": "/host/usage"}
+    reject_legacy_environment(env)
+    transported = owned.worker_environment(env)
+    assert transported["INFERSSD_USAGE_DIR"] == "/host/usage"
     restored = dict(transported)
     restored.update(json.loads(restored.pop("INFERSSD_INTERNAL_SERVER_ENV")))
     assert restored == env
