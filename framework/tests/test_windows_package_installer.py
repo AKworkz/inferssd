@@ -41,9 +41,8 @@ def windows_install(tmp_path):
     # The installation itself cannot find developer tools or an external Python.
     env["PATH"] = str(Path(os.environ["WINDIR"]) / "System32")
 
-    def make_package(build, *, member=None, checksum=None, backend=None, driver="576.57"):
-        suffix = "windows-x64-cuda" if backend == "cuda" else "windows-x64"
-        name = f"inferssd-261109.{build}.aaaaaaa-{suffix}"
+    def make_package(build, *, member=None, checksum=None, backend="vulkan", driver="576.57"):
+        name = f"inferssd-261109.{build}.aaaaaaa-windows-x64-{backend}"
         archive = tmp_path / (name + ".zip")
         metadata = {
             "version": "0.1.3",
@@ -63,6 +62,7 @@ def windows_install(tmp_path):
         manifest = {
             "schema": "inferssd-package 1",
             "platform": "windows-x64",
+            "backend": backend,
             "name": name,
             "file": archive.name,
             "url": archive.as_uri(),
@@ -71,8 +71,6 @@ def windows_install(tmp_path):
             "size": archive.stat().st_size,
             **metadata,
         }
-        if backend:
-            manifest["backend"] = backend
         if backend == "cuda" and driver:
             manifest["minimum_nvidia_driver"] = driver
         listing = tmp_path / (name + ".json")
@@ -139,7 +137,7 @@ def test_failed_package_keeps_the_working_installation(windows_install, failure)
     old, wrapper = (home / "current").resolve(), (bindir / "inferssd.cmd").read_bytes()
     member = {
         "traversal": "../outside.txt",
-        "inner-traversal": "inferssd-261109.402.aaaaaaa-windows-x64/../outside.txt",
+        "inner-traversal": "inferssd-261109.402.aaaaaaa-windows-x64-vulkan/../outside.txt",
     }.get(failure)
     bad, _ = make(
         402,

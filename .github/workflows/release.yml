@@ -67,8 +67,8 @@ jobs:
           path: dist/macos
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: package-windows-x64
-          path: dist/windows
+          name: package-windows-x64-vulkan
+          path: dist/windows-vulkan
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: package-windows-x64-cuda
@@ -77,7 +77,7 @@ jobs:
         env:
           RELEASE_REVISION: ${{ needs.validate.outputs.revision }}
         run: |
-          python3 scripts/prepare-release-assets.py --macos-arm64 dist/macos --windows-x64 dist/windows \
+          python3 scripts/prepare-release-assets.py --macos-arm64 dist/macos --windows-x64-vulkan dist/windows-vulkan \
             --windows-x64-cuda dist/windows-cuda \
             --output release-assets --tag "$GITHUB_REF_NAME" --revision "$RELEASE_REVISION" \
             --repository "$GITHUB_REPOSITORY"
@@ -114,7 +114,7 @@ jobs:
           created=yes
           gh release upload "$GITHUB_REF_NAME" release-assets/*
           python3 scripts/publish-package.py dist/macos
-          python3 scripts/publish-package.py dist/windows
+          python3 scripts/publish-package.py dist/windows-vulkan
           python3 scripts/publish-package.py dist/windows-cuda
           gh release edit "$GITHUB_REF_NAME" --draft=false
           created=no

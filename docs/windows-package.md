@@ -13,14 +13,15 @@ for each GPU backend the launch's table names on Windows:
   older than its `minimum_nvidia_driver`, the driver of the CUDA toolkit it is built with.
   The driver's `nvcuda.dll` is loaded on first use, so the package also starts, on the CPU,
   where no NVIDIA driver is.
-- `windows-x64`, for every other machine: the Vulkan backend and loader, with CPU fallback when
+- `windows-x64-vulkan`, for every other machine: the Vulkan backend and loader, with CPU fallback when
   no usable GPU driver is present.
 
 A GPU vendor's normal graphics driver is needed for GPU execution; the Vulkan SDK and the CUDA
 toolkit are CI build dependencies only. The installer installs the CUDA package where an NVIDIA
 GPU's driver is new enough, else the Vulkan package.
 
-An archive has one directory, `inferssd-<date.build.commit>-windows-x64` (`-cuda`), containing:
+An archive has one directory, `inferssd-<date.build.commit>-windows-x64-vulkan` (or `-cuda`),
+containing:
 
 - `bin/inferssd.exe`: a relocatable native console entry point, forwarding arguments, standard
   handles and exit status to the package's own Python.
@@ -52,16 +53,16 @@ published releases are never overwritten. A draft remains private until all asse
 normal package feed are ready.
 
 **Package Windows** still runs for packaging-related pull requests and can be started manually
-for validation, producing `package-windows-x64` and `package-windows-x64-cuda` Actions artifacts.
-GitHub's runner has no GPU, so the CUDA package's check also shows that it starts without an
-NVIDIA driver. Its optional manual publisher
+for validation, producing `package-windows-x64-vulkan` and `package-windows-x64-cuda` Actions
+artifacts. GitHub's runner has no GPU, so the CUDA package's check also shows that it starts
+without an NVIDIA driver. Its optional manual publisher
 remains main-only; no manual Windows job is required for normal numbered releases.
 
 For a local build, enter an x64 Visual Studio tools environment, install the Vulkan SDK, and run:
 
 ```powershell
 scripts/package-windows.ps1 -OutputDirectory dist
-scripts/check-package-windows.ps1 -Archive dist/inferssd-<label>-windows-x64.zip
+scripts/check-package-windows.ps1 -Archive dist/inferssd-<label>-windows-x64-vulkan.zip
 ```
 
 For the CUDA package, install the CUDA toolkit instead (`scripts/install-cuda-redist.ps1` puts

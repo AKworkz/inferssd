@@ -116,7 +116,7 @@ def test_other_version_commit_build_or_changed_bytes_cannot_enter_numbered_relea
 
 def test_missing_platform_and_existing_assets_are_not_silently_replaced(inputs):
     _, directories, output = inputs
-    manifest = next(directories["windows-x64"].glob("*.json"))
+    manifest = next(directories["windows-x64-vulkan"].glob("*.json"))
     saved = manifest.read_bytes()
     manifest.unlink()
     with pytest.raises(ValueError, match="expected one checked"):
@@ -158,7 +158,7 @@ def test_tag_workflow_waits_for_both_reusable_checked_packages():
         s["run"] for s in jobs["release"]["steps"] if "Publish the common" in s.get("name", "")
     )
     assert "scripts/publish-package.py dist/macos" in publication
-    assert "scripts/publish-package.py dist/windows\n" in publication
+    assert "scripts/publish-package.py dist/windows-vulkan\n" in publication
     assert "scripts/publish-package.py dist/windows-cuda" in publication
     assert "--draft --verify-tag" in publication and "--draft=false" in publication
     assert "its assets will not be replaced" in publication

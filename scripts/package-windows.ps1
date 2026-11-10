@@ -18,7 +18,7 @@ $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $out = [IO.Path]::GetFullPath($OutputDirectory)
 if (!$BuildDirectory) { $BuildDirectory = Join-Path $PSScriptRoot "..\build-package-windows-$Backend" }
 $build = [IO.Path]::GetFullPath($BuildDirectory)
-$suffix = if ($Backend -eq 'cuda') { 'windows-x64-cuda' } else { 'windows-x64' }
+$suffix = "windows-x64-$Backend"
 if ((& git -C $root rev-parse --is-shallow-repository).Trim() -ne 'false') { throw 'Packaging needs full Git history for the build number.' }
 if ($Backend -eq 'vulkan' -and (!$env:VULKAN_SDK -or !(Test-Path -LiteralPath (Join-Path $env:VULKAN_SDK 'Bin\glslc.exe')))) { throw 'Set VULKAN_SDK to the build-time SDK.' }
 if ($Backend -eq 'cuda' -and (!$env:CUDA_PATH -or !(Test-Path -LiteralPath (Join-Path $env:CUDA_PATH 'bin\nvcc.exe')))) { throw 'Set CUDA_PATH to the build-time CUDA toolkit.' }

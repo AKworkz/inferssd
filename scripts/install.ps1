@@ -189,9 +189,8 @@ No administrator rights are used. Models, settings and previous releases are pre
                 }
                 if (-not $package) { $package = Get-PackageList $VulkanPackages $listing }
             }
-            # Package lists from before the CUDA package carry no backend: they are Vulkan's.
-            $backend = if ($package.backend) { $package.backend } else { 'vulkan' }
-            $suffix = @{ vulkan = 'windows-x64'; cuda = 'windows-x64-cuda' }[[string]$backend]
+            $backend = [string]$package.backend
+            $suffix = @{ vulkan = 'windows-x64-vulkan'; cuda = 'windows-x64-cuda' }[$backend]
             if ($package.schema -ne 'inferssd-package 1' -or $package.platform -ne 'windows-x64' -or -not $suffix) {
                 throw 'inferssd: unsupported Windows package list.'
             }

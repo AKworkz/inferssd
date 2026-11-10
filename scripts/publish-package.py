@@ -28,7 +28,7 @@ from pathlib import Path
 SERVICE = os.environ.get("INFERSSD_PUBLISH_SERVICE", "https://appapi.wici.ai/versioning/inferssd")
 # Each package by the suffix of its name: its platform, package list and archive extension.
 LISTS = {"macos-arm64": ("darwin-arm64", "latest-macos.json", ".tar.gz"),
-         "windows-x64": ("windows-x64", "latest-windows-vulkan.json", ".zip"),
+         "windows-x64-vulkan": ("windows-x64", "latest-windows-vulkan.json", ".zip"),
          "windows-x64-cuda": ("windows-x64", "latest-windows-cuda.json", ".zip")}
 # The CDN in front of the service refuses Python's default User-Agent.
 AGENT = "inferssd-publish"
