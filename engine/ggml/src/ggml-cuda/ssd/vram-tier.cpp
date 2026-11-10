@@ -180,6 +180,9 @@ struct tier {
     // or in place from host memory), the accumulated rows come back once and are added at finish.
     const vram_group_compute_api * group_api=nullptr;void * group=nullptr;
     int group_rows=0,group_wanted_rows=0;
+    // The grouped engine's fixed device bytes as its last reservation measured them (vram_group_geometry): a release
+    // frees them with the pass's buffers, and the same format reserves the same again. 0 before the first.
+    size_t group_fixed_bytes=0;
     bool group_pass=false,group_in_place=false;
     std::vector<int32_t> group_tokens,group_first,group_request,group_transient;
     std::vector<vram_group_route> group_routes;
@@ -1039,17 +1042,18 @@ struct tier {
     }
     // rows input rows a layer (and up to 16 routes a row); grows only (release frees it). Made room for like the
     // transient scratch: the pass's buffers, against what is free and the pass buffers the engine frees to grow (it
-    // keeps its fixed scratch; estimated at 64 MiB before the engine's first reserve). The card gives the engine more
-    // than this estimate (whole 2 MiB pages, the products' own allocations, kernels loaded on first use), so the
-    // reclaimer is armed for the reserve, as for the prefill graph's: the engine's allocations retry through it, and
-    // one the estimate leaves short gets a block back. The graph's reserve has disarmed it by then, and the tier is
-    // quiescent until the pass's reads.
+    // keeps its fixed scratch). An engine without its fixed scratch reserves it again, priced at what its previous
+    // reservation measured (group_fixed_bytes); nothing has measured it before the first, which a server's load-time
+    // pass makes. The card can give the engine more than these prices (whole 2 MiB pages, kernels loaded on first
+    // use), so the reclaimer is armed for the reserve, as for the prefill graph's: the engine's allocations retry
+    // through it, and one a price leaves short gets a block back. The graph's reserve has disarmed it by then, and the
+    // tier is quiescent until the pass's reads.
     void reserve_group(int rows){
         if(!group || rows<=group_rows)return;
         cuda_check(cudaSetDevice(device));
         const size_t held=group_api->device_bytes(group);
         vram_group_geometry g={};group_api->geometry(group,&g);
-        const size_t fixed=held?size_t(g.fixed_bytes):size_t(64)<<20;
+        const size_t fixed=held?size_t(g.fixed_bytes):group_fixed_bytes;
         const size_t freed=held>fixed?held-fixed:0;
         const size_t need=size_t(rows)*(2*size_t(latent)*sizeof(float)+16*(sizeof(int32_t)+sizeof(float)))+(held?0:fixed);
         if(elastic_active){
@@ -1061,9 +1065,8 @@ struct tier {
             while(free_bytes+freed<need+safety && free_last_block("prefill_engine",false))mem_info(&free_bytes,&total);
         }
         const size_t pass_known=size_t(rows)*(4*size_t(latent)*sizeof(float)+32*(sizeof(int32_t)+sizeof(float)));
-        // The pass buffers have an exact host+device price. The historical
-        // fixed 64 MiB is an estimate; opaque GEMM/driver workspace beyond this
-        // remains covered by the process margin, not a claimed exact quote.
+        // The pass buffers have an exact host+device price, the fixed scratch its last measured one; device memory
+        // beyond them (kernels loaded on first use) remains covered by the process margin.
         auto ticket=take_unified(pass_known+(held?0:fixed));
         char error[512]={};
         bool armed=false;
@@ -1074,6 +1077,7 @@ struct tier {
         publish_engine_held();
         ticket.commit();
         group_rows=rows;
+        {vram_group_geometry reserved={};group_api->geometry(group,&reserved);group_fixed_bytes=size_t(reserved.fixed_bytes);}
         kimi_vram_prefill_lane l={};lane(l);
         std::fprintf(stderr,"[kimi_vram_prefill_engine] format=%s engine=batched in_place=%d route_bytes=%llu token_bytes=%llu "
             "output_bytes=%llu fixed_bytes=%llu bytes_per_token=%llu reserved_rows=%d device_bytes=%zu host_bytes=%zu\n",
@@ -1756,6 +1760,7 @@ struct tier {
             std::vector<int32_t> weights,downs;
             for(const auto & x:formats){weights.push_back(x.weight_type);downs.push_back(x.down_type);}
             char error[512]={};
+            group_fixed_bytes=0; // a new engine, maybe of another format: nothing measured it yet
             group=group_api->create(device,latent,hidden,int(formats.size()),weights.data(),downs.data(),error,sizeof(error));
             if(!group)std::fprintf(stderr,"[kimi_vram_prefill_engine] status=unavailable format=%s error=%s fallback=cpu\n",
                 format_names().c_str(),error);

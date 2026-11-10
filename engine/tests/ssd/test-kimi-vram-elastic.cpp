@@ -207,6 +207,13 @@ int main() {
             t.reserve_prefill_engine(64);
             require(t.group_rows==64 && t.table->slots.size()<before && t.reactive_blocks==reactive+1 && !t.reclaimer_armed,
                     "an engine reserve out of memory did not get a block back from the tier");
+            // the engine's fixed scratch, as this reservation measured it, prices the next one after a release
+            vram_group_geometry g={};t.group_api->geometry(t.group,&g);
+            require(g.fixed_bytes>0 && t.group_fixed_bytes==g.fixed_bytes,"the tier did not keep the engine's measured fixed bytes");
+            t.release_group();
+            require(t.group_rows==0 && t.group_fixed_bytes==g.fixed_bytes,"a release forgot the engine's measured fixed bytes");
+            t.reserve_prefill_engine(64);
+            require(t.group_rows==64 && t.group_fixed_bytes==g.fixed_bytes,"the engine reserved again a different fixed size");
             std::printf("case=engine_reserve_reclaim status=PASS slots=%zu->%zu\n",before,t.table->slots.size());
         }
     }
