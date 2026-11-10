@@ -208,6 +208,14 @@ struct tier {
     uint64_t seeds_planned=0,seeds_published=0,seeds_cancelled=0,seeds_freed=0,seed_copies=0,seed_bytes=0;
     double seed_offer_us=0,seed_wait_us=0;
     uint64_t prefill_count=0; // prefills begun: a seed plan is one prefill's
+    // The sink prefill's seeds (kimi_vram_prefill_api v10): the routes of the next prepare's union, then each of its
+    // requests' reserved seed slot (-1: none) for the layer. A seed the CPU computes is copied on its own stream, an
+    // event a request; one on the prefill lane is copied by the worker behind the bytes it already moves.
+    std::vector<int32_t> sink_seed_routes;
+    std::vector<int> sink_seed_slot;
+    std::vector<cudaEvent_t> sink_seed_events,lane_seed_events;
+    std::vector<uint8_t> sink_seed_pending;
+    cudaStream_t seed_host_stream=nullptr;
     uint64_t cold_prefill_admissions=0,cold_prefill_admission_bytes=0,cold_prefill_admit_calls=0;
     double cold_prefill_admission_us=0;
     kimi_vram_prefill_stats prefill_job_stats={};
@@ -295,6 +303,9 @@ struct tier {
             if(deferred_stream)cuda_check(cudaStreamDestroy(deferred_stream));
             if(seed_done)cuda_check(cudaEventDestroy(seed_done));
             if(seed_stream)cuda_check(cudaStreamDestroy(seed_stream));
+            if(seed_host_stream)cuda_check(cudaStreamDestroy(seed_host_stream));
+            for(auto & e:sink_seed_events)if(e)cuda_check(cudaEventDestroy(e));
+            for(auto & e:lane_seed_events)if(e)cuda_check(cudaEventDestroy(e));
             if(host_copy_stream)cuda_check(cudaStreamDestroy(host_copy_stream));
             for(cudaEvent_t e:host_events)cuda_check(cudaEventDestroy(e));
             for(cudaEvent_t e:call_events)cuda_check(cudaEventDestroy(e));
@@ -636,11 +647,76 @@ struct tier {
         seed_offer_us+=micros(start);
         return copied?1:0;
     }
+    // A sink prefill's seeds for one layer (seed_routes before its prepare), planned as seed_plan plans a graph
+    // prefill's: the layer's share of the empty slots, the free ones over the layers not planned yet in this prefill,
+    // for the experts the pass routes most that no slot holds. Before the prepare leases its residents.
+    void plan_sink_seeds(const kimi_vram_request * r,int count,const std::vector<int32_t> & routes){
+        sink_seed_slot.assign(size_t(count),-1);
+        sink_seed_pending.assign(size_t(count),0);
+        if(!count || routes.size()!=size_t(count) || !table)return;
+        std::lock_guard<std::mutex> lock(lifecycle_mutex);
+        const int layer=r[0].layer;
+        if(poisoned || !has_storage() || std::find(table->pool_layers.begin(),table->pool_layers.end(),layer)==table->pool_layers.end())return;
+        if(seed_plan_generation!=prefill_count){seed_plan_generation=prefill_count;seed_planned.clear();seed_files.clear();}
+        if(!seed_planned.insert(layer).second)return; // a later pass of the prompt: its first one planned the layer
+        const size_t left=table->pool_layers.size()+1>seed_planned.size()?table->pool_layers.size()+1-seed_planned.size():1;
+        const size_t quota=table->free_slots(layer)/left;
+        if(!quota)return;
+        std::vector<int> order;
+        for(int j=0;j<count;++j)if(routes[size_t(j)]>0)order.push_back(j);
+        std::stable_sort(order.begin(),order.end(),[&](int a,int b){return routes[size_t(a)]>routes[size_t(b)];});
+        size_t taken=0;
+        for(int j:order){
+            if(taken==quota)break;
+            const int slot=table->reserve_cold_prefill(r[j]);
+            if(slot>=0){seeds.push_back({slot,r[j],0});sink_seed_slot[size_t(j)]=slot;++taken;}
+            else if(!table->free_slots(layer))break;
+        }
+        seeds_planned+=taken;
+    }
+    // The seed still to copy for request `request` of the prepared union, or null: none planned, already copied, or
+    // dropped with a block given back. Looked up by slot, so a dropped one is never written.
+    pending_seed * sink_seed(int32_t request){
+        if(request<0 || size_t(request)>=sink_seed_slot.size() || sink_seed_slot[size_t(request)]<0)return nullptr;
+        for(auto it=seeds.rbegin();it!=seeds.rend();++it){
+            if(it->slot==sink_seed_slot[size_t(request)])return it->roles==7?nullptr:&*it;
+        }
+        return nullptr;
+    }
+    // The roles of a seed the CPU computes, from its caller's payload (a ring slot or a RAM cache slot) into its slot,
+    // on the host seed stream; wait_host_seed returns once they are in. In place the device reads the host's pages, so
+    // the copy is a device copy and never staged through a host thread.
+    void seed_from_host(int32_t request,const void * const * data){
+        pending_seed * s=sink_seed(request);
+        if(!s)return;
+        for(int role=0;role<3;++role)if(!data[role])throw std::runtime_error("null seed payload");
+        const expert_format & F=now();
+        cuda_check(cudaSetDevice(device));
+        if(!seed_host_stream)cuda_check(cudaStreamCreateWithFlags(&seed_host_stream,cudaStreamNonBlocking));
+        if(sink_seed_events.size()<sink_seed_slot.size())sink_seed_events.resize(sink_seed_slot.size(),nullptr);
+        cudaEvent_t & done_event=sink_seed_events[size_t(request)];
+        if(!done_event)cuda_check(cudaEventCreateWithFlags(&done_event,cudaEventDisableTiming));
+        const cudaMemcpyKind kind=host_readable?cudaMemcpyDeviceToDevice:cudaMemcpyHostToDevice;
+        size_t offset=0;
+        for(int role=0;role<3;++role){
+            cuda_check(cudaMemcpyAsync(slot_base(size_t(s->slot))+offset,data[role],F.role_bytes[role],kind,seed_host_stream));
+            offset+=F.role_bytes[role];
+        }
+        cuda_check(cudaEventRecord(done_event,seed_host_stream));
+        sink_seed_pending[size_t(request)]=1;
+        s->roles=7;seed_copies+=3;seed_bytes+=offset;
+    }
+    void wait_host_seed(int32_t request){
+        if(request<0 || size_t(request)>=sink_seed_pending.size() || !sink_seed_pending[size_t(request)])return;
+        cuda_check(cudaSetDevice(device));cuda_check(cudaEventSynchronize(sink_seed_events[size_t(request)]));
+        sink_seed_pending[size_t(request)]=0;
+    }
     // Waits for the seed copies, then drops the seeds in slots from `first` on (a block given back, or all of them).
     // Requires lifecycle_mutex.
     void cancel_seeds(size_t first=0){
         if(seeds.empty())return;
-        cuda_check(cudaSetDevice(device));cuda_check(cudaStreamSynchronize(seed_stream));
+        cuda_check(cudaSetDevice(device));if(seed_stream)cuda_check(cudaStreamSynchronize(seed_stream));
+        if(seed_host_stream)cuda_check(cudaStreamSynchronize(seed_host_stream));
         const auto end=std::remove_if(seeds.begin(),seeds.end(),[&](const pending_seed & s){
             if(size_t(s.slot)<first)return false;
             if(table)table->cancel_cold_prefill(size_t(s.slot),s.key);
@@ -652,7 +728,8 @@ struct tier {
     void publish_seeds(){
         if(seeds.empty())return;
         const auto start=clock_type::now();
-        cuda_check(cudaSetDevice(device));cuda_check(cudaStreamSynchronize(seed_stream));
+        cuda_check(cudaSetDevice(device));if(seed_stream)cuda_check(cudaStreamSynchronize(seed_stream));
+        if(seed_host_stream)cuda_check(cudaStreamSynchronize(seed_host_stream));
         seed_wait_us+=micros(start);
         size_t published=0,cancelled=0;
         for(const auto & s:seeds){
@@ -1113,6 +1190,9 @@ struct tier {
             arena_epoch=e;
         }
         if(!decode || (have_token && epoch!=e) || (decode && has_storage() && arena_epoch!=e)){if(has_storage())report("phase_release");release();}
+        // A decode phase begun without phase_complete(true), by a caller that reserves no decode graph: the prefill's
+        // seeds go in before its first token, as they would at that completion.
+        if(decode && table && !seeds.empty()){std::lock_guard<std::mutex> lock(lifecycle_mutex);publish_seeds();}
         const bool next_token=decode && (!have_token || epoch!=e || token!=t);
         if(next_token){
             if(table)table->next_token();
@@ -1271,7 +1351,21 @@ struct tier {
                 if(group_in_place){
                     const vram_compute_expert w={job.role[0],job.role[1],job.role[2]};
                     if(group_api->compute(group,g,&w,nullptr,&done,error,sizeof(error)))throw std::runtime_error(error[0]?error:"grouped prefill compute failed");
-                    if(job.stage)handback.back().second=done;
+                    cudaEvent_t back=done;
+                    if(pending_seed * s=sink_seed(job.request_index)){
+                        // the seed's roles from the bytes the chain reads, behind it: its ring slot goes back after both
+                        if(!seed_stream)cuda_check(cudaStreamCreateWithFlags(&seed_stream,cudaStreamNonBlocking));
+                        while(lane_seed_events.size()<=i){cudaEvent_t e=nullptr;cuda_check(cudaEventCreateWithFlags(&e,cudaEventDisableTiming));lane_seed_events.push_back(e);}
+                        cuda_check(cudaStreamWaitEvent(seed_stream,done,0));
+                        size_t offset=0;
+                        for(int role=0;role<3;++role){
+                            cuda_check(cudaMemcpyAsync(slot_base(size_t(s->slot))+offset,job.role[role],F.role_bytes[role],cudaMemcpyDeviceToDevice,seed_stream));
+                            offset+=F.role_bytes[role];
+                        }
+                        back=lane_seed_events[i];cuda_check(cudaEventRecord(back,seed_stream));
+                        s->roles=7;seed_copies+=3;seed_bytes+=offset;
+                    }
+                    if(job.stage)handback.back().second=back;
                     continue;
                 }
                 const size_t slot=next_slot;next_slot^=1;
@@ -1291,6 +1385,12 @@ struct tier {
                 }
                 cuda_check(cudaEventRecord(group_dma[2*i+1],upload_stream));
                 staged_us[i]=micros(copy_start); // a pageable copy is staged by this call: the copy's time
+                if(pending_seed * s=sink_seed(job.request_index)){
+                    // the seed from the arena slot, on the device: ordered before the next copy into that arena slot
+                    const size_t bytes=F.role_bytes[0]+F.role_bytes[1]+F.role_bytes[2];
+                    cuda_check(cudaMemcpyAsync(slot_base(size_t(s->slot)),dst,bytes,cudaMemcpyDeviceToDevice,upload_stream));
+                    s->roles=7;seed_copies+=3;seed_bytes+=bytes;
+                }
                 const vram_compute_expert w=roles_at(dst,F);
                 if(group_api->compute(group,g,&w,group_dma[2*i+1],&done,error,sizeof(error)))throw std::runtime_error(error[0]?error:"grouped prefill compute failed");
                 slot_done[slot]=done;
@@ -2037,6 +2137,8 @@ struct tier {
         if(count<0 || (count && (!r || !slots)) || !f || f->n_experts<=0 || count>f->n_experts)
             throw std::runtime_error("invalid grouped-prefill request union");
         if(count)std::fill(slots,slots+count,-1);
+        std::vector<int32_t> seed_routes;seed_routes.swap(sink_seed_routes);
+        sink_seed_slot.clear();sink_seed_pending.clear();
         if(prefill_live || prefill_queued || active || have_token)
             throw std::runtime_error("grouped prefill outside a retained prefill phase");
         if(!keep_across_requests || !count)return;
@@ -2061,6 +2163,7 @@ struct tier {
             cpu_requests+=size_t(count);
             return;
         }
+        plan_sink_seeds(r,count,seed_routes);
         prefill_generation=table->acquire_slots(r,size_t(count),prefill_slots.data());
         std::copy(prefill_slots.begin(),prefill_slots.end(),slots);
         const size_t hits=size_t(std::count_if(prefill_slots.begin(),prefill_slots.end(),[](int slot){return slot>=0;}));
@@ -2212,6 +2315,7 @@ struct tier {
         {std::lock_guard<std::mutex> lock(mutex);prefill_launched=false;}
         prefill_live=false;prefill_generation=0;prefill_slots.clear();prefill_input.clear();
         prefill_routes.clear();prefill_weights.clear();prefill_output.clear();prefill_transient.clear();work.clear();output_rows.clear();
+        sink_seed_slot.clear();sink_seed_pending.clear();
     }
     void cancel_prefill(){
         {std::lock_guard<std::mutex> lock(lifecycle_mutex);cancel_seeds();}
@@ -2358,6 +2462,14 @@ int prefill_finish(void * p,float * output,size_t stride,kimi_vram_prefill_stats
     auto * t=static_cast<tier *>(p);try{if(stats)*stats={};t->finish_prefill(output,stride,stats);return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
 int prefill_cancel(void * p,char * e,size_t n){
     auto * t=static_cast<tier *>(p);try{t->cancel_prefill();return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
+int prefill_seed_routes(void * p,const int32_t * routes,int count,char * e,size_t n){
+    auto * t=static_cast<tier *>(p);try{
+        if(count<0 || (count && !routes))throw std::runtime_error("invalid prefill seed routes");
+        t->sink_seed_routes.assign(routes,routes+count);return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
+int prefill_seed_host(void * p,int32_t request,const void * up,const void * gate,const void * down,char * e,size_t n){
+    auto * t=static_cast<tier *>(p);try{const void * data[]={up,gate,down};t->seed_from_host(request,data);return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
+int prefill_seed_wait(void * p,int32_t request,char * e,size_t n){
+    auto * t=static_cast<tier *>(p);try{t->wait_host_seed(request);return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
 int prefill_cold_admission_active(void *){return 0;}
 int prefill_admit_cold(void * p,const kimi_vram_request *,const void *,const void *,const void *,
         int * admitted,char * e,size_t n){
@@ -2544,9 +2656,10 @@ extern "C" const kimi_vram_format_api * kimi_vram_format_get_api(){
     static const kimi_vram_format_api api={2,sizeof(kimi_vram_format_api),format_prepare,format_launch};return &api;
 }
 extern "C" const kimi_vram_prefill_api * kimi_vram_prefill_get_api(){
-    static const kimi_vram_prefill_api api={9,sizeof(kimi_vram_prefill_api),prefill_prepare,
+    static const kimi_vram_prefill_api api={10,sizeof(kimi_vram_prefill_api),prefill_prepare,
         prefill_transient_available,prefill_launch,prefill_finish,prefill_cancel,
-        prefill_cold_admission_active,prefill_admit_cold,prefill_lane};return &api;
+        prefill_cold_admission_active,prefill_admit_cold,prefill_lane,
+        prefill_seed_routes,prefill_seed_host,prefill_seed_wait};return &api;
 }
 
 extern "C" const ssd::gpu::settings_api * ggml_backend_cuda_ssd_tier_settings_get_api() {

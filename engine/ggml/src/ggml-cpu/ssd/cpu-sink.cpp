@@ -3166,6 +3166,16 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
             owner->io_cv.notify_all();
             return 1;
         };
+        {
+            // each request's routes in this pass: the tier seeds the layer's empty slots with the experts routed most
+            std::vector<int32_t> routes(sink->requests.size(), 0);
+            const size_t route_count = size_t(batch->nslots) * size_t(batch->ntokens);
+            for (size_t route = 0; route < route_count; ++route) {
+                const int request = batch->route_request_index[route];
+                if (request >= 0 && size_t(request) < routes.size()) { ++routes[size_t(request)]; }
+            }
+            sink->vram.prefill_seed_routes.swap(routes);
+        }
         batch->gpu_experts = sink->vram.prepare_prefill(sink->requests, up, down, sink->latent, sink->hidden,
             sink_vram::layer_list(sink->cache), batch->activation.post_exp_norm != nullptr);
         // the batched lane streams its SSD transients through the ring
@@ -3364,9 +3374,13 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
             for (int role = 0; role < 3; ++role) {
                 data[role] = static_cast<const char *>(request.cache_hit >= 0 ? sink->cache.data(request.cache_hit, role) : request.read_target[role]) + request.role[role].data_offset;
             }
+            // a seed's copy reads the payload beside the compute; it is done before the payload goes back
+            sink->vram.seed_host(expert, data);
             try {
                 consumer(userdata, expert, data[0], data[1], data[2]);
+                sink->vram.seed_wait(expert);
             } catch (...) {
+                try { sink->vram.seed_wait(expert); } catch (...) {}
                 if (request.cache_lease) {
                     sink->cache.release_lease(request.cache_hit);
                     request.cache_lease = false;

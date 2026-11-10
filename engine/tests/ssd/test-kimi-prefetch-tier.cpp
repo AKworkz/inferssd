@@ -53,7 +53,7 @@ const ssd::gpu::provider_v1 * stand_in_provider() {
         tier_no_lease_check, tier_no_lease_check, tier_held };
     static const kimi_vram_format_api format = { 2, sizeof(kimi_vram_format_api), no_slots,
         [](void *, const void *, size_t, const kimi_vram_activation *, char *, size_t) { return 0; } };
-    static const kimi_vram_prefill_api prefill = { 9, sizeof(kimi_vram_prefill_api), no_slots,
+    static const kimi_vram_prefill_api prefill = { 10, sizeof(kimi_vram_prefill_api), no_slots,
         [](void *) { return 0; },
         [](void *, const void *, size_t, const int32_t *, const float *, int, int, const kimi_vram_prefill_transient *,
            int, const kimi_vram_prefill_launch *, char * e, size_t n) { return refuse(nullptr, e, n); },
@@ -61,7 +61,10 @@ const ssd::gpu::provider_v1 * stand_in_provider() {
         refuse, [](void *) { return 0; },
         [](void *, const kimi_vram_request *, const void *, const void *, const void *, int * admitted, char * e, size_t n) {
             *admitted = 0; return refuse(nullptr, e, n); },
-        [](void *, kimi_vram_prefill_lane *) {} };
+        [](void *, kimi_vram_prefill_lane *) {},
+        [](void *, const int32_t *, int, char *, size_t) { return 0; },
+        [](void *, int32_t, const void *, const void *, const void *, char *, size_t) { return 0; },
+        [](void *, int32_t, char *, size_t) { return 0; } };
     static const kimi_vram_elastic_api elastic = { 4, sizeof(kimi_vram_elastic_api),
         [](void *, int, char *, size_t) { return 0; }, [](void *, int, char *, size_t) { return 0; },
         [](void *, const kimi_vram_request *, const kimi_vram_expert_format *, char *, size_t) { return 0; } };

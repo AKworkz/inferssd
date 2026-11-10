@@ -14,6 +14,8 @@ struct sink_vram {
     void * context = nullptr;
     std::vector<kimi_vram_request> requests;
     std::vector<int> slots;
+    // the routes of each request of the next prefill prepare's union, set by the stream (prepare_prefill sends them)
+    std::vector<int32_t> prefill_seed_routes;
     int hits = 0;
     // The format's grouped-prefill lane (the tier's, prefill API v9): whether its passes run on the batched engine, and
     // this layer's use of it, and whether this pass's streamed transients are read in place.
@@ -150,10 +152,11 @@ struct sink_vram {
         }
         if (prefill_enabled) {
             prefill_api = configuration.gpu.prefill;
-            if (!prefill_api || prefill_api->version != 9 || prefill_api->size != sizeof(*prefill_api) ||
+            if (!prefill_api || prefill_api->version != 10 || prefill_api->size != sizeof(*prefill_api) ||
                     !prefill_api->prepare || !prefill_api->transient_available || !prefill_api->launch ||
                     !prefill_api->finish || !prefill_api->cancel || !prefill_api->cold_admission_active ||
-                    !prefill_api->admit_cold || !prefill_api->lane) {
+                    !prefill_api->admit_cold || !prefill_api->lane || !prefill_api->seed_routes ||
+                    !prefill_api->seed_host || !prefill_api->seed_wait) {
                 throw std::runtime_error("GPU tier grouped-prefill ABI missing or incompatible; no fallback");
             }
             if (!format && !prefill_only) { throw std::runtime_error("GPU tier grouped prefill requires the explicit-format ABI"); }
@@ -481,6 +484,13 @@ struct sink_vram {
         }
         const kimi_vram_expert_format f = layers.format(up, down, latent, hidden);
         char error[512] = {};
+        // the pass's routes of each request, so that the prepare seeds the layer's empty slots with the experts the
+        // pass routes most (kimi_vram_prefill_api v10)
+        if (prefill_seed_routes.size() == requests.size()) {
+            check(prefill_api->seed_routes(context, prefill_seed_routes.data(), int(prefill_seed_routes.size()), error,
+                sizeof(error)), error);
+        }
+        prefill_seed_routes.clear();
         check(prefill_api->prepare(context, requests.data(), int(requests.size()), &f,
                 slots.data(), error, sizeof(error)), error);
         prefill_lane = {};
@@ -691,6 +701,19 @@ struct sink_vram {
         batch.gpu_expert_us = prefill_stats.gpu_fit_us;
         batch.gpu_read_wait_us = prefill_stats.read_wait_us;
         hits = 0; prefill_job_active = false; prefill_transient.clear();
+    }
+    // A request the CPU computes in a sink prefill: the tier copies its payload into the seed slot it reserved for it,
+    // if any (kimi_vram_prefill_api v10). seed_wait returns once the copy is done, before the payload's ring slot or
+    // RAM cache lease goes back.
+    void seed_host(size_t request, const void * const * data) {
+        if (!context || !prefill_api) { return; }
+        char error[512] = {};
+        check(prefill_api->seed_host(context, int32_t(request), data[0], data[1], data[2], error, sizeof(error)), error);
+    }
+    void seed_wait(size_t request) {
+        if (!context || !prefill_api) { return; }
+        char error[512] = {};
+        check(prefill_api->seed_wait(context, int32_t(request), error, sizeof(error)), error);
     }
     // The CPU consumer's time for one expert of the current grouped-prefill layer.
     void observe_prefill_cpu(int routes, double us) {

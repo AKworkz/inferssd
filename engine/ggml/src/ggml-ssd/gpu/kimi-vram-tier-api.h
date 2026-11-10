@@ -230,7 +230,7 @@ struct kimi_vram_prefill_launch {
 // first victims unless decode reuses them; the path never evicts an existing
 // decode resident.
 struct kimi_vram_prefill_api {
-    uint32_t version, size;   // 9
+    uint32_t version, size;   // 10
     // requests contains the distinct expert union for one layer. slots receives
     // -1 for CPU work or an opaque resident slot for GPU work. The tier must
     // already hold the same explicit format from an earlier decode phase.
@@ -263,6 +263,17 @@ struct kimi_vram_prefill_api {
                       int * admitted, char * error, size_t error_size);
     // The format's lane, after prepare (which initializes the format on a cold prefill). Read-only.
     void (*lane)(void * context, struct kimi_vram_prefill_lane * lane);
+    // Version 10, the seeds of a prefill the CPU sink runs, as a graph prefill's are seeded. seed_routes gives the
+    // routes of each request of the next prepare's union (index-aligned with its requests); that prepare reserves the
+    // layer's share of the empty slots for the experts the pass routes most, before it leases its residents. The tier
+    // copies a seed its prefill lane computes from the bytes it reads; seed_host copies one the CPU computes from its
+    // payload (request_index into the prepared union), which stays valid until seed_wait returns for that request.
+    // The seeds are published as a graph prefill's are, when the decode phase completes the prefill, or at the first
+    // decode token begun without that completion; a block given back or a cancelled prefill drops them.
+    int (*seed_routes)(void * context, const int32_t * routes, int count, char * error, size_t error_size);
+    int (*seed_host)(void * context, int32_t request_index, const void * up, const void * gate, const void * down,
+                     char * error, size_t error_size);
+    int (*seed_wait)(void * context, int32_t request_index, char * error, size_t error_size);
 };
 // Optional deferred-upload extension (GGML_KIMI_CPU_SINK_VRAM_DEFERRED_UPLOAD=1 in the tier and its CPU owner,
 // with ASYNC_UPLOAD=1). admit replaces ABI 2 admit for a borrowed RAM source, but the upload may outlive finish:

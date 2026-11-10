@@ -547,8 +547,13 @@ void prefill_lane_info(void * context, kimi_vram_prefill_lane * out) {
     out->in_place = 1;
     out->post_norm = 1;
 }
-const kimi_vram_prefill_api prefill_table = { 9, sizeof(kimi_vram_prefill_api), prefill_prepare, prefill_transient_available, prefill_launch,
-    prefill_finish, tier_cancel, prefill_cold_active, prefill_admit_cold, prefill_lane_info };
+// No slot table: nothing to seed.
+int prefill_seed_routes(void *, const int32_t *, int, char *, size_t) { return 0; }
+int prefill_seed_host(void *, int32_t, const void *, const void *, const void *, char *, size_t) { return 0; }
+int prefill_seed_wait(void *, int32_t, char *, size_t) { return 0; }
+const kimi_vram_prefill_api prefill_table = { 10, sizeof(kimi_vram_prefill_api), prefill_prepare, prefill_transient_available, prefill_launch,
+    prefill_finish, tier_cancel, prefill_cold_active, prefill_admit_cold, prefill_lane_info,
+    prefill_seed_routes, prefill_seed_host, prefill_seed_wait };
 
 int elastic_phase_complete(void * context, int decode, char *, size_t) {
     if (decode) { self(context)->drain(); self(context)->release_work(); }
