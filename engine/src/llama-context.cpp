@@ -206,6 +206,7 @@ llama_context::llama_context(
             throw std::runtime_error("grouped CPU prefill ubatch exceeds route index range");
         }
         cpu_prefill_max_tokens = uint32_t(*ssd_runtime->settings.integer("prefill.cpu_max_tokens"));
+        cpu_prefill_hint = *ssd_runtime->settings.integer("prefill.lookahead") != 0;
         cpu_prefill_request_max_tokens = cpu_prefill_max_tokens;
     }
     // The retained resource profile sizes each request's prompt graph, then
@@ -3150,6 +3151,7 @@ llm_graph_params llama_context::graph_params(
         /*.n_outputs   =*/ n_outputs,
         /*.cpu_sink_decode =*/ cpu_sink_enabled && cpu_sink_decode_active && !cparams.warmup,
         /*.cpu_sink_prefill =*/ !cpu_sink_decode_active && !cparams.warmup && cpu_sink_prefill_route(ubatch.n_tokens),
+        /*.cpu_sink_prefill_hint =*/ cpu_prefill_hint,
         /*.cpu_sink_runtime =*/ cpu_sink_runtime.get(),
         /*.cb          =*/ graph_get_cb(),
         /*.res         =*/ res,

@@ -191,6 +191,110 @@ void run_seed_case(fixture_inputs & inputs, ggml_type type, int tokens, int acti
     std::fflush(stdout);
 }
 
+// The grouped prefill's read-ahead beside the tier's batched lane: layer 1's call, given the pass's own routes as its
+// prediction of layer 2's, reads layer 2's experts into the RAM cache (retained, made at load, read by a prefill), and
+// layer 2's call takes them as RAM hits on either lane, the GPU's as RAM transients. The tier holds fewer experts than a layer has. Zero input is the exact oracle; a
+// nonzero pass matches the graph (a token at a time, the clamped SwiGLU's scalar kernel) within the GPU's rounding,
+// which a slot read wrongly would not.
+void run_lookahead_case(fixture_inputs & inputs, int tokens) {
+    // the read-ahead lands in the RAM cache, which admits only under a finite, readable memory envelope
+    try {
+        test_resources::finite_envelope();
+    } catch (const test_resources::unavailable & e) {
+        std::printf("PREFILL_LOOKAHEAD tokens=%d status=SKIP reason=%s\n", tokens, e.what());
+        return;
+    }
+    fixture f; f.type = f.down_type = GGML_TYPE_Q8_0;
+    f.latent = 512; f.hidden = 256; f.experts = 16;
+    make_synthetic(f, 20261111);
+    const auto unit = triplet_bytes(f);
+    inputs.set("vram_budget", std::to_string(4 * unit).c_str());
+    inputs.set("vram_prefill", "1");
+    inputs.set("ready_first", "1");
+    inputs.set("tier.keep_across_requests", "1");
+    inputs.set("tier.policy", "lru");
+    inputs.set("tier.min_count", "0");
+    for (const char * key : {"tier.global", "vram_exclusive", "vram_async", "vram_deferred", "tier.elastic",
+            "early_up_gate", "role_major", "nonblocking_down_sched"}) {
+        inputs.set(key, "0");
+    }
+    const char * cache_keys[][2] = { {"prefill_lookahead", "1"}, {"place_costs", "drive_gbps=1000"},
+        {"cache_policy", "count_decay2"}, {"cache_allocation", "uniform"}, {"cache_keep", "1"},
+        {"cache_partial_reclaim", "1"}, {"cache_prefill_read", "1"} };
+    for (const auto & k : cache_keys) { inputs.set(k[0], k[1]); }
+    auto sink = make_sink(inputs, f, 4, 2);
+    tensors meta1(f, 1), meta2(f, 2);
+    uint64_t stride = 0;
+    for (int role = 0; role < 3; ++role) {
+        const auto * t = meta1.role[role];
+        stride += (ggml_row_size(t->type, t->ne[0]) * uint64_t(t->ne[1]) + 8190) / 4096 * 4096;
+    }
+    stride = cache_slot_bytes(inputs, stride);
+    for (const auto & k : cache_keys) { inputs.unset(k[0]); }
+    configure_cache(sink.get(), 2 * uint64_t(f.experts) * stride, {1, 2}, f.experts);
+    char error[512] = {};
+    require(kimi_cpu_sink_vram_reserve(sink.get(), meta1.role, 1, 4, error, sizeof(error)), error);
+    prefill_ptr prefill(kimi_cpu_prefill_create(sink.get(), error, sizeof(error)), kimi_cpu_prefill_destroy);
+    require(bool(prefill), error);
+    constexpr int slots = 4;
+    std::vector<int32_t> ids(size_t(tokens) * slots);
+    for (int t = 0; t < tokens; ++t) {
+        for (int s = 0; s < slots; ++s) { ids[size_t(t) * slots + s] = int32_t((t * 3 + s * 4) % f.experts); }
+    }
+    std::vector<float> weights(ids.size(), 0.25f), zero(size_t(tokens) * f.latent, 0.0f), x(zero.size());
+    for (size_t i = 0; i < x.size(); ++i) { x[i] = 0.3f * std::sin(float(i) * 0.23f); }
+    const kimi_cpu_sink_activation swiglu = { KIMI_CPU_SINK_ACTIVATION_SWIGLU_CLAMP, 0, 0, 10.0f, nullptr, 0 };
+    auto run = [&](const tensors & meta, const std::vector<float> & input, std::vector<float> & output) {
+        if (&meta == &meta1) { kimi_cpu_sink_prefill_hint(sink.get(), 2, ids.data(), tokens, slots); }
+        output.assign(input.size(), 0.0f);
+        kimi_cpu_prefill_stats stats = {};
+        require(kimi_cpu_prefill_run_activation(prefill.get(), meta.role[0], meta.role[1], meta.role[2], input.data(),
+            ids.data(), weights.data(), slots, tokens, &swiglu, output.data(), &stats, error, sizeof(error)), error);
+        require(stats.stream.read_errors == 0 && stats.stream.pending_reads == 0 &&
+            stats.stream.read_completions == stats.stream.read_requests &&
+            stats.gpu_experts + stats.ram_experts + stats.ssd_experts == uint64_t(f.experts),
+            "read-ahead prefill transport or source counters");
+        return stats;
+    };
+    uint64_t served = 0, transient = 0;
+    std::vector<float> y1, y2;
+    for (int pass = 0; pass < 3; ++pass) {
+        run(meta1, zero, y1);
+        const auto stats = run(meta2, zero, y2);
+        check_zero(pass ? "lookahead_zero" : "lookahead_zero_measure", f.type, tokens, y2);
+        if (pass) { served += stats.ram_experts; transient += stats.gpu_transient_experts; }
+    }
+    ++cases;
+    if (!served) { ++failures; }
+    // nonzero, against the graph
+    run(meta1, x, y1);
+    const auto stats = run(meta2, y1, y2);
+    served += stats.ram_experts;
+    std::vector<float> expected;
+    for (int t = 0; t < tokens; ++t) {
+        const auto row = y1.begin() + std::ptrdiff_t(t) * f.latent;
+        const auto slot = ids.begin() + std::ptrdiff_t(t) * slots;
+        const auto w = weights.begin() + std::ptrdiff_t(t) * slots;
+        const auto y = reference_moe_graph(f, 2, std::vector<float>(row, row + f.latent), std::vector<int32_t>(slot, slot + slots),
+            std::vector<float>(w, w + slots), swiglu, 1);
+        expected.insert(expected.end(), y.begin(), y.end());
+    }
+    double scale = 0, error_max = 0;
+    for (size_t i = 0; i < expected.size(); ++i) {
+        require(std::isfinite(y2[i]), "nonfinite read-ahead output");
+        scale = std::max(scale, std::abs(double(expected[i])));
+        error_max = std::max(error_max, std::abs(double(y2[i]) - double(expected[i])));
+    }
+    const bool close = error_max <= 0.05 * scale;
+    ++cases;
+    if (!close) { ++failures; }
+    std::printf("PREFILL_LOOKAHEAD tokens=%d ram_experts=%llu gpu_transient_experts=%llu last_ram_experts=%llu"
+        " last_gpu_transients=%llu max_abs=%.6g scale=%.6g status=%s\n", tokens, (unsigned long long) served,
+        (unsigned long long) transient, (unsigned long long) stats.ram_experts,
+        (unsigned long long) stats.gpu_transient_experts, error_max, scale, served && close ? "PASS" : "FAIL");
+    std::fflush(stdout);
+}
+
 int main(int argc, char ** argv) {
     fixture_inputs inputs;
     inputs.set_runtime_services(test_gpu_services());
@@ -205,6 +309,7 @@ int main(int argc, char ** argv) {
         }
         run_seed_case(inputs, GGML_TYPE_MXFP4, 48, KIMI_CPU_SINK_ACTIVATION_SWIGLU_CLAMP);
         run_seed_case(inputs, GGML_TYPE_Q8_0, 48, KIMI_CPU_SINK_ACTIVATION_SWIGLU);
+        for (int tokens : {48, 300}) { run_lookahead_case(inputs, tokens); }
         std::printf("PREFILL_SCRATCH_%s cases=%zu failures=%zu\n", failures ? "FAIL" : "PASS", cases, failures);
         return failures ? 1 : 0;
     } catch (const std::exception & e) { std::fprintf(stderr, "%s\n", e.what()); return 1; }

@@ -78,6 +78,7 @@ struct llama_kimi_cpu_sink_runtime {
     // experts while the current layer's node is active: name -> (bytes per expert, experts).
     std::map<std::string, std::pair<size_t, int64_t>> expert_shapes;
     decltype(&kimi_cpu_sink_prefetch_hint) prefetch_hint = nullptr; // optional
+    decltype(&kimi_cpu_sink_prefill_hint) prefill_hint = nullptr;
     bool sequence_known = false;
     llama_seq_id sequence = 0;
     bool cache_decode_active = false;
@@ -196,6 +197,7 @@ struct llama_kimi_cpu_sink_runtime {
         vram_phase_complete = cpu_api->vram_phase_complete;
         cache_get_stats = cpu_api->cache_get_stats;
         prefetch_hint = cpu_api->prefetch_hint;
+        prefill_hint = cpu_api->prefill_hint;
         constexpr int ring_experts = 8;
         char error[512] = {};
         sink = create(&settings, &services, resolve_source, this, error, sizeof(error));
@@ -419,6 +421,12 @@ inline void llama_kimi_cpu_sink_compute(ggml_tensor * dst, int ith, int nth, voi
     }
     const bool situ = node.activation.kind == KIMI_CPU_SINK_ACTIVATION_SITU;
     if (node.prefill) {
+        // the next layer's predicted experts for every token, for the sink's read-ahead
+        if (const ggml_tensor * hint = dst->src[4]; hint && runtime.prefill_hint) {
+            GGML_ASSERT(hint->type == GGML_TYPE_I32 && ggml_is_contiguous(hint) && hint->ne[1] == ntokens);
+            runtime.prefill_hint(runtime.sink, node.layer + 1, static_cast<const int32_t *>(hint->data), ntokens,
+                static_cast<int>(hint->ne[0]));
+        }
         runtime.prefill.initialize(node.cpu_reg, runtime.sink);
         ok = runtime.prefill.run_activation(runtime.prefill.context, &node.up, &node.gate, &node.down,
             static_cast<const float *>(input->data), static_cast<const int32_t *>(ids->data),

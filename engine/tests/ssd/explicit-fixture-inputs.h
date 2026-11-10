@@ -94,7 +94,8 @@ struct fixture_inputs {
             "ready_first", "early_up_gate", "role_major", "nonblocking_down_sched",
             "dynamic_rows", "read_fixed", "poll_us", "dynamic_chunk_rows", "row_weights",
             "io_cpus", "decode_participants", "prefetch_depth", "prefetch_fail_every", "prefetch_throw_drain",
-            "prefetch_throw_schedule", "cache_policy", "cache_allocation", "cache_keep", "cache_prefill_read",
+            "prefetch_throw_schedule", "prefill_lookahead", "lookahead_fail_every",
+            "cache_policy", "cache_allocation", "cache_keep", "cache_prefill_read",
             "cache_elastic", "cache_partial_reclaim", "cache_reclaimable_file", "cache_reserve_bytes",
             "cache_prefill_slots", "cache_layer_quotas", "vram_budget", "vram_async", "vram_exclusive",
             "vram_deferred", "vram_prefill", "place_costs", "trace", "timeline", "profile",
@@ -190,11 +191,11 @@ struct fixture_inputs {
         FIXTURE_BOOL(cache_keep); FIXTURE_BOOL(cache_prefill_read); FIXTURE_BOOL(cache_elastic);
         FIXTURE_BOOL(cache_partial_reclaim); FIXTURE_BOOL(cache_reclaimable_file);
         FIXTURE_BOOL(vram_async); FIXTURE_BOOL(vram_exclusive); FIXTURE_BOOL(vram_deferred);
-        FIXTURE_BOOL(vram_prefill);
+        FIXTURE_BOOL(vram_prefill); FIXTURE_BOOL(prefill_lookahead);
         FIXTURE_INT(poll_us); FIXTURE_INT(dynamic_chunk_rows); FIXTURE_INT(decode_participants);
         FIXTURE_INT(prefetch_depth); FIXTURE_INT(prefetch_fail_every); FIXTURE_INT(prefetch_throw_drain);
         FIXTURE_INT(prefetch_throw_schedule); FIXTURE_INT(cache_reserve_bytes); FIXTURE_INT(cache_prefill_slots);
-        FIXTURE_INT(vram_budget);
+        FIXTURE_INT(vram_budget); FIXTURE_INT(lookahead_fail_every);
 #undef FIXTURE_BOOL
 #undef FIXTURE_INT
         if (const char * value = get("cache_policy")) { out.cache_policy = value; }

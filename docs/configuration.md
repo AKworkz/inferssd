@@ -13,6 +13,7 @@ Python resource. There are no environment mirrors or legacy-name aliases.
 | `prefetch.depth` | integer / predicted experts | `2` | plan | all |  |
 | `place.costs` | costs / named us and GB/s terms | `empty` | plan | all |  |
 | `prefill.cpu_max_tokens` | integer / tokens | `4294967295` | plan | all | CUDA |
+| `prefill.lookahead` | integer / boolean | `1` | plan | all |  |
 | `vram.budget` | budget / bytes | `auto` | plan | all |  |
 | `vram.max_slots` | integer / slots | `0` | plan | all | CUDA |
 | `vram.reserve_mib` | integer / MiB | `0` | launch | all | CUDA |
@@ -59,6 +60,20 @@ launch. The framework chooses 1024 MiB when other compute processes are on the G
 at launch, and 0 otherwise; a setting of yours replaces that choice. On a GPU that
 shares the host's memory, the reserve adds to the host memory floor below, and the
 tier gives memory back under pressure from any process.
+
+`prefill.lookahead = 1` keeps the drive reading through the gap between two layers
+of a prompt pass, while the GPU computes the next layer's attention and routing.
+Each layer's graph also applies the next layer's router to its input, which
+predicts the next layer's experts for every token. The experts that this prediction
+makes likely to be used (at least even odds, from how often each rank of the
+prediction was right so far) and that neither the GPU tier nor the RAM cache holds
+are read into that layer's RAM cache slots, most likely first (a free slot first,
+else the layer's coldest, as for the decode prefetch), and the next layer takes
+them as RAM hits instead of reading them. The read-ahead holds no memory of its
+own: what it read stays cached. It reads as many experts as the drive reads in the
+measured gap at its calibrated rate, and at most as many as the layer's RAM cache
+slots, so it needs a RAM cache that a prompt pass reads. `0` turns this off, for
+A/B timing.
 
 The host memory ledger has two terms on every platform, and they size the expert
 caches. The envelope is a finite limit on this process's memory less a 512 MiB

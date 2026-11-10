@@ -146,6 +146,19 @@
             "maximum": 4294967295,
             "default": 4294967295
         },
+        "prefill.lookahead": {
+            "description": "Read the next layer's predicted SSD experts while the drive idles between grouped-prefill layers; changes I/O timing only",
+            "kind": "integer",
+            "unit": "boolean",
+            "producer": "plan",
+            "scope": "all",
+            "cli": "--ssd-prefill-lookahead",
+            "default_literal": "1",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 1
+        },
         "vram.budget": {
             "description": "GPU expert byte budget or auto; 0 keeps experts on the CPU",
             "kind": "budget",

@@ -21,6 +21,10 @@ struct execution_policy {
     std::vector<int> io_cpus;
     int decode_participants = 0, prefetch_depth = 0;
     uint64_t prefetch_fail_every = 0, prefetch_throw_drain = 0, prefetch_throw_schedule = 0;
+    // The grouped prefill's cross-layer read-ahead (production: prefill.lookahead), and its fault injection: every n-th
+    // read-ahead completion fails.
+    bool prefill_lookahead = false;
+    uint64_t lookahead_fail_every = 0;
     std::string cache_policy = "window", cache_allocation = "priority";
     bool cache_keep = false, cache_prefill_read = false, cache_elastic = false, cache_partial_reclaim = false;
     bool cache_reclaimable_file = false;

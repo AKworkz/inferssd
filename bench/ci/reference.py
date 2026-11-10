@@ -16,7 +16,7 @@ from ci.contract import HASH, MODELS, revision
 LEGACY_REVISION = "f5e6e26ff26d2014cccef0118048039b88163f54"
 SETTING_KEYS = frozenset((
     "expert.source", "cpu.io_cpus", "cpu.decode_participants", "prefetch.depth",
-    "place.costs", "prefill.cpu_max_tokens", "vram.budget", "vram.max_slots",
+    "place.costs", "prefill.cpu_max_tokens", "prefill.lookahead", "vram.budget", "vram.max_slots",
     "vram.reserve_mib", "host.headroom_mib", "host.budget_mib",
     "model.engram_prefetch", "model.hc_fused",
 ))

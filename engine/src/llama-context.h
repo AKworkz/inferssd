@@ -366,6 +366,7 @@ private:
     int dense_gpu_scheduler_graph_phase = 0;
     bool cpu_sink_enabled = false;
     uint32_t cpu_prefill_max_tokens = 0; // prefill ubatches up to this size run on the CPU sink
+    bool cpu_prefill_hint = false; // a sink prefill predicts each next layer's routes for its read-ahead
     // the threshold of this request: cpu_prefill_max_tokens, or the request's size when the graph does not fit
     uint32_t cpu_prefill_request_max_tokens = 0;
     // this request's prefill on the graph route: passes, their tokens, the expert-copy counters at its start

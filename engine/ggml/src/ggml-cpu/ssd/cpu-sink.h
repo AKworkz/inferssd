@@ -59,6 +59,11 @@ GGML_BACKEND_API int kimi_cpu_sink_decode_threads(struct kimi_cpu_sink * sink, i
 // Next-layer expert prefetch: the experts that `layer` is predicted to select,
 // best first, given before the decode run of the layer before it. Ignored when prefetch is off.
 GGML_BACKEND_API void kimi_cpu_sink_prefetch_hint(struct kimi_cpu_sink * sink, int32_t layer, const int32_t * experts, int n);
+// A grouped prefill's prediction of the next routed layer: the experts of `layer` that each of `ntokens` tokens is
+// predicted to select, `k` a token best first (token-major), given before the prefill call of the layer before it.
+// The read-ahead (prefill.lookahead) reads the experts it makes likely; ignored when that is off.
+GGML_BACKEND_API void kimi_cpu_sink_prefill_hint(struct kimi_cpu_sink * sink, int32_t layer, const int32_t * experts,
+    int ntokens, int k);
 
 // Configure while no run is in progress. Layer quotas are assigned in priority
 // order, up to max_experts_per_layer each; a final layer may receive a partial

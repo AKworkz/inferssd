@@ -1108,12 +1108,26 @@ struct expert_cache {
         }
         return false;
     }
-    // Next-layer prefetch: take a resident, idle slot of the layer (a free one first, else the coldest) for an
-    // expert that is not cached. The slot is inflight, invisible to lookups and allocation, until prefetch_done
-    // publishes it (or prefetch_activate publishes it early as a hit that its run waits for).
+    // Whether a grouped prefill's read of the layer's retained entries (prepare_prefill_read) could serve the expert, its
+    // sources aside. holds() answers for decode: a prefill phase leaves the cache inactive, its retained entries readable.
+    bool prefill_holds(int32_t layer_id, int32_t expert) const {
+        if (!prefill_read || !arena || !stride || !stats.valid_bytes) { return false; }
+        const auto found = std::find_if(layers.begin(), layers.end(), [&](const layer & l) { return l.id == layer_id; });
+        if (found == layers.end()) { return false; }
+        const size_t layer_index = size_t(found - layers.begin());
+        for (size_t i = found->begin; i < found->begin + found->count; ++i) {
+            const auto & e = entries[i];
+            if (e.enabled && e.valid && e.resident && e.layer_index == layer_index && e.id == expert) { return true; }
+        }
+        return false;
+    }
+    // Next-layer prefetch, of a decode run or of a grouped prefill (its read-ahead, where the prefill reads the retained
+    // entries): take a resident, idle slot of the layer (a free one first, else the coldest) for an expert that is not
+    // cached. The slot is inflight, invisible to lookups and allocation, until prefetch_done publishes it (or
+    // prefetch_activate publishes it early as a hit that its run waits for).
     // Returns -2 when the expert is already cached or on its way, -1 when there is no slot.
     int prefetch_reserve(int32_t layer_id, int32_t expert, const kimi_cpu_sink_source * roles) {
-        if (!active || paused || !stats.budget_bytes || !arena || !stride) { return -1; }
+        if (!(active || prefill_read) || paused || !stats.budget_bytes || !arena || !stride) { return -1; }
         const auto found = std::find_if(layers.begin(), layers.end(), [&](const layer & l) { return l.id == layer_id; });
         if (found == layers.end() || !found->count) { return -1; }
         const size_t layer_index = size_t(found - layers.begin());
@@ -1140,7 +1154,9 @@ struct expert_cache {
         for (int role = 0; role < 3; ++role) { e.source[role] = keys[role]; }
         return victim;
     }
-    void prefetch_done(int index, uint64_t reserved_generation, bool ok) {
+    // prefetched: a decode prefetch's entry, which its statistics follow until a run takes it (a grouped prefill's
+    // read-ahead publishes an ordinary entry).
+    void prefetch_done(int index, uint64_t reserved_generation, bool ok, bool prefetched = true) {
         if (index < 0 || size_t(index) >= entries.size() || reserved_generation != generation) { return; }
         auto & e = entries[size_t(index)];
         if (!e.inflight || e.generation != reserved_generation) { return; }
@@ -1150,7 +1166,7 @@ struct expert_cache {
             return;
         }
         if (ok && e.enabled && e.resident) {
-            e.valid = true; e.prefetched = true; e.last_touch = ++clock;
+            e.valid = true; e.prefetched = prefetched; e.last_touch = ++clock;
             stats.valid_bytes += stride;
         } else {
             e.id = -1;

@@ -38,19 +38,20 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `common/chat-auto-parser-generator.cpp` | 1 | 1 |
 | `common/chat-peg-parser.cpp` | 4 | 2 |
 | `common/chat-peg-parser.h` | 3 | 0 |
-| `common/chat.cpp` | 175 | 199 |
-| `common/chat.h` | 34 | 3 |
+| `common/chat.cpp` | 244 | 199 |
+| `common/chat.h` | 46 | 3 |
 | `common/common.cpp` | 3 | 1 |
 | `common/common.h` | 13 | 2 |
 | `common/debug.cpp` | 16 | 13 |
 | `common/download.cpp` | 2 | 2 |
 | `common/hf-cache.cpp` | 1 | 1 |
 | `common/jinja/caps.cpp` | 1 | 1 |
-| `common/jinja/parser.cpp` | 10 | 2 |
-| `common/jinja/runtime.cpp` | 6 | 1 |
+| `common/jinja/parser.cpp` | 17 | 4 |
+| `common/jinja/runtime.cpp` | 67 | 1 |
+| `common/jinja/runtime.h` | 18 | 0 |
 | `common/jinja/string.cpp` | 16 | 5 |
 | `common/jinja/string.h` | 5 | 6 |
-| `common/jinja/value.cpp` | 170 | 133 |
+| `common/jinja/value.cpp` | 189 | 133 |
 | `common/jinja/value.h` | 17 | 18 |
 | `common/peg-parser.cpp` | 16 | 0 |
 | `common/peg-parser.h` | 4 | 0 |
@@ -78,7 +79,7 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `ggml/src/ggml-cpu/arch/arm/quants.c` | 0 | 1 |
 | `ggml/src/ggml-cpu/arch/x86/quants.c` | 138 | 7 |
 | `ggml/src/ggml-cpu/ggml-cpu.c` | 3711 | 3650 |
-| `ggml/src/ggml-cpu/ggml-cpu.cpp` | 141 | 6 |
+| `ggml/src/ggml-cpu/ggml-cpu.cpp` | 142 | 6 |
 | `ggml/src/ggml-cpu/ops.cpp` | 751 | 12 |
 | `ggml/src/ggml-cpu/ops.h` | 6 | 0 |
 | `ggml/src/ggml-cpu/quants.c` | 1 | 0 |
@@ -141,12 +142,12 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `src/CMakeLists.txt` | 20 | 0 |
 | `src/llama-arch.cpp` | 168 | 2 |
 | `src/llama-arch.h` | 109 | 2 |
-| `src/llama-context.cpp` | 1318 | 45 |
-| `src/llama-context.h` | 148 | 2 |
+| `src/llama-context.cpp` | 1320 | 45 |
+| `src/llama-context.h` | 149 | 2 |
 | `src/llama-cparams.h` | 9 | 0 |
 | `src/llama-ext.h` | 16 | 0 |
-| `src/llama-graph.cpp` | 746 | 50 |
-| `src/llama-graph.h` | 158 | 5 |
+| `src/llama-graph.cpp` | 747 | 50 |
+| `src/llama-graph.h` | 161 | 5 |
 | `src/llama-hparams.cpp` | 21 | 0 |
 | `src/llama-hparams.h` | 73 | 1 |
 | `src/llama-impl.h` | 35 | 0 |
@@ -176,14 +177,16 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `src/models/qwen35.cpp` | 2 | 2 |
 | `src/models/qwen35moe.cpp` | 8 | 2 |
 | `src/models/qwen3next.cpp` | 2 | 2 |
-| `tools/server/CMakeLists.txt` | 13 | 5 |
+| `tools/server/CMakeLists.txt` | 15 | 5 |
 | `tools/server/server-chat.cpp` | 66 | 16 |
-| `tools/server/server-common.cpp` | 288 | 5 |
-| `tools/server/server-common.h` | 22 | 1 |
-| `tools/server/server-context.cpp` | 685 | 127 |
+| `tools/server/server-common.cpp` | 354 | 16 |
+| `tools/server/server-common.h` | 27 | 2 |
+| `tools/server/server-context.cpp` | 796 | 148 |
+| `tools/server/server-context.h` | 7 | 1 |
 | `tools/server/server-task.cpp` | 195 | 183 |
-| `tools/server/server-task.h` | 23 | 80 |
+| `tools/server/server-task.h` | 28 | 80 |
+| `tools/server/server.cpp` | 1 | 0 |
 | `tools/server/tests/utils.py` | 2 | 2 |
 
-Total: 17658 added, 5685 removed across 153 upstream paths.
+Total: 18081 added, 5721 removed across 156 upstream paths.
 <!-- END UPSTREAM INVENTORY -->

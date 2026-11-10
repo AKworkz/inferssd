@@ -11,7 +11,7 @@
 // borrow it only while that backend stays loaded, just as for its other procs.
 namespace ssd { namespace cpu {
 struct api_v2 {
-    uint32_t version;   // 5: request_begin
+    uint32_t version;   // 6: prefill_hint
     size_t size;
     decltype(&kimi_cpu_sink_source_size) source_size;
     decltype(&create_configured) create;
@@ -30,6 +30,7 @@ struct api_v2 {
     decltype(&cache_make_room_configured) cache_make_room;
     decltype(&cache_prefill_room_configured) cache_prefill_room;
     decltype(&kimi_cpu_sink_prefetch_hint) prefetch_hint;
+    decltype(&kimi_cpu_sink_prefill_hint) prefill_hint;
     decltype(&kimi_cpu_sink_vram_reserve) vram_reserve;
     decltype(&kimi_cpu_prefill_create) prefill_create;
     decltype(&kimi_cpu_prefill_run) prefill_run;
@@ -45,7 +46,7 @@ using get_api_v2 = const api_v2 * (*)();
 
 // Check the prefix before accessing members from a possibly different build.
 inline bool valid(const api_v2 * api) noexcept {
-    return api && api->version == 5 && api->size == sizeof(api_v2) &&
+    return api && api->version == 6 && api->size == sizeof(api_v2) &&
         api->runtime_services_size == sizeof(runtime_services) &&
         api->source_size &&
         api->create &&
@@ -60,6 +61,7 @@ inline bool valid(const api_v2 * api) noexcept {
         api->cache_make_room &&
         api->cache_prefill_room &&
         api->prefetch_hint &&
+        api->prefill_hint &&
         api->vram_reserve &&
         api->prefill_create &&
         api->prefill_run &&

@@ -37,6 +37,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <sstream>
@@ -371,6 +372,22 @@ struct sink_slot {
     size_t request = 0;
 };
 
+// An expert of the grouped prefill's read-ahead plan (kimi_cpu_sink::lookahead): its id, its three roles' sources as
+// the planning call resolved them, and the RAM cache slot it lands in (prefetch_reserve: inflight, invisible to lookups
+// and allocation, until the next layer's call publishes it). The I/O thread reads each role at `target`; its state is
+// under io_mutex.
+struct sink_lookahead_read {
+    int32_t expert = -1;
+    kimi_cpu_sink_source role[3] = {};
+    int entry = -1;
+    uint64_t generation = 0;
+    void * target[3] = {};
+    unsigned remaining = 0, ready_roles = 0;
+    bool issued = false, failed = false;
+};
+// The CQE tags of read-ahead reads, above every ring slot's 3 * index + role: the plan's 3 * index + role from here.
+constexpr uint64_t sink_lookahead_tag = uint64_t(1) << 32;
+
 // Diagnostic only. All times use the scheduler's CLOCK_MONOTONIC microseconds.
 // An I/O completion is when this process observes the CQE, not a device timestamp.
 // The I/O (its thread, or a run that reads for itself) and each worker write disjoint fields; print only after
@@ -654,6 +671,68 @@ struct kimi_cpu_sink {
     bool io_failed = false, io_by_run = false;
     sink_clock::time_point io_start;
     kimi_cpu_sink_stats current = {};
+    // The ring's counters when a run's own reads ended, before any read-ahead (io_mutex): a grouped-prefill call reports
+    // its completions from them, as the next layer's read-ahead runs on the ring beside its tail.
+    uint64_t io_completed_end = 0, io_pending_end = 0;
+
+    // The grouped prefill's cross-layer read-ahead (prefill.lookahead). In a prompt pass the drive idles from the end
+    // of a layer's own reads (io_end) to the first read of the next layer's call, while the call finishes its compute
+    // and the GPU computes the next layer's attention and router. The call for layer L plans the next layer's experts
+    // that its predicted routes make likely and that neither the GPU tier nor the RAM cache holds (lookahead_plan_next):
+    // each takes a slot of the RAM cache for that layer, as the decode prefetch does, and once L's own reads are over the
+    // I/O thread reads them into those slots through the ring (lookahead_run): reads moved earlier, none added. The call
+    // for L + 1 stops it before its prepare, waits for the reads in flight and publishes what landed (lookahead_handover),
+    // and its prefill read of the RAM cache takes them as hits. The read-ahead holds no memory of its own: what it read
+    // stays cached, and what the next layer did not use is the coldest of what the cache holds. A plan holds as many
+    // experts as the drive reads in the idle window at its calibrated rate: the window's median over the pass, the last
+    // pass's for its first layers.
+    struct lookahead_state {
+        bool enabled = false;
+        uint64_t fail_every = 0, completions = 0; // explicit fixture fault injection: every n-th completion fails
+        // The plan of `layer`: set by the call of the layer before it, before it publishes its job; the I/O thread
+        // reads it while `active` (io_mutex). next, inflight and batch are the I/O thread's.
+        int32_t layer = -1;
+        std::vector<sink_lookahead_read> plan;
+        size_t next = 0;
+        unsigned inflight = 0;                     // role reads in flight
+        std::vector<std::pair<size_t, int>> batch; // (plan index, role) of the reads one step queues
+        bool active = false, stop = false;
+        int32_t job_layer = -1;                    // the grouped-prefill call of the job the I/O thread runs
+        // The drive's idle window (io_mutex): from the end of a grouped-prefill call's own reads to the start of the next
+        // layer's call of the same pass, the time the read-ahead has. What the next call does before its own reads (its
+        // handover, prepare and plan) is not in it: the read-ahead is stopped then.
+        sink_clock::time_point window_start;
+        int32_t window_layer = -1;
+        bool window_open = false;
+        int32_t pass_layer = -1;                   // the last grouped-prefill call's layer: a pass runs in layer order
+        std::vector<double> pass_windows_us;       // this pass's windows so far
+        double last_pass_median_us = 0;
+        // The plan in progress (io_mutex): experts issued, landed whole, failed.
+        uint64_t issued = 0, landed = 0, failed = 0;
+        // The cache slots the handover published for the call in progress: its prefill read counts the hits among them.
+        std::vector<int> landed_entries;
+        // Totals for the report at destruction.
+        uint64_t layers = 0, planned = 0, issued_total = 0, landed_total = 0, failed_total = 0, used = 0, unused = 0,
+                 used_bytes = 0, no_slot = 0, unresolved = 0, unlikely = 0;
+        // The prediction of the next layer's routes (kimi_cpu_sink_prefill_hint): `hint_layer`'s experts, hint_k a
+        // token best first over hint_tokens tokens. The plan keeps its copy (`planned_hint`) until the call of the layer it
+        // predicts, which measures it against the routes the layer took.
+        int32_t hint_layer = -1, planned_layer = -1;
+        int hint_k = 0, hint_tokens = 0, planned_k = 0, planned_tokens = 0;
+        std::vector<int32_t> hint, planned_hint;
+        // Per rank of a prediction, over the prefill passes so far: the tokens predicted, and those whose prediction at
+        // that rank the layer selected.
+        uint64_t rank_predicted[16] = {}, rank_selected[16] = {};
+    } lookahead;
+    // One grouped-prefill call's receipts ([kimi_cpu_prefill_lookahead]); the call's thread only.
+    struct lookahead_receipt {
+        int32_t layer = -1;
+        double window_us = -1, estimate_us = 0, drive_us_per_mb = 0;
+        uint64_t planned = 0, issued = 0, landed = 0, failed = 0, used = 0, unused = 0, bytes = 0, next_n = 0;
+        uint64_t likely = 0;  // the next layer's experts with P >= 1/2 that neither the GPU tier nor the RAM cache holds
+        uint64_t no_slot = 0; // the next layer's plan stopped short: its RAM cache slots were all taken
+        size_t next_planned = 0;
+    } lookahead_report;
 
     const bool ready_first;
     const bool early_up_gate;
@@ -816,6 +895,15 @@ struct kimi_cpu_sink {
         cache.before_discard = [](void * p, size_t first, size_t count) { static_cast<kimi_cpu_sink *>(p)->host_unlock(first, count); };
         cache.before_discard_arg = this;
         vram.ram_slot_locked = [this](int entry) { return entry >= 0 && host_lock.is_locked(size_t(entry)); };
+        lookahead.enabled = configuration.policy.prefill_lookahead;
+        lookahead.fail_every = configuration.policy.lookahead_fail_every;
+        // the reads into the arena (the decode prefetch's, the grouped prefill's read-ahead) land before it goes
+        cache.before_unmap = [](void * p) {
+            auto * sink = static_cast<kimi_cpu_sink *>(p);
+            sink->prefetch_wait_reads();
+            sink->lookahead_unmap();
+        };
+        cache.before_unmap_arg = this;
         if (role_major && !early_up_gate) {
             throw std::runtime_error("ROLE_MAJOR requires EARLY_UP_GATE=1");
         }
@@ -860,6 +948,7 @@ struct kimi_cpu_sink {
             throw;
         }
         if (prefetch.topk) { std::fprintf(stderr, "[kimi_cpu_sink_prefetch] enabled topk=%d readers=3\n", prefetch.topk); }
+        if (lookahead.enabled) { std::fprintf(stderr, "[kimi_cpu_prefill_lookahead] enabled=1\n"); }
     }
 
     // The context's reclaimer (ssd::host::actions), which the host arbiter runs for every admission of the context
@@ -889,8 +978,6 @@ struct kimi_cpu_sink {
         prefetch.fail_every = configuration.policy.prefetch_fail_every;
         prefetch.throw_drain = configuration.policy.prefetch_throw_drain;
         prefetch.throw_schedule = configuration.policy.prefetch_throw_schedule;
-        cache.before_unmap = [](void * p) { static_cast<kimi_cpu_sink *>(p)->prefetch_wait_reads(); };
-        cache.before_unmap_arg = this;
         prefetch.readers.reserve(3);
         for (int i = 0; i < 3; ++i) {
             prefetch.readers.emplace_back([this, i] {
@@ -1294,8 +1381,9 @@ struct kimi_cpu_sink {
         }
         cache.before_unmap = nullptr;
         cache.before_release = nullptr; // vram is destroyed before cache
-        stop_threads();
+        stop_threads(); // the I/O thread stops a read-ahead and waits for its reads before it returns
         ring_unlock(); // the tier is still here, and the ring's buffers too
+        lookahead_summary();
         // Explicit unregister is synchronous. Do this before member destruction
         // frees slots; closing only in sink_ring's destructor would be too late.
         ring.close_ring();
@@ -2269,6 +2357,7 @@ struct kimi_cpu_sink {
     }
 
     void account_read_bytes(const sink_completion & cqe) {
+        if (cqe.user_data >= sink_lookahead_tag) { return; } // a read-ahead's: not this run's read
         if (cqe.user_data >= 3 * slots.size()) { throw std::runtime_error("invalid CPU sink CQE target"); }
         if (cqe.res <= 0) { return; }
         auto & request = requests[slots[cqe.user_data / 3].request];
@@ -2294,7 +2383,31 @@ struct kimi_cpu_sink {
             }
             lock.lock();
             if (profile_enabled) { current.io_cpu_us = sink_thread_cpu_us() - cpu_start; }
-            io_end();
+            const auto ended = sink_clock::now();
+            io_completed_end = ring.completed();
+            io_pending_end = ring.pending();
+            // A grouped-prefill call's reads are over: the drive's idle window opens, and the next layer's read-ahead
+            // starts unless the run failed or was cancelled. Its first reads go out before the run is told its reads
+            // are over, so that the next call always finds them; the rest follow while the run computes its tail.
+            if (lookahead.job_layer >= 0) {
+                lookahead.window_open = true;
+                lookahead.window_start = ended;
+                lookahead.window_layer = lookahead.job_layer;
+                lookahead.job_layer = -1;
+            }
+            const bool ahead = lookahead.active && !lookahead.stop && !io_stop && !io_failed && !poisoned;
+            if (lookahead.active && !ahead) { lookahead.active = false; }
+            if (ahead) {
+                lock.unlock();
+                lookahead_step();
+                lock.lock();
+            }
+            io_end(ended);
+            if (ahead && lookahead.active) {
+                lock.unlock();
+                lookahead_run();
+                lock.lock();
+            }
         }
     }
 
@@ -2319,9 +2432,10 @@ struct kimi_cpu_sink {
         ++current.read_errors;
     }
 
-    // io_mutex held: the run's reads are over, and the drive's idle window opens for the next layer's prefetch.
-    void io_end() {
-        current.io_us = elapsed_us(io_start);
+    // io_mutex held: the run's reads are over (at `ended`), and the drive's idle window opens for the next layer's
+    // prefetch.
+    void io_end(sink_clock::time_point ended = sink_clock::now()) {
+        current.io_us = std::chrono::duration<double, std::micro>(ended - io_start).count();
         if (timeline_active) { timeline_call[4] = ggml_time_us(); }
         io_done = true;
         io_by_run = false;
@@ -2415,6 +2529,9 @@ struct kimi_cpu_sink {
         bool consumed = false;
         while (sink_io_value(ring.pop(cqe))) {
             consumed = true;
+            // A run's reads never share the ring with a read-ahead (each entry stops it first): still, one is the
+            // read-ahead's, never this run's.
+            if (cqe.user_data >= sink_lookahead_tag) { lookahead_completion(cqe); continue; }
             if (!io_inflight || cqe.user_data >= 3 * slots.size()) {
                 throw std::runtime_error("invalid CPU sink CQE");
             }
@@ -2510,6 +2627,397 @@ struct kimi_cpu_sink {
     template <class Ready> void io_wait(std::unique_lock<std::mutex> & lock, Ready ready) {
         if (io_by_run) { io_poll_until(lock, ready); }
         else { io_cv.wait(lock, ready); }
+    }
+
+    // ---- The grouped prefill's cross-layer read-ahead (lookahead_state) ----
+
+    static double lookahead_median(std::vector<double> values) {
+        if (values.empty()) { return 0; }
+        const size_t mid = values.size() / 2;
+        std::nth_element(values.begin(), values.begin() + mid, values.end());
+        const double upper = values[mid];
+        if (values.size() % 2) { return upper; }
+        return (upper + *std::max_element(values.begin(), values.begin() + mid)) / 2;
+    }
+
+    // The I/O thread: queues the plan's next experts into their RAM cache slots, as many as the ring's depth takes
+    // beside the reads in flight, submits them and takes the completions the ring has. The ring is the I/O thread's
+    // here: a run's reads are over, and the next entry stops this before it uses the ring. False when nothing happened.
+    bool lookahead_step() {
+        auto & batch = lookahead.batch;
+        batch.clear();
+        try {
+            {
+                std::lock_guard<std::mutex> lock(io_mutex);
+                const size_t depth = 3 * slots.size(); // the depth the layers' own reads reach
+                while (!lookahead.stop && !io_stop && lookahead.next < lookahead.plan.size() &&
+                        lookahead.inflight + batch.size() + 3 <= depth) {
+                    auto & read = lookahead.plan[lookahead.next];
+                    read.issued = true;
+                    read.remaining = 3;
+                    for (int role = 0; role < 3; ++role) { batch.push_back({ lookahead.next, role }); }
+                    ++lookahead.next;
+                    ++lookahead.issued;
+                }
+            }
+            // the plan does not change while the read-ahead runs, and an issued read's slot is inflight in the cache
+            for (const auto & item : batch) {
+                const auto & read = lookahead.plan[item.first];
+                const auto & source = read.role[item.second];
+                sink_io_value(ring.queue({ source.fd_direct, source.offset, source.nbytes }, read.target[item.second],
+                    sink_lookahead_tag + 3 * item.first + unsigned(item.second), false));
+            }
+            if (!batch.empty()) {
+                sink_io_value(ring.submit(unsigned(batch.size())));
+                lookahead.inflight += unsigned(batch.size());
+            }
+            sink_completion cqe;
+            bool consumed = false;
+            while (sink_io_value(ring.pop(cqe))) {
+                consumed = true;
+                if (cqe.user_data < sink_lookahead_tag) { throw std::runtime_error("a run's CQE beside the read-ahead"); }
+                lookahead_completion(cqe);
+            }
+            return consumed || !batch.empty();
+        } catch (const std::exception & e) {
+            lookahead_break(e);
+            return false;
+        }
+    }
+    // The I/O thread: a read-ahead completion. A failed or short read (or an injected failure) fails its expert, whose
+    // slot goes back once the next entry finishes the plan; nothing else fails, and the ring stays usable.
+    void lookahead_completion(const sink_completion & cqe) {
+        const uint64_t tag = cqe.user_data - sink_lookahead_tag;
+        if (!lookahead.inflight || tag >= 3 * uint64_t(lookahead.plan.size())) {
+            throw std::runtime_error("invalid CPU sink read-ahead CQE");
+        }
+        --lookahead.inflight;
+        const size_t index = size_t(tag / 3);
+        const int role = int(tag % 3);
+        std::lock_guard<std::mutex> lock(io_mutex);
+        auto & read = lookahead.plan[index];
+        if (!read.issued || !read.remaining) { throw std::runtime_error("CPU sink read-ahead CQE for an expert not being read"); }
+        const auto & range = read.role[role];
+        const size_t expected = range.nbytes;
+        const size_t required = range.payload_nbytes ? range.data_offset + range.payload_nbytes : expected;
+        const bool injected = lookahead.fail_every && ++lookahead.completions % lookahead.fail_every == 0;
+        if (injected || cqe.res < 0 || size_t(cqe.res) < required || size_t(cqe.res) > expected) {
+            if (!read.failed) {
+                std::fprintf(stderr, "[kimi_cpu_prefill_lookahead] event=read_failed layer=%d expert=%d role=%d result=%d"
+                    " expected=%zu injected=%d\n", lookahead.layer, read.expert, role, int(cqe.res), expected, int(injected));
+            }
+            read.failed = true;
+        } else {
+            read.ready_roles |= 1u << role;
+        }
+        if (--read.remaining) { return; }
+        if (read.failed || read.ready_roles != 7u) { read.failed = true; ++lookahead.failed; }
+        else { ++lookahead.landed; }
+    }
+    // The I/O thread, after a run's reads and the read-ahead's first step: issues the rest of the plan as the ring's
+    // depth allows, until the plan is read or the next call stops it, then waits for the reads in flight.
+    void lookahead_run() {
+        for (;;) {
+            const bool progressed = lookahead_step();
+            std::unique_lock<std::mutex> lock(io_mutex);
+            if (!lookahead.active) { return; } // the ring broke (lookahead_break)
+            const bool more = !lookahead.stop && !io_stop && lookahead.next < lookahead.plan.size();
+            if (!lookahead.inflight && !more) { break; }
+            if (progressed && more) { continue; }
+            lock.unlock();
+            try { sink_io_value(ring.wait()); }
+            catch (const std::exception & e) { lookahead_break(e); return; }
+        }
+        std::lock_guard<std::mutex> lock(io_mutex);
+        lookahead.active = false;
+        io_cv.notify_all();
+    }
+    // The I/O thread: the ring failed under the read-ahead (not a read: a system call). As io_break: drain it, then it
+    // is closed, the sink poisoned for the next entry; the call in progress, whose reads are over, is not failed.
+    void lookahead_break(const std::exception & e) {
+        try {
+            sink_io_value(ring.drain(this, [](void *, const sink_completion &) {}));
+        } catch (const std::exception & drain_error) {
+            std::fprintf(stderr, "[kimi_cpu_sink] cannot drain the read-ahead after %s: %s; aborting\n", e.what(),
+                drain_error.what());
+            std::abort();
+        }
+        ring.close_ring();
+        std::lock_guard<std::mutex> lock(io_mutex);
+        lookahead.inflight = 0;
+        for (auto & read : lookahead.plan) {
+            if (read.issued && read.remaining) { read.remaining = 0; read.failed = true; ++lookahead.failed; }
+        }
+        poisoned = true;
+        lookahead.active = false;
+        std::fprintf(stderr, "[kimi_cpu_prefill_lookahead] event=ring_failed error=%s\n", e.what());
+        io_cv.notify_all();
+    }
+    // (lock on io_mutex) The read-ahead issues nothing more, and the reads it has in flight landed or failed.
+    void lookahead_stop(std::unique_lock<std::mutex> & lock) {
+        if (!lookahead.active) { return; }
+        lookahead.stop = true;
+        io_cv.notify_all();
+        io_cv.wait(lock, [&] { return !lookahead.active; });
+        lookahead.stop = false;
+    }
+    // The read-ahead stopped (run_mutex held): each of the plan's cache slots holds the expert it read, published, or
+    // goes back. For a plan of `layer`, `published` gets the slots that hold its experts now.
+    void lookahead_finish(int32_t layer, std::vector<int> * published) {
+        for (const auto & read : lookahead.plan) {
+            const bool landed = read.issued && !read.remaining && !read.failed;
+            cache.prefetch_done(read.entry, read.generation, landed, false);
+            if (landed && published && lookahead.layer == layer) { published->push_back(read.entry); }
+        }
+        lookahead.plan.clear();
+        lookahead.next = 0;
+        lookahead.layer = -1;
+    }
+    // Every other entry that holds the run mutex and may use the ring or the cache (a phase begin, a decode run, a
+    // reserve, a reset): the read-ahead stops, what it read is published, and the pass ends.
+    void lookahead_quiesce() {
+        {
+            std::unique_lock<std::mutex> lock(io_mutex);
+            lookahead_stop(lock);
+            lookahead.hint_layer = lookahead.planned_layer = -1;
+            lookahead.window_open = false;
+            lookahead.pass_layer = -1;
+        }
+        lookahead_finish(-1, nullptr);
+        lookahead.landed_entries.clear();
+    }
+    // sink_cache::before_unmap (run_mutex held): the cache drops its arena, and with it the plan's slots (its generation
+    // changes); the read-ahead's reads into it land first.
+    void lookahead_unmap() {
+        std::unique_lock<std::mutex> lock(io_mutex);
+        lookahead_stop(lock);
+        lookahead.plan.clear();
+        lookahead.next = 0;
+        lookahead.layer = -1;
+        lookahead.landed_entries.clear();
+    }
+    // A grouped-prefill call for `layer`, as it starts (run_mutex held, before its prepare): the read-ahead the call
+    // before planned stops issuing, its reads in flight land, and the experts it read are published in the RAM cache,
+    // where this call's prefill read takes them as hits. A call out of the pass's layer order starts a new pass.
+    void lookahead_handover(int32_t layer) {
+        auto & r = lookahead_report;
+        {
+            std::unique_lock<std::mutex> lock(io_mutex);
+            const auto now = sink_clock::now();
+            double window_us = -1;
+            if (lookahead.window_open && layer >= 0 && lookahead.window_layer + 1 == layer) {
+                window_us = std::chrono::duration<double, std::micro>(now - lookahead.window_start).count();
+            }
+            lookahead.window_open = false;
+            lookahead_stop(lock);
+            r = {};
+            r.layer = layer;
+            r.window_us = window_us;
+            r.planned = lookahead.layer == layer ? lookahead.plan.size() : 0;
+            r.issued = lookahead.issued; r.landed = lookahead.landed; r.failed = lookahead.failed;
+            lookahead.issued = lookahead.landed = lookahead.failed = 0;
+            if (layer < 0 || layer != lookahead.pass_layer + 1) {
+                if (!lookahead.pass_windows_us.empty()) { lookahead.last_pass_median_us = lookahead_median(lookahead.pass_windows_us); }
+                lookahead.pass_windows_us.clear();
+            }
+            if (window_us >= 0) { lookahead.pass_windows_us.push_back(window_us); }
+            lookahead.pass_layer = layer;
+        }
+        lookahead.landed_entries.clear();
+        lookahead_finish(layer, &lookahead.landed_entries);
+    }
+    // The call for `layer` of a grouped prefill, its requests prepared: the prediction the call before it planned
+    // with (for this layer) against the routes this layer took, a rank at a time. A prediction of another layer or
+    // pass measures nothing.
+    void lookahead_measure(int32_t layer, const kimi_cpu_sink_prefill_batch & batch) {
+        auto & la = lookahead;
+        const bool same = la.planned_layer == layer && layer >= 0 && la.planned_tokens == batch.ntokens &&
+            la.planned_k > 0 && batch.nslots > 0 && batch.route_request_index;
+        la.planned_layer = -1;
+        if (!same) { return; }
+        const int k = std::min(la.planned_k, 16);
+        for (int t = 0; t < batch.ntokens; ++t) {
+            const int * routes = batch.route_request_index + size_t(t) * size_t(batch.nslots);
+            for (int rank = 0; rank < k; ++rank) {
+                const int32_t predicted = la.planned_hint[size_t(t) * size_t(la.planned_k) + size_t(rank)];
+                bool selected = false;
+                for (int s = 0; s < batch.nslots && !selected; ++s) {
+                    const int request = routes[s];
+                    selected = request >= 0 && size_t(request) < requests.size() && requests[size_t(request)].id == predicted;
+                }
+                ++la.rank_predicted[rank];
+                la.rank_selected[rank] += selected;
+            }
+        }
+    }
+    // The call for `layer` of a grouped prefill (run_mutex held, the read-ahead stopped, before its reads go out): the
+    // plan of the next layer's read-ahead. The prediction of the next layer's routes names each expert for some tokens
+    // at some ranks; an expert named at ranks r_1..r_m is selected with P = 1 - prod(1 - q_r), q_r the rate at which
+    // rank r's prediction was selected in the prefill passes so far (lookahead_measure). The plan: the next layer's
+    // experts with P >= 1/2 that the GPU tier does not hold and the RAM cache's prefill read would not serve, most
+    // likely first, at most N = ceil(window x drive rate / expert bytes), the experts the drive reads in the idle window
+    // this pass is estimated to have, and as many as the layer's RAM cache slots take (prefetch_reserve, as the decode
+    // prefetch takes one: a free slot first, else the layer's coldest). The estimate: the windows' median over the pass
+    // so far, else the last pass's. No plan without a prediction of the next layer or a measured rate, before any
+    // window, without a drive line, or for the last routed layer (the next one resolves no expert).
+    void lookahead_plan_next(int32_t layer, const ggml_tensor * up, int ntokens, int nslots) {
+        auto & r = lookahead_report;
+        {
+            std::lock_guard<std::mutex> lock(io_mutex);
+            r.estimate_us = !lookahead.pass_windows_us.empty() ? lookahead_median(lookahead.pass_windows_us) :
+                lookahead.last_pass_median_us;
+        }
+        // the prediction this plan takes, kept for the next call's measure
+        const bool predicted = lookahead.hint_layer == layer + 1 && lookahead.hint_tokens == ntokens && layer >= 0;
+        lookahead.planned_layer = predicted ? layer + 1 : -1;
+        if (predicted) {
+            lookahead.planned_hint.swap(lookahead.hint);
+            lookahead.planned_k = lookahead.hint_k;
+            lookahead.planned_tokens = lookahead.hint_tokens;
+        }
+        lookahead.hint_layer = -1;
+        if (!lookahead.enabled || !predicted || nslots <= 0 || requests.empty()) { return; }
+        // the drive's calibrated line (decode's layers with reads, the prefill window's, the measured prior)
+        const double drive_us_per_mb = r.drive_us_per_mb = place_table(ntokens).drive_us_per_mb;
+        const auto & first = requests.front();
+        const double expert_mb = double(first.role[0].nbytes + first.role[1].nbytes + first.role[2].nbytes) / 1e6;
+        if (!(r.estimate_us > 0) || !(drive_us_per_mb > 0) || !(expert_mb > 0)) { return; }
+        r.next_n = uint64_t(std::ceil(r.estimate_us / (expert_mb * drive_us_per_mb)));
+        const int32_t next = layer + 1;
+        const int experts = int(up->ne[2]);
+        // log(1 - P) of each expert from the ranks the prediction names it at; a rate not yet measured (a rank no
+        // token has been predicted at) leaves it out
+        const int k = std::min(lookahead.planned_k, 16);
+        double log_miss[16];
+        for (int rank = 0; rank < k; ++rank) {
+            const uint64_t n = lookahead.rank_predicted[rank];
+            const double q = n ? double(lookahead.rank_selected[rank]) / double(n) : 0.0;
+            log_miss[rank] = q >= 1.0 ? -INFINITY : std::log1p(-q);
+        }
+        std::vector<double> log_unused(size_t(experts), 0.0);
+        for (int t = 0; t < ntokens; ++t) {
+            for (int rank = 0; rank < k; ++rank) {
+                const int32_t e = lookahead.planned_hint[size_t(t) * size_t(lookahead.planned_k) + size_t(rank)];
+                if (e >= 0 && e < experts) { log_unused[size_t(e)] += log_miss[rank]; }
+            }
+        }
+        std::vector<int32_t> ids(static_cast<size_t>(experts));
+        std::iota(ids.begin(), ids.end(), 0);
+        std::vector<uint8_t> held(size_t(experts), 0);
+        vram.held(next, ids.data(), experts, held.data());
+        // A read still in flight when the next call starts delays its own reads by about the read's time, which is
+        // what a used read saves: reading an expert ahead pays when P >= 1/2.
+        std::vector<int32_t> likely;
+        for (int e = 0; e < experts; ++e) {
+            if (held[size_t(e)] || cache.prefill_holds(next, e) || !(log_unused[size_t(e)] <= std::log(0.5))) { continue; }
+            likely.push_back(e);
+        }
+        std::stable_sort(likely.begin(), likely.end(),
+            [&](int32_t a, int32_t b) { return log_unused[size_t(a)] < log_unused[size_t(b)]; });
+        r.likely = likely.size();
+        if (likely.empty()) { ++lookahead.unlikely; return; }
+        const size_t target = size_t(std::min<uint64_t>(r.next_n, likely.size()));
+        if (!target) { return; }
+        char names[3][GGML_MAX_NAME];
+        std::snprintf(names[0], sizeof(names[0]), "blk.%d.ffn_up_exps.weight", next);
+        std::snprintf(names[1], sizeof(names[1]), "blk.%d.ffn_gate_exps.weight", next);
+        std::snprintf(names[2], sizeof(names[2]), "blk.%d.ffn_down_exps.weight", next);
+        std::vector<sink_lookahead_read> plan;
+        plan.reserve(target);
+        uint64_t unresolved = 0;
+        for (size_t i = 0; i < likely.size() && plan.size() < target; ++i) {
+            sink_lookahead_read read;
+            read.expert = likely[i];
+            bool resolved = true;
+            for (int role = 0; role < 3 && resolved; ++role) {
+                const auto & source = read.role[role];
+                resolved = resolve(names[role], read.expert, &read.role[role]) && source.offset % 4096 == 0 &&
+                    source.nbytes && source.nbytes % 4096 == 0 && source.nbytes <= size_t(std::numeric_limits<int>::max());
+            }
+            if (!resolved) { ++unresolved; continue; }
+            read.entry = cache.prefetch_reserve(next, read.expert, read.role);
+            if (read.entry == -2) { continue; }            // cached, or on its way
+            if (read.entry < 0) { ++r.no_slot; break; }     // the layer has no idle slot left
+            read.generation = cache.generation;
+            for (int role = 0; role < 3; ++role) { read.target[role] = cache.data(read.entry, role); }
+            plan.push_back(read);
+        }
+        lookahead.unresolved += unresolved;
+        if (plan.empty()) { return; } // none resolves (the last routed layer's call), or no slot
+        std::lock_guard<std::mutex> lock(io_mutex);
+        lookahead.plan.swap(plan);
+        lookahead.layer = next;
+        lookahead.next = 0;
+        r.next_planned = lookahead.plan.size();
+    }
+    // After the RAM cache's prefill read (run_mutex held): the hits among the experts the read-ahead published for this
+    // layer are the reads it moved earlier; the others stay cached as the coldest of what the cache holds.
+    void lookahead_count_used() {
+        auto & r = lookahead_report;
+        for (const auto & request : requests) {
+            if (request.vram_slot >= 0 || request.cache_hit < 0 ||
+                    std::find(lookahead.landed_entries.begin(), lookahead.landed_entries.end(), request.cache_hit) ==
+                    lookahead.landed_entries.end()) {
+                continue;
+            }
+            ++r.used;
+            r.bytes += request.role[0].nbytes + request.role[1].nbytes + request.role[2].nbytes;
+        }
+        r.unused = lookahead.landed_entries.size() - std::min<uint64_t>(r.used, lookahead.landed_entries.size());
+        lookahead.landed_entries.clear();
+    }
+    // io_mutex held, as a grouped-prefill call for `layer` publishes its I/O job: the drive's idle window since the
+    // previous layer's reads ended closes, sampled when that layer was this one's predecessor in the pass, and the
+    // next layer's plan goes to the I/O thread with the job. A call without a job leaves the drive idle from here.
+    // True when there is a job.
+    bool lookahead_publish(int32_t layer, bool reads) {
+        const auto now = sink_clock::now();
+        lookahead.stop = false;
+        lookahead.active = !lookahead.plan.empty();
+        if (!reads && !lookahead.active) {
+            lookahead.window_open = layer >= 0;
+            lookahead.window_start = now;
+            lookahead.window_layer = layer;
+            return false;
+        }
+        lookahead.job_layer = layer;
+        return true;
+    }
+    // One line a grouped-prefill call: the window before its reads (-1: none sampled), the estimate its plan of the
+    // next layer took, what the previous call's plan read for it and what it used, and its own plan.
+    void lookahead_print() {
+        const auto & r = lookahead_report;
+        ++lookahead.layers;
+        lookahead.planned += r.next_planned; lookahead.issued_total += r.issued; lookahead.landed_total += r.landed;
+        lookahead.failed_total += r.failed; lookahead.used += r.used; lookahead.unused += r.unused;
+        lookahead.used_bytes += r.bytes; lookahead.no_slot += r.no_slot;
+        std::fprintf(stderr, "[kimi_cpu_prefill_lookahead] layer=%d enabled=%d window_us=%.0f estimate_us=%.0f"
+            " drive_us_per_mb=%.3f likely=%llu planned=%llu issued=%llu read=%llu failed=%llu used=%llu unused=%llu"
+            " bytes=%llu next_n=%llu next_planned=%zu no_slot=%llu\n", r.layer, int(lookahead.enabled),
+            r.window_us, r.estimate_us, r.drive_us_per_mb, (unsigned long long) r.likely, (unsigned long long) r.planned,
+            (unsigned long long) r.issued, (unsigned long long) r.landed, (unsigned long long) r.failed,
+            (unsigned long long) r.used, (unsigned long long) r.unused, (unsigned long long) r.bytes,
+            (unsigned long long) r.next_n, r.next_planned, (unsigned long long) r.no_slot);
+    }
+    void lookahead_summary() {
+        if (!lookahead.enabled || !lookahead.layers) { return; }
+        std::fprintf(stderr, "[kimi_cpu_prefill_lookahead] reason=destroy layers=%llu planned=%llu issued=%llu read=%llu"
+            " failed=%llu used=%llu unused=%llu used_bytes=%llu no_slot=%llu unresolved=%llu unlikely=%llu\n",
+            (unsigned long long) lookahead.layers, (unsigned long long) lookahead.planned,
+            (unsigned long long) lookahead.issued_total, (unsigned long long) lookahead.landed_total,
+            (unsigned long long) lookahead.failed_total, (unsigned long long) lookahead.used,
+            (unsigned long long) lookahead.unused, (unsigned long long) lookahead.used_bytes,
+            (unsigned long long) lookahead.no_slot, (unsigned long long) lookahead.unresolved,
+            (unsigned long long) lookahead.unlikely);
+        std::string rates;
+        for (int rank = 0; rank < 16 && lookahead.rank_predicted[rank]; ++rank) {
+            char one[32];
+            std::snprintf(one, sizeof(one), "%s%.3f", rank ? "," : "",
+                double(lookahead.rank_selected[rank]) / double(lookahead.rank_predicted[rank]));
+            rates += one;
+        }
+        std::fprintf(stderr, "[kimi_cpu_prefill_lookahead] reason=destroy_prediction tokens=%llu rank_selected=%s\n",
+            (unsigned long long) lookahead.rank_predicted[0], rates.c_str());
     }
 
     template<class T> void resize_scratch(std::vector<T> & values, size_t count) {
@@ -3059,8 +3567,13 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
     if (stats) { *stats = {}; }
     if (!sink) { sink_error(error, error_size, "null CPU sink"); return false; }
     std::lock_guard<sink_run_mutex> serial(sink->run_mutex); sink->prefetch_drain();
+    // the previous layer's read-ahead of this one stops, and its reads in flight land: the ring is this call's
+    const int32_t layer = ssd::host::routed_layer(up);
+    sink->lookahead_handover(layer);
     const auto start = sink_clock::now();
     const uint64_t completed_before = sink->ring.completed();
+    sink->io_completed_end = completed_before;
+    sink->io_pending_end = sink->ring.pending();
     sink->current = {};
     sink->requests.clear();
     sink->begin_observation(up, false);
@@ -3099,6 +3612,10 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
         if (sink->requests.size() != static_cast<size_t>(nexperts)) {
             throw std::runtime_error("CPU expert stream requires nonnegative expert IDs");
         }
+        // The next layer's read-ahead plan and its RAM cache slots, taken here: the read-ahead is stopped, and neither
+        // this layer's reads nor its GPU work has started.
+        sink->lookahead_measure(layer, *batch);
+        sink->lookahead_plan_next(layer, up, batch->ntokens, batch->nslots);
         std::vector<size_t> ssd_transient_requests;
         // A GPU route's activation rows over the link: one row of the engine's input type, its token index and weight
         // (set once prepare_prefill has seen the layer's format).
@@ -3161,6 +3678,8 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
         // RAM entry, then a direct read. This lookup does not train or admit the
         // decode cache and an SSD miss never receives a duplicate RAM slot.
         sink->cache.prepare_prefill_read(sink->requests, up, gate, down, sink->current);
+        // among the hits, the experts the previous layer's call read ahead
+        sink->lookahead_count_used();
         // Streamed transients hold a ring slot and a device slot each (in place, a ring slot alone), whatever their
         // number, so only the optional cap limits them.
         const int streaming_cap = sink->vram.prefill_ssd_gpu_max_experts_per_layer;
@@ -3285,7 +3804,8 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
         {
             std::lock_guard<std::mutex> lock(sink->io_mutex);
             sink->io_error.clear(); sink->io_cancel = false;
-            if (!sink->io_requests.empty()) { sink->io_done = false; sink->io_job = true; }
+            // with the next layer's plan, if any: the I/O thread reads it once this layer's reads are over
+            if (sink->lookahead_publish(layer, !sink->io_requests.empty())) { sink->io_done = false; sink->io_job = true; }
         }
         sink->io_cv.notify_one();
         if (streaming_ssd && !ssd_transient_requests.empty()) {
@@ -3374,6 +3894,9 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
             sink->io_cv.wait(lock, [&] { return sink->io_done; });
             sink->current.wait_io_us += elapsed_us(wait_start);
             if (!sink->io_error.empty()) { throw std::runtime_error(sink->io_error); }
+            // this call's reads; the next layer's read-ahead may be on the ring now
+            sink->current.read_completions = sink->io_completed_end - completed_before;
+            sink->current.pending_reads = sink->io_pending_end;
         }
         if (batch->gpu_experts || !sink->vram.prefill_transient.empty()) {
             sink->vram.finish_prefill(batch->output, size_t(sink->latent), *batch);
@@ -3415,10 +3938,9 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
             (unsigned long long) batch->ram_bytes, (unsigned long long) batch->ssd_experts,
             (unsigned long long) batch->ssd_routes,
             (unsigned long long) batch->ssd_bytes, sink->current.io_us - sink->current.io_credit_wait_us);
+        sink->lookahead_print();
         if (sink->timeline_active) { sink->timeline_call[5] = ggml_time_us(); }
         sink->current.total_us = elapsed_us(start);
-        sink->current.read_completions = sink->ring.completed() - completed_before;
-        sink->current.pending_reads = sink->ring.pending();
         sink->finish_observation();
         if (stats) { *stats = sink->current; }
         sink->print_observation(true);
@@ -3430,12 +3952,18 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
         // unexpected exception in a consumer. No user buffer may outlive I/O.
         sink->cancel_and_wait();
         sink->vram.cancel_prefill();
+        // the read-ahead stops and the pass ends
+        sink->lookahead_quiesce();
         sink->cache.release_prefill_leases(sink->requests);
         sink->cache.release();
         if (sink->timeline_active) { sink->timeline_call[5] = ggml_time_us(); }
         sink->current.total_us = elapsed_us(start);
-        sink->current.read_completions = sink->ring.completed() - completed_before;
-        sink->current.pending_reads = sink->ring.pending();
+        {
+            // as the I/O thread left them after this call's reads (a published job's are over: cancel_and_wait)
+            std::lock_guard<std::mutex> lock(sink->io_mutex);
+            sink->current.read_completions = sink->io_completed_end - completed_before;
+            sink->current.pending_reads = std::max(sink->io_pending_end, sink->ring.pending());
+        }
         sink->finish_observation();
         if (stats) { *stats = sink->current; }
         sink->print_observation(false);
@@ -3526,6 +4054,7 @@ sink_configuration configured(const settings::snapshot * input, const runtime_se
     p.dynamic_chunk_rows = 64;
     p.decode_participants = int(participants);
     p.prefetch_depth = int(prefetch);
+    p.prefill_lookahead = integer("prefill.lookahead") != 0;
     for (uint32_t cpu : *out.settings.cpus("cpu.io_cpus")) { p.io_cpus.push_back(int(cpu)); }
     p.cache_policy = "count_decay2";
     p.cache_allocation = "uniform";
@@ -3586,9 +4115,21 @@ extern "C" void kimi_cpu_sink_prefetch_hint(struct kimi_cpu_sink * sink, int32_t
     sink->prefetch.hint_layer = layer;
 }
 
+extern "C" void kimi_cpu_sink_prefill_hint(struct kimi_cpu_sink * sink, int32_t layer, const int32_t * experts,
+        int ntokens, int k) {
+    if (!sink || !experts || layer < 0 || ntokens < 1 || k < 1 || k > 16 ||
+            ntokens > std::numeric_limits<int>::max() / k) { return; }
+    std::lock_guard<sink_run_mutex> serial(sink->run_mutex);
+    if (!sink->lookahead.enabled) { return; }
+    auto & la = sink->lookahead;
+    la.hint.assign(experts, experts + size_t(ntokens) * size_t(k));
+    la.hint_layer = layer; la.hint_tokens = ntokens; la.hint_k = k;
+}
+
 extern "C" void kimi_cpu_sink_cache_reset(struct kimi_cpu_sink * sink) {
     if (!sink) { return; }
     std::lock_guard<sink_run_mutex> serial(sink->run_mutex); sink->prefetch_drain();
+    sink->lookahead_quiesce();
     sink->vram.cancel();
     sink->cache.release();
     sink->cache.active = sink->cache.has_token = sink->cache.paused = false;
@@ -3612,6 +4153,10 @@ static bool sink_phase_begin(struct kimi_cpu_sink * sink, uint64_t epoch, uint64
     try {
         sink->end_margin_interval(decode, epoch, token);
         sink->measure_decode_share(decode, epoch, token);
+        // A decode token ends the prompt pass: what the read-ahead read is published before the GPU tier and the RAM
+        // cache change phase. Every grouped-prefill call begins a prefill phase too, which keeps the read-ahead the call
+        // before it started (the cache neither discards nor unmaps a slot a read is landing in: inflight, before_unmap).
+        if (decode) { sink->lookahead_quiesce(); }
         sink->refresh_floor(decode ? "decode" : "prefill");
         sink->file_identities.clear();
         sink->vram.begin(epoch, token, decode, sink->cache, request);
@@ -3673,6 +4218,7 @@ extern "C" bool kimi_cpu_sink_vram_reserve(struct kimi_cpu_sink * sink, const st
         sink_error(error, error_size, "null CPU sink or expert tensor"); return false;
     }
     std::lock_guard<sink_run_mutex> serial(sink->run_mutex); sink->prefetch_drain();
+    sink->lookahead_quiesce(); // the ring's reserve needs it idle
     try {
         sink->reserve_tier(experts, n_layers, experts_used);
         return true;
@@ -3786,6 +4332,7 @@ extern "C" bool kimi_cpu_sink_run_activation(
     if (stats) { *stats = {}; }
     if (!sink) { sink_error(error, error_size, "null CPU sink"); return false; }
     std::lock_guard<sink_run_mutex> serial(sink->run_mutex);
+    sink->lookahead_quiesce(); // decode is no grouped prefill: the ring is the run's alone
     const auto start = sink_clock::now();
     const uint64_t completed_before = sink->ring.completed();
     sink->current = {};

@@ -402,6 +402,15 @@ if (TARGET ggml-cpu)
     add_test(NAME kimi_cpu_sink_swiglu_ordinary COMMAND test-kimi-cpu-sink --swiglu-tests --ring-experts 1
         --fixture ready_first=0)
     set_tests_properties(kimi_cpu_sink_swiglu kimi_cpu_sink_swiglu_ordinary PROPERTIES TIMEOUT 300)
+    # The grouped prefill's cross-layer read-ahead: layer 2's experts read into the pool during layer 1's call, used
+    # bit for bit as reads; injected read failures; a decode run between layers; destruction while it reads. The
+    # production schedule with several participants, and one participant with one expert in flight.
+    add_test(NAME kimi_cpu_sink_lookahead COMMAND test-kimi-cpu-sink --lookahead-tests --threads 4 --ring-experts 8
+        --fixture ready_first=1 --fixture early_up_gate=1 --fixture role_major=1
+        --fixture nonblocking_down_sched=1 --fixture dynamic_rows=1 --fixture dynamic_chunk_rows=64)
+    add_test(NAME kimi_cpu_sink_lookahead_d1 COMMAND test-kimi-cpu-sink --lookahead-tests --threads 2 --ring-experts 1
+        --fixture ready_first=0)
+    set_tests_properties(kimi_cpu_sink_lookahead kimi_cpu_sink_lookahead_d1 PROPERTIES TIMEOUT 180)
     # Muse Spark's experts with their post norm (Q8_0; BF16, also from native payload ranges and the RAM cache) in
     # decode and grouped prefill, against the MoE graph Muse builds, bit for bit.
     add_test(NAME kimi_cpu_sink_muse_q8_0 COMMAND test-kimi-cpu-sink --muse-q8-test --threads 2)

@@ -652,6 +652,7 @@ struct llm_graph_params {
 
     bool cpu_sink_decode = false;
     bool cpu_sink_prefill = false;
+    bool cpu_sink_prefill_hint = false; // a sink prefill predicts each next layer's routes (prefill.lookahead)
     llama_kimi_cpu_sink_runtime * cpu_sink_runtime = nullptr;
 
     llm_graph_cb cb;
@@ -719,6 +720,7 @@ struct llm_graph_params {
         return
             cpu_sink_decode == other.cpu_sink_decode &&
             cpu_sink_prefill == other.cpu_sink_prefill &&
+            cpu_sink_prefill_hint == other.cpu_sink_prefill_hint &&
             cpu_sink_runtime == other.cpu_sink_runtime &&
             cparams.embeddings  == other.cparams.embeddings  &&
             cparams.embeddings_nextn        == other.cparams.embeddings_nextn        &&
@@ -854,9 +856,10 @@ struct llm_graph_context {
     const int64_t n_outputs;
     const bool cpu_sink_decode;
     const bool cpu_sink_prefill;
+    const bool cpu_sink_prefill_hint;
     llama_kimi_cpu_sink_runtime * const cpu_sink_runtime;
-    // Set by a model around its build_moe_ffn call: the next layer's predicted experts for the CPU sink's
-    // prefetch and its hint statistics (single-token decode only).
+    // Set by a model around its build_moe_ffn call: the next layer's predicted experts for the CPU sink, a decode
+    // token's for its prefetch, every token's of a sink prefill for its read-ahead.
     ggml_tensor * cpu_sink_prefetch_hint = nullptr;
     const int32_t n_ctx_orig; // yarn
 

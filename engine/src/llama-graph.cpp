@@ -1252,6 +1252,7 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     n_outputs        (params.n_outputs),
     cpu_sink_decode  (params.cpu_sink_decode),
     cpu_sink_prefill (params.cpu_sink_prefill),
+    cpu_sink_prefill_hint (params.cpu_sink_prefill_hint),
     cpu_sink_runtime (params.cpu_sink_runtime),
     n_ctx_orig       (cparams.n_ctx_orig_yarn),
     pooling_type     (cparams.pooling_type),
@@ -1631,7 +1632,7 @@ ggml_tensor * llm_graph_context::build_moe_prefetch_hint(
 llama_expert_gating_func_type gating_op,
              int64_t   n_expert,
                  int   il) {
-    if (!cpu_sink_runtime || n_tokens != 1 || !next_gate_inp) {
+    if (!cpu_sink_runtime || !next_gate_inp || !(cpu_sink_prefill ? cpu_sink_prefill_hint : n_tokens == 1)) {
         return nullptr;
     }
     // a router that reads the stream as it is has no norm of its own
@@ -2078,7 +2079,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         descriptor->post_exp_norm_eps = execution.post_norm_eps;
         descriptor->layer = il;
         descriptor->prefill = cpu_sink_prefill;
-        ggml_tensor * hint = !cpu_sink_prefill && n_tokens == 1 ? cpu_sink_prefetch_hint : nullptr;
+        ggml_tensor * hint = cpu_sink_prefill || n_tokens == 1 ? cpu_sink_prefetch_hint : nullptr;
         // slots: input, ids, weights, then the post-expert norm, then the hint
         ggml_tensor * args[] = {
             ggml_cont(ctx0, cur), ggml_cont(ctx0, selected_experts), ggml_cont(ctx0, weights),

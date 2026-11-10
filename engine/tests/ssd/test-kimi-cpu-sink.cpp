@@ -3924,6 +3924,179 @@ static void swiglu_tests(fixture_inputs & inputs, int depth) {
     std::printf("CPU_SINK_SWIGLU_OK counts=%zu discriminating=%zu\n", counts.size(), discriminating);
 }
 
+// The grouped prefill's cross-layer read-ahead over the fixture's two routed layers, every expert on the CPU, with a
+// retained RAM cache the prefill reads (made at load, as the product's). Layer 1's call gets a prediction of layer 2's
+// routes, the pass's own here. A first pass measures the drive's idle window between its layers and how often the
+// prediction's ranks were selected; in the next, layer 1's call reads the experts the prediction makes likely into
+// layer 2's RAM cache slots once its own reads are over, and layer 2's call takes them as RAM hits: without the
+// read-ahead a prefill never admits to the cache, so layer 2 has none. Its outputs equal those of a sink without the
+// read-ahead, and the graph's, bit for bit. Injected failures of every read-ahead read, then of every third, give
+// their slots back: the pass computes the same output from its own reads. A decode run between two layers of a pass
+// stops the read-ahead, and a sink destroyed while it reads waits for its reads. The clamped SwiGLU is the graph's
+// scalar kernel: no packed division, which one core of a CI host computes wrongly at times.
+static void lookahead_tests(fixture_inputs & inputs, int threads, int depth) {
+    const kimi_cpu_sink_activation swiglu = { KIMI_CPU_SINK_ACTIVATION_SWIGLU_CLAMP, 0.0f, 0.0f, 10.0f, nullptr, 0.0f };
+    // the drive line the plan is sized from: fast enough that the window between two layers holds every expert
+    scoped_fixture_input drive(inputs, "place_costs", "drive_gbps=1000");
+    // the product's retained cache: persistent, per-layer, giving room back, read by a prefill
+    scoped_fixture_input policy_env(inputs, "cache_policy", "count_decay2");
+    scoped_fixture_input allocation_env(inputs, "cache_allocation", "uniform");
+    scoped_fixture_input keep_env(inputs, "cache_keep", "1");
+    scoped_fixture_input partial_env(inputs, "cache_partial_reclaim", "1");
+    scoped_fixture_input read_env(inputs, "cache_prefill_read", "1");
+    scoped_fixture_input elastic_env(inputs, "cache_elastic", nullptr);
+    scoped_fixture_input prefill_env(inputs, "cache_prefill_slots", nullptr);
+    scoped_fixture_input quotas_env(inputs, "cache_layer_quotas", nullptr);
+    fixture f;
+    f.type = f.down_type = GGML_TYPE_Q8_0; f.latent = 256; f.hidden = 128; f.experts = 24;
+    make_synthetic(f, 20261110);
+    tensors meta1(f, 1), meta2(f, 2);
+    constexpr int nslots = 6, ntokens = 32;
+    // six distinct experts a token, all 24 over the pass
+    std::vector<int32_t> ids(size_t(ntokens) * nslots);
+    std::vector<float> weights(ids.size()), x(size_t(ntokens) * f.latent);
+    for (int t = 0; t < ntokens; ++t) {
+        for (int s = 0; s < nslots; ++s) {
+            ids[size_t(t) * nslots + s] = int32_t((t * 5 + s * 4) % f.experts);
+            weights[size_t(t) * nslots + s] = 0.3f / float(s + 1);
+        }
+    }
+    for (size_t i = 0; i < x.size(); ++i) { x[i] = 0.4f * std::sin(float(i) * 0.37f); }
+    // the pass through the graph, a token at a time
+    auto graph = [&](int layer, const std::vector<float> & input) {
+        std::vector<float> output;
+        for (int t = 0; t < ntokens; ++t) {
+            const auto row = input.begin() + std::ptrdiff_t(t) * f.latent;
+            const auto slot = std::ptrdiff_t(t) * nslots;
+            const auto y = reference_moe_graph(f, layer, std::vector<float>(row, row + f.latent),
+                std::vector<int32_t>(ids.begin() + slot, ids.begin() + slot + nslots),
+                std::vector<float>(weights.begin() + slot, weights.begin() + slot + nslots), swiglu, 1);
+            output.insert(output.end(), y.begin(), y.end());
+        }
+        return output;
+    };
+    const auto y1 = graph(1, x);
+    const auto y2 = graph(2, y1);
+    char error[512] = {};
+    // a slot for every expert of both layers (a role as a decode request reserves it: its bytes and a page prefix)
+    uint64_t stride = 0;
+    for (int role = 0; role < 3; ++role) {
+        const auto * t = meta1.role[role];
+        stride += (ggml_row_size(t->type, t->ne[0]) * uint64_t(t->ne[1]) + 8190) / 4096 * 4096;
+    }
+    stride = cache_slot_bytes(inputs, stride);
+    auto make = [&]() {
+        auto sink = make_sink(inputs, f, threads, depth);
+        configure_cache(sink.get(), 2 * uint64_t(f.experts) * stride, { 1, 2 }, f.experts);
+        // the arena and its pages at load, as the product's load step makes them: the first prefill reads into them
+        require(kimi_cpu_sink_vram_reserve(sink.get(), meta1.role, 1, nslots, error, sizeof(error)), error);
+        return sink;
+    };
+    using prefill_ptr = std::unique_ptr<kimi_cpu_prefill, decltype(&kimi_cpu_prefill_destroy)>;
+    kimi_cpu_sink * predicted = nullptr; // the sink layer 1's call gives its prediction of layer 2 to
+    auto layer = [&](kimi_cpu_prefill * prefill, const tensors & meta, const std::vector<float> & input,
+            std::vector<float> & output) {
+        if (predicted && &meta == &meta1) { kimi_cpu_sink_prefill_hint(predicted, 2, ids.data(), ntokens, nslots); }
+        output.assign(input.size(), 0.0f);
+        kimi_cpu_prefill_stats stats = {};
+        require(kimi_cpu_prefill_run_activation(prefill, meta.role[0], meta.role[1], meta.role[2], input.data(),
+            ids.data(), weights.data(), nslots, ntokens, &swiglu, output.data(), &stats, error, sizeof(error)),
+            std::string("read-ahead prefill: ") + error);
+        // the call's own reads, whatever the read-ahead does on the ring beside it
+        require(!stats.stream.read_errors && !stats.stream.pending_reads &&
+            stats.stream.read_completions == stats.stream.read_requests &&
+            stats.stream.read_requests == 3 * stats.ssd_experts && stats.ram_experts + stats.ssd_experts == uint64_t(f.experts) &&
+            stats.ram_routes + stats.ssd_routes == ids.size(), "read-ahead prefill counters");
+        return stats;
+    };
+    struct pass_result { std::vector<float> y1, y2; kimi_cpu_prefill_stats layer1, layer2; };
+    auto pass = [&](kimi_cpu_prefill * prefill) {
+        pass_result r;
+        r.layer1 = layer(prefill, meta1, x, r.y1);
+        r.layer2 = layer(prefill, meta2, r.y1, r.y2);
+        return r;
+    };
+    auto same = [&](const pass_result & r, const char * label) {
+        require(same_bits(r.y1, y1) && same_bits(r.y2, y2), std::string(label) + ": output differs from the graph");
+    };
+    std::vector<pass_result> off;
+    {
+        scoped_fixture_input disabled(inputs, "prefill_lookahead", "0");
+        auto sink = make();
+        predicted = sink.get();
+        prefill_ptr prefill(kimi_cpu_prefill_create(sink.get(), error, sizeof(error)), kimi_cpu_prefill_destroy);
+        require(bool(prefill), error);
+        for (int i = 0; i < 2; ++i) { off.push_back(pass(prefill.get())); same(off.back(), "without read-ahead"); }
+        require(!off.back().layer2.ram_experts, "a prefill without the read-ahead admitted to the RAM cache");
+        prefill.reset();
+        predicted = nullptr;
+    }
+    scoped_fixture_input enabled(inputs, "prefill_lookahead", "1");
+    {
+        auto sink = make();
+        predicted = sink.get();
+        prefill_ptr prefill(kimi_cpu_prefill_create(sink.get(), error, sizeof(error)), kimi_cpu_prefill_destroy);
+        require(bool(prefill), error);
+        const auto measured = pass(prefill.get());
+        const auto ahead = pass(prefill.get());
+        same(measured, "read-ahead, first pass");
+        same(ahead, "read-ahead");
+        require(same_bits(ahead.y2, off.back().y2), "the read-ahead's layer 2 differs from the sink's without it");
+        require(!measured.layer2.ram_experts && !ahead.layer1.ram_experts && ahead.layer2.ram_experts >= 1,
+            "the read-ahead put no expert of layer 2 in the RAM cache (" + std::to_string(ahead.layer2.ram_experts) + ")");
+        std::printf("case=lookahead_served threads=%d ring_experts=%d layer2_ram_experts=%llu layer2_reads=%llu status=PASS\n",
+            threads, depth, (unsigned long long) ahead.layer2.ram_experts,
+            (unsigned long long) ahead.layer2.stream.read_requests / 3);
+        // a decode run between the layers of a pass stops the read-ahead layer 1 started; layer 2 still computes the
+        // same output, from what the cache holds and its own reads
+        std::vector<float> a1, a2, single(size_t(f.latent), 0.125f), single_out(size_t(f.latent));
+        layer(prefill.get(), meta1, x, a1);
+        const int32_t expert = 3;
+        const float one = 1.0f;
+        require(kimi_cpu_sink_run_activation(sink.get(), meta1.role[0], meta1.role[1], meta1.role[2], single.data(),
+            &expert, &one, 1, &swiglu, single_out.data(), nullptr, error, sizeof(error)), error);
+        layer(prefill.get(), meta2, a1, a2);
+        require(same_bits(a1, y1) && same_bits(a2, y2), "a decode run between two layers changed the pass's output");
+        // destroyed while layer 2's read-ahead may read: the sink stops it and waits for its reads
+        layer(prefill.get(), meta1, x, a1);
+        prefill.reset();
+        predicted = nullptr;
+        sink.reset();
+        std::printf("case=lookahead_interrupted status=PASS\n");
+    }
+    for (const char * every : { "1", "3" }) {
+        scoped_fixture_input failing(inputs, "lookahead_fail_every", every);
+        auto sink = make();
+        predicted = sink.get();
+        prefill_ptr prefill(kimi_cpu_prefill_create(sink.get(), error, sizeof(error)), kimi_cpu_prefill_destroy);
+        require(bool(prefill), error);
+        pass_result measured, ahead;
+        std::string log;
+        {
+            stderr_capture capture;
+            measured = pass(prefill.get());
+            ahead = pass(prefill.get());
+            log = capture.read();
+        }
+        same(measured, "failing read-ahead, first pass");
+        same(ahead, "failing read-ahead");
+        const size_t failed = [&] {
+            size_t n = 0;
+            for (size_t at = log.find("event=read_failed"); at != std::string::npos; at = log.find("event=read_failed", at + 1)) { ++n; }
+            return n;
+        }();
+        require(failed >= 1, std::string("no injected read-ahead failure with every=") + every);
+        if (!std::strcmp(every, "1")) {
+            require(!ahead.layer2.ram_experts, "an expert whose reads all failed was a RAM hit");
+        }
+        std::printf("case=lookahead_failures every=%s failed_experts=%zu layer2_ram_experts=%llu status=PASS\n", every,
+            failed, (unsigned long long) ahead.layer2.ram_experts);
+        prefill.reset();
+        predicted = nullptr;
+    }
+    std::printf("CPU_SINK_LOOKAHEAD_OK threads=%d ring_experts=%d\n", threads, depth);
+}
+
 int main(int argc, char ** argv) {
     fixture_inputs inputs;
     try {
@@ -3936,7 +4109,7 @@ int main(int argc, char ** argv) {
         bool cache_policy_mode = false, cache_large_mode = false, cache_pressure_transition = false, cache_unbounded = false;
         bool activation_mode = false, q2_activation_mode = false, muse_q8_mode = false, muse_bf16_mode = false;
         bool auto_ring_mode = false, prefetch_mode = false, cache_load_mode = false, work_reclaim_mode = false, threadpool_mode = false;
-        bool swiglu_mode = false;
+        bool swiglu_mode = false, lookahead_mode = false;
         std::string pack, prefix;
         for (int i = 1; i < argc; ++i) {
             auto argument = [&]() { require(i + 1 < argc, "missing option argument"); return argv[++i]; };
@@ -3979,6 +4152,7 @@ int main(int argc, char ** argv) {
             else if (!std::strcmp(argv[i], "--q2-activation-test")) { q2_activation_mode = true; }
             else if (!std::strcmp(argv[i], "--threadpool-tests")) { threadpool_mode = true; }
             else if (!std::strcmp(argv[i], "--swiglu-tests")) { swiglu_mode = true; }
+            else if (!std::strcmp(argv[i], "--lookahead-tests")) { lookahead_mode = true; }
             else { throw std::runtime_error("usage: test-kimi-cpu-sink [--registered-lifecycle|--cache-tests|--cache-pressure] [--threads N] [--fixture KEY=VALUE] [--real-pack FILE --fixture-prefix PREFIX --ring-experts N --repeats N --warmup N --policy fixture|top16|top8|mass085 --jsonl FILE --resident-dir TMPFS]"); }
         }
         require(options.threads >= 2 && options.threads <= 128 && options.ring_experts >= 1 && options.ring_experts <= 32, "invalid thread/ring count");
@@ -3991,7 +4165,8 @@ int main(int argc, char ** argv) {
         if (cache_mode || hitrate_mode || elastic_cache_mode || cache_load_mode || work_reclaim_mode || max_cache_mode ||
                 early_up_gate_mode ||
                 role_major_mode || nonblocking_down_mode || poll_mode || poll_early_mode || schedules_mode ||
-                prefetch_mode || cache_policy_mode || cache_large_mode || activation_mode || muse_q8_mode || muse_bf16_mode) {
+                prefetch_mode || cache_policy_mode || cache_large_mode || activation_mode || muse_q8_mode || muse_bf16_mode ||
+                lookahead_mode) {
             test_resources::finite_envelope();
         }
 #if defined(__linux__)
@@ -4031,6 +4206,7 @@ int main(int argc, char ** argv) {
         if (schedule_invalid_mode) { schedule_invalid_tests(inputs); return 0; }
         if (threadpool_mode) { threadpool_tests(inputs, ring_set ? options.ring_experts : 2); return 0; }
         if (swiglu_mode) { swiglu_tests(inputs, ring_set ? options.ring_experts : 2); return 0; }
+        if (lookahead_mode) { lookahead_tests(inputs, options.threads, ring_set ? options.ring_experts : 2); return 0; }
         if (trace_profile_mode) { trace_profile_test(inputs, options.threads, ring_set ? options.ring_experts : 2); return 0; }
         if (prefetch_mode) { prefetch_tests(inputs, options.threads, ring_set ? options.ring_experts : 2); return 0; }
         if (cache_policy_mode) { cache_policy_tests(inputs, options.threads, ring_set ? options.ring_experts : 2); return 0; }
