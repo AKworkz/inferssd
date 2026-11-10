@@ -138,6 +138,7 @@ struct fixture {
     int resolve_calls = 0;
     bool native_ranges = false;
     std::vector<int32_t> stored; // the experts the file holds; empty: all of them
+    std::vector<int> layer_ids = { 1, 2 }; // the routed layers the file holds
     ~fixture() { ssd::platform::close_fd(fd); if (remove_on_destroy) { test_resources::remove_file(path); } }
     static bool resolve(void * user, const char * name, int32_t id, kimi_cpu_sink_source * out) {
         auto & f = *static_cast<fixture *>(user);
@@ -178,7 +179,7 @@ static void make_synthetic(fixture & f, uint32_t seed = 20260908) {
     std::mt19937 rng(seed);
     std::normal_distribution<float> sample(0.0f, 0.06f);
     // Keep the full on-disk GGMLMOEPACKv1 layout, including index and padding.
-    for (int layer : { 1, 2 }) {
+    for (int layer : f.layer_ids) {
         for (int role = 0; role < 3; ++role) {
             const int cols = role == 2 ? f.hidden : f.latent;
             const int rows = role == 2 ? f.latent : f.hidden;
@@ -3949,8 +3950,9 @@ static void lookahead_tests(fixture_inputs & inputs, int threads, int depth) {
     scoped_fixture_input quotas_env(inputs, "cache_layer_quotas", nullptr);
     fixture f;
     f.type = f.down_type = GGML_TYPE_Q8_0; f.latent = 256; f.hidden = 128; f.experts = 24;
+    f.layer_ids = { 1, 2, 3 }; // the third for the borrowing case; the others use layers 1 and 2
     make_synthetic(f, 20261110);
-    tensors meta1(f, 1), meta2(f, 2);
+    tensors meta1(f, 1), meta2(f, 2), meta3(f, 3);
     constexpr int nslots = 6, ntokens = 32;
     // six distinct experts a token, all 24 over the pass
     std::vector<int32_t> ids(size_t(ntokens) * nslots);
@@ -4093,6 +4095,68 @@ static void lookahead_tests(fixture_inputs & inputs, int threads, int depth) {
             failed, (unsigned long long) ahead.layer2.ram_experts);
         prefill.reset();
         predicted = nullptr;
+    }
+    {
+        // Three layers of 4 slots each, every expert of a layer used in a pass. Layer 2's read-ahead has only its own
+        // slots (no layer before 1 to lend); layer 3's, planned in layer 2's call, also borrows layer 1's, and
+        // serves the same outputs. The call after it takes the borrowed slots back, and so does a decode begin. The
+        // checked pass leaves each read-ahead a gap to read in, as the GPU's work between two layers does.
+        constexpr int quota = 4;
+        const auto y3 = graph(3, y2);
+        auto sink = make_sink(inputs, f, threads, depth);
+        configure_cache(sink.get(), 3 * uint64_t(quota) * stride, { 1, 2, 3 }, quota);
+        require(kimi_cpu_sink_vram_reserve(sink.get(), meta1.role, 1, nslots, error, sizeof(error)), error);
+        prefill_ptr prefill(kimi_cpu_prefill_create(sink.get(), error, sizeof(error)), kimi_cpu_prefill_destroy);
+        require(bool(prefill), error);
+        auto call = [&](const tensors & meta, int next, const std::vector<float> & input, std::vector<float> & output,
+                bool gap = false) {
+            if (gap) { std::this_thread::sleep_for(std::chrono::milliseconds(300)); }
+            if (next) { kimi_cpu_sink_prefill_hint(sink.get(), next, ids.data(), ntokens, nslots); }
+            output.assign(input.size(), 0.0f);
+            kimi_cpu_prefill_stats stats = {};
+            require(kimi_cpu_prefill_run_activation(prefill.get(), meta.role[0], meta.role[1], meta.role[2], input.data(),
+                ids.data(), weights.data(), nslots, ntokens, &swiglu, output.data(), &stats, error, sizeof(error)),
+                std::string("borrowing prefill: ") + error);
+            require(!stats.stream.read_errors && stats.stream.read_completions == stats.stream.read_requests &&
+                stats.ram_experts + stats.ssd_experts == uint64_t(f.experts), "borrowing prefill counters");
+            return stats;
+        };
+        std::vector<float> o1, o2, o3;
+        std::string log;
+        kimi_cpu_prefill_stats s2 = {}, s3 = {};
+        for (int pass = 0; pass < 2; ++pass) {
+            stderr_capture capture;
+            call(meta1, 2, x, o1);
+            s2 = call(meta2, 3, o1, o2, pass == 1);
+            s3 = call(meta3, 0, o2, o3, pass == 1);
+            log = capture.read();
+            require(same_bits(o1, y1) && same_bits(o2, y2) && same_bits(o3, y3),
+                    "borrowing read-ahead: output differs from the graph");
+        }
+        require(s2.ram_experts <= uint64_t(quota) && s3.ram_experts > uint64_t(quota) &&
+                s3.ram_experts <= 2 * uint64_t(quota),
+                "layer 3's read-ahead did not borrow layer 1's slots (layer 2: " + std::to_string(s2.ram_experts) +
+                ", layer 3: " + std::to_string(s3.ram_experts) + " RAM experts)");
+        // layer 2's receipt names the plan's borrowed slots
+        const size_t line = log.find("[kimi_cpu_prefill_lookahead] layer=2 ");
+        const size_t field = line == std::string::npos ? line : log.find(" borrowed=", line);
+        require(field != std::string::npos && std::stoull(log.substr(field + 10)) > 0,
+                "layer 2's read-ahead receipt names no borrowed slot: " + log.substr(0, 600));
+        // the next pass's first call gives them back, so layer 1's own slots are its own again
+        call(meta1, 2, x, o1);
+        require(same_bits(o1, y1), "the call after the borrowing changed layer 1's output");
+        // a decode token: every slot is its own layer's, and decode computes from them
+        begin_cache(sink.get(), 31, 1);
+        std::vector<float> single(size_t(f.latent), 0.125f), out(size_t(f.latent));
+        const int32_t expert = 5;
+        const float one = 1.0f;
+        for (const auto * meta : { &meta1, &meta3 }) {
+            require(kimi_cpu_sink_run_activation(sink.get(), meta->role[0], meta->role[1], meta->role[2], single.data(),
+                &expert, &one, 1, &swiglu, out.data(), nullptr, error, sizeof(error)), error);
+        }
+        std::printf("case=lookahead_borrow quota=%d layer2_ram_experts=%llu layer3_ram_experts=%llu status=PASS\n", quota,
+            (unsigned long long) s2.ram_experts, (unsigned long long) s3.ram_experts);
+        prefill.reset();
     }
     std::printf("CPU_SINK_LOOKAHEAD_OK threads=%d ring_experts=%d\n", threads, depth);
 }

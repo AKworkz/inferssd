@@ -713,7 +713,7 @@ struct kimi_cpu_sink {
         std::vector<int> landed_entries;
         // Totals for the report at destruction.
         uint64_t layers = 0, planned = 0, issued_total = 0, landed_total = 0, failed_total = 0, used = 0, unused = 0,
-                 used_bytes = 0, no_slot = 0, unresolved = 0, unlikely = 0;
+                 used_bytes = 0, no_slot = 0, unresolved = 0, unlikely = 0, borrowed = 0;
         // The prediction of the next layer's routes (kimi_cpu_sink_prefill_hint): `hint_layer`'s experts, hint_k a
         // token best first over hint_tokens tokens. The plan keeps its copy (`planned_hint`) until the call of the layer it
         // predicts, which measures it against the routes the layer took.
@@ -730,7 +730,8 @@ struct kimi_cpu_sink {
         double window_us = -1, estimate_us = 0, drive_us_per_mb = 0;
         uint64_t planned = 0, issued = 0, landed = 0, failed = 0, used = 0, unused = 0, bytes = 0, next_n = 0;
         uint64_t likely = 0;  // the next layer's experts with P >= 1/2 that neither the GPU tier nor the RAM cache holds
-        uint64_t no_slot = 0; // the next layer's plan stopped short: its RAM cache slots were all taken
+        uint64_t no_slot = 0; // the next layer's plan stopped short: no slot of its own or of a finished layer was left
+        uint64_t borrowed = 0; // the next layer's plan reads into slots of layers this pass finished
         size_t next_planned = 0;
     } lookahead_report;
 
@@ -2862,6 +2863,8 @@ struct kimi_cpu_sink {
     // window, without a drive line, or for the last routed layer (the next one resolves no expert).
     void lookahead_plan_next(int32_t layer, const ggml_tensor * up, int ntokens, int nslots) {
         auto & r = lookahead_report;
+        // what an earlier call's read-ahead borrowed went to that call's read: its slots go back to their layers
+        cache.return_borrowed(layer);
         {
             std::lock_guard<std::mutex> lock(io_mutex);
             r.estimate_us = !lookahead.pass_windows_us.empty() ? lookahead_median(lookahead.pass_windows_us) :
@@ -2937,7 +2940,11 @@ struct kimi_cpu_sink {
             if (!resolved) { ++unresolved; continue; }
             read.entry = cache.prefetch_reserve(next, read.expert, read.role);
             if (read.entry == -2) { continue; }            // cached, or on its way
-            if (read.entry < 0) { ++r.no_slot; break; }     // the layer has no idle slot left
+            if (read.entry < 0) {                           // the layer has no idle slot left: one a finished layer lends
+                read.entry = cache.prefetch_borrow(next, read.expert, read.role, layer);
+                if (read.entry < 0) { ++r.no_slot; break; }
+                ++r.borrowed;
+            }
             read.generation = cache.generation;
             for (int role = 0; role < 3; ++role) { read.target[role] = cache.data(read.entry, role); }
             plan.push_back(read);
@@ -2990,25 +2997,25 @@ struct kimi_cpu_sink {
         ++lookahead.layers;
         lookahead.planned += r.next_planned; lookahead.issued_total += r.issued; lookahead.landed_total += r.landed;
         lookahead.failed_total += r.failed; lookahead.used += r.used; lookahead.unused += r.unused;
-        lookahead.used_bytes += r.bytes; lookahead.no_slot += r.no_slot;
+        lookahead.used_bytes += r.bytes; lookahead.no_slot += r.no_slot; lookahead.borrowed += r.borrowed;
         std::fprintf(stderr, "[kimi_cpu_prefill_lookahead] layer=%d enabled=%d window_us=%.0f estimate_us=%.0f"
             " drive_us_per_mb=%.3f likely=%llu planned=%llu issued=%llu read=%llu failed=%llu used=%llu unused=%llu"
-            " bytes=%llu next_n=%llu next_planned=%zu no_slot=%llu\n", r.layer, int(lookahead.enabled),
+            " bytes=%llu next_n=%llu next_planned=%zu no_slot=%llu borrowed=%llu\n", r.layer, int(lookahead.enabled),
             r.window_us, r.estimate_us, r.drive_us_per_mb, (unsigned long long) r.likely, (unsigned long long) r.planned,
             (unsigned long long) r.issued, (unsigned long long) r.landed, (unsigned long long) r.failed,
             (unsigned long long) r.used, (unsigned long long) r.unused, (unsigned long long) r.bytes,
-            (unsigned long long) r.next_n, r.next_planned, (unsigned long long) r.no_slot);
+            (unsigned long long) r.next_n, r.next_planned, (unsigned long long) r.no_slot, (unsigned long long) r.borrowed);
     }
     void lookahead_summary() {
         if (!lookahead.enabled || !lookahead.layers) { return; }
         std::fprintf(stderr, "[kimi_cpu_prefill_lookahead] reason=destroy layers=%llu planned=%llu issued=%llu read=%llu"
-            " failed=%llu used=%llu unused=%llu used_bytes=%llu no_slot=%llu unresolved=%llu unlikely=%llu\n",
+            " failed=%llu used=%llu unused=%llu used_bytes=%llu no_slot=%llu unresolved=%llu unlikely=%llu borrowed=%llu\n",
             (unsigned long long) lookahead.layers, (unsigned long long) lookahead.planned,
             (unsigned long long) lookahead.issued_total, (unsigned long long) lookahead.landed_total,
             (unsigned long long) lookahead.failed_total, (unsigned long long) lookahead.used,
             (unsigned long long) lookahead.unused, (unsigned long long) lookahead.used_bytes,
             (unsigned long long) lookahead.no_slot, (unsigned long long) lookahead.unresolved,
-            (unsigned long long) lookahead.unlikely);
+            (unsigned long long) lookahead.unlikely, (unsigned long long) lookahead.borrowed);
         std::string rates;
         for (int rank = 0; rank < 16 && lookahead.rank_predicted[rank]; ++rank) {
             char one[32];
@@ -4333,6 +4340,7 @@ extern "C" bool kimi_cpu_sink_run_activation(
     if (!sink) { sink_error(error, error_size, "null CPU sink"); return false; }
     std::lock_guard<sink_run_mutex> serial(sink->run_mutex);
     sink->lookahead_quiesce(); // decode is no grouped prefill: the ring is the run's alone
+    sink->cache.return_borrowed(-1); // and its layers keep their own slots
     const auto start = sink_clock::now();
     const uint64_t completed_before = sink->ring.completed();
     sink->current = {};

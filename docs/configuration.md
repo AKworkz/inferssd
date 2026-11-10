@@ -71,8 +71,12 @@ are read into that layer's RAM cache slots, most likely first (a free slot first
 else the layer's coldest, as for the decode prefetch), and the next layer takes
 them as RAM hits instead of reading them. The read-ahead holds no memory of its
 own: what it read stays cached. It reads as many experts as the drive reads in the
-measured gap at its calibrated rate, and at most as many as the layer's RAM cache
-slots, so it needs a RAM cache that a prompt pass reads. `0` turns this off, for
+measured gap at its calibrated rate. When the layer's own RAM cache slots are all
+taken, it borrows slots of the layers the pass has already computed, an empty one
+first, else the coldest: those layers take no slot again in the pass, and a
+borrowed slot serves that one layer's read and comes back empty, so a pass cycles a
+few slots instead of emptying the earlier layers. It needs a RAM cache that a prompt
+pass reads. `0` turns this off, for
 A/B timing.
 
 The host memory ledger has two terms on every platform, and they size the expert
