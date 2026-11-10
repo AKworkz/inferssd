@@ -74,11 +74,11 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `ggml/src/ggml-blas/ggml-blas.cpp` | 1 | 0 |
 | `ggml/src/ggml-cann/ggml-cann.cpp` | 1 | 0 |
 | `ggml/src/ggml-common.h` | 1 | 0 |
-| `ggml/src/ggml-cpu/CMakeLists.txt` | 7 | 0 |
+| `ggml/src/ggml-cpu/CMakeLists.txt` | 6 | 0 |
 | `ggml/src/ggml-cpu/arch/arm/quants.c` | 0 | 1 |
 | `ggml/src/ggml-cpu/arch/x86/quants.c` | 138 | 7 |
 | `ggml/src/ggml-cpu/ggml-cpu.c` | 3711 | 3650 |
-| `ggml/src/ggml-cpu/ggml-cpu.cpp` | 146 | 6 |
+| `ggml/src/ggml-cpu/ggml-cpu.cpp` | 141 | 6 |
 | `ggml/src/ggml-cpu/ops.cpp` | 751 | 12 |
 | `ggml/src/ggml-cpu/ops.h` | 6 | 0 |
 | `ggml/src/ggml-cpu/quants.c` | 1 | 0 |
@@ -145,7 +145,7 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `src/llama-context.h` | 148 | 2 |
 | `src/llama-cparams.h` | 9 | 0 |
 | `src/llama-ext.h` | 16 | 0 |
-| `src/llama-graph.cpp` | 760 | 50 |
+| `src/llama-graph.cpp` | 746 | 50 |
 | `src/llama-graph.h` | 158 | 5 |
 | `src/llama-hparams.cpp` | 21 | 0 |
 | `src/llama-hparams.h` | 73 | 1 |
@@ -185,5 +185,5 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `tools/server/server-task.h` | 23 | 80 |
 | `tools/server/tests/utils.py` | 2 | 2 |
 
-Total: 17678 added, 5685 removed across 153 upstream paths.
+Total: 17658 added, 5685 removed across 153 upstream paths.
 <!-- END UPSTREAM INVENTORY -->

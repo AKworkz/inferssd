@@ -6,7 +6,6 @@ static_assert(int(KIMI_VRAM_ACTIVATION_SITU) == int(KIMI_CPU_SINK_ACTIVATION_SIT
 struct sink_vram {
     const kimi_vram_tier_api * api = nullptr;
     const kimi_vram_residency_api * residency = nullptr;
-    const kimi_vram_location_api * location_api = nullptr;
     const kimi_vram_format_api * format = nullptr; // optional explicit-format extension
     const kimi_vram_prefill_api * prefill_api = nullptr;
     const kimi_vram_elastic_api * elastic = nullptr;
@@ -53,7 +52,6 @@ struct sink_vram {
     kimi_vram_prefill_stats prefill_stats = {};
     uint64_t epoch = 0, ram_drops = 0, ram_drop_blocked = 0, ready_confirmations = 0;
     std::vector<int> ram_leases;
-    std::vector<sink_request> location_sources;
     // Opt-in deferred uploads: the RAM source of an upload that outlives its layer stays leased until collected.
     const kimi_vram_deferred_api * deferred_api = nullptr;
     bool deferred_upload = false, have_token = false;
@@ -93,7 +91,6 @@ struct sink_vram {
 
     void initialize(bool ready_first, const sink_configuration & configuration) {
         if (!ssd::platform::process_cpus(process_cpus)) { process_cpus.clear(); }
-        const bool use_locations = !configuration.production && configuration.policy.vram_locations;
         uint64_t bytes = configuration.policy.vram_budget;
         if (!configuration.production) {
             async_upload = configuration.policy.vram_async;
@@ -177,7 +174,7 @@ struct sink_vram {
             }
         }
         if (deferred_upload) {
-            if (!async_upload || use_locations) { throw std::runtime_error("VRAM_DEFERRED_UPLOAD requires ASYNC_UPLOAD=1 and no CACHE_LOCATIONS"); }
+            if (!async_upload) { throw std::runtime_error("VRAM_DEFERRED_UPLOAD requires ASYNC_UPLOAD=1"); }
             deferred_api = configuration.gpu.deferred;
             if (!deferred_api || deferred_api->version != 3 || deferred_api->size != sizeof(*deferred_api) ||
                     !deferred_api->admit || !deferred_api->collect || !deferred_api->wait) {
@@ -218,14 +215,6 @@ struct sink_vram {
                     !host_api->available || !host_api->launch || !host_api->costs || !host_api->register_host ||
                     !host_api->unregister_host || !host_api->costs2) {
                 throw std::runtime_error("GPU tier host-memory ABI mismatch");
-            }
-        }
-        if (use_locations) {
-            location_api=configuration.gpu.location;
-            if(!location_api || location_api->version!=1 || location_api->size!=sizeof(*location_api) ||
-                    !location_api->configure || !location_api->view || location_api->view->version!=1 ||
-                    location_api->view->size!=sizeof(kimi_cache_location_api)) {
-                throw std::runtime_error("VRAM location provider ABI missing or incompatible");
             }
         }
     }
@@ -368,7 +357,7 @@ struct sink_vram {
         check(result, error);
     }
     void pin_ram_batch(sink_cache & cache, const std::vector<sink_request> & source) {
-        if ((!exclusive && !async_upload && !location_api) || !decode) { return; }
+        if ((!exclusive && !async_upload) || !decode) { return; }
         if (!ram_leases.empty()) { throw std::runtime_error("GPU tier still holds a previous RAM batch"); }
         // One lease per physical slot covers CPU, its read CQEs and a possible
         // borrowed upload. Repeated router IDs cannot release it twice.
@@ -889,22 +878,6 @@ struct sink_vram {
             ram_drops += dropped > 0; ram_drop_blocked += dropped < 0;
         }
         rc = residency->release(context, &lease, error, sizeof(error)); check(rc, error);
-    }
-    void capture_locations(const kimi_cache_location_candidate * candidates,int count,int latent,int hidden) {
-        if(!location_api)return;
-        place_threads();
-        if(count<=0 || count>16)throw std::runtime_error("invalid VRAM native candidate count");
-        char error[512]={};check(location_api->configure(context,latent,hidden,error,sizeof(error)),error);
-        requests.resize(count);location_sources.assign(count,{});
-        for(int i=0;i<count;++i){
-            auto & source=location_sources[i];auto & request=requests[i];
-            source.id=candidates[i].expert;source.weight=1;
-            request.layer=candidates[i].layer;request.expert=source.id;request.weight=1;
-            for(int role=0;role<3;++role){
-                source.role[role]=candidates[i].role[role];const auto k=sink_cache::key(source.role[role]);
-                request.role[role]={k.device,k.inode,k.size,k.offset,k.bytes,k.mtime_s,k.mtime_ns,k.ctime_s,k.ctime_ns,k.inode_hi};
-            }
-        }
     }
     void cancel() {
         if (!context) { return; }

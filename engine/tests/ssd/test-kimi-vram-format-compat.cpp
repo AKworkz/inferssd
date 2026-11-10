@@ -7,7 +7,6 @@
 #include "vram-tier.cpp"
 #include "test-kimi-vram-format-fixture.h"
 #include <cstdio>
-#include <functional>
 
 namespace {
 void require(bool ok,const char * message){if(!ok)throw std::runtime_error(message);}
@@ -37,32 +36,5 @@ int main(){
         prefill_admit_cold(&t,&request,data[0],data[1],data[2],&admitted,error,sizeof(error))!=0 &&
         !admitted && std::strstr(error,"Q2 cold admission retired") && !t.table && !t.arena && t.done && t.pending_uploads.empty(),
         "retired cold admission returned with CUDA work or cache still live");
-    const auto * location=kimi_vram_location_get_api();
-    require(location && location->version==1 && location->size==sizeof(*location) && location->configure &&
-        location->view && location->view->version==1 && location->view->size==sizeof(*location->view),
-        "retired location ABI layout changed");
-    const auto & view=*location->view;kimi_cache_location_lease native_lease={77,88};
-    struct location_case { const char * name; std::function<int()> call; bool rejected; };
-    std::vector<location_case> cases={
-        {"configure",[&]{return location->configure(&t,256,256,error,sizeof(error));},true},
-        {"acquire",[&]{return view.acquire_native(&t,nullptr,1,&native_lease,error,sizeof(error));},true},
-        {"begin",[&]{return view.begin_layer(&t,nullptr,0,0,0,error,sizeof(error));},true},
-        {"launch",[&]{return view.launch(&t,nullptr,0,nullptr,0,0,0,0,0,error,sizeof(error));},true},
-        {"admit",[&]{return view.admit(&t,nullptr,nullptr,nullptr,nullptr,1,error,sizeof(error));},true},
-        {"finish",[&]{return view.finish(&t,error,sizeof(error));},true},
-        {"cancel",[&]{return view.cancel(&t,error,sizeof(error));},false},
-        {"release",[&]{return view.release(&t,&native_lease,1,error,sizeof(error));},true},
-        {"empty-release",[&]{return view.release(&t,nullptr,0,error,sizeof(error));},false},
-    };
-    for(const auto & test:cases){
-        warm();t.begin(17,2,true);lifecycle_prepare(t,&request,1,&slot);require(slot>=0,"explicit cache hit absent");
-        lifecycle_launch(t,input);native_lease={77,88};error[0]=0;
-        const int rc=test.call();
-        require((rc!=0)==test.rejected && (!test.rejected || std::strstr(error,"implicit cache-location provider retired")),test.name);
-        require(!t.table && !t.arena && t.done && t.pending_uploads.empty() && t.work.empty(),
-            "retired location callback returned with explicit CUDA work or borrowed weights still live");
-        if(std::strcmp(test.name,"acquire")==0)require(!native_lease.handle && !native_lease.generation,"retired acquire issued a lease");
-        if(!test.rejected)require(!error[0],"successful location cleanup retained an error");
-    }
-    std::puts("REAL_CUDA_FORMAT_COMPAT_DRAIN_PASS checks=5 native_callback_cases=9");return 0;
+    std::puts("REAL_CUDA_FORMAT_COMPAT_DRAIN_PASS checks=5");return 0;
 }catch(const std::exception & e){std::fprintf(stderr,"FORMAT_COMPAT_DRAIN_FAIL: %s\n",e.what());return 1;}}

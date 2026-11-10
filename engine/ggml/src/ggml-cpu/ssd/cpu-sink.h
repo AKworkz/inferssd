@@ -4,7 +4,6 @@
 #include "ggml-ssd/gpu/source.h"
 #include "ggml-ssd/host/cache-stats.h"
 #include "ggml-ssd/host/cache-stats.h"
-#include "ggml-ssd/host/cache-policy.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -189,41 +188,6 @@ GGML_BACKEND_API bool kimi_cpu_sink_run_activation(
         const int32_t * ids, const float * weights, int nslots,
         const struct kimi_cpu_sink_activation * activation, float * output,
         struct kimi_cpu_sink_stats * stats, char * error, size_t error_size);
-
-// Optional shared-location provider. nullptr detaches at a serialized boundary.
-// Default absent; the placement owner installs its adapter once, not per token.
-struct kimi_cache_location_api;
-GGML_BACKEND_API bool kimi_cpu_sink_set_cache_locations(
-        struct kimi_cpu_sink *, const struct kimi_cache_location_api *, void *, char *, size_t);
-
-// Separate ABI: the original stats and run entry remain unchanged.
-struct kimi_cache_compute_stats {
-    struct kimi_cache_compute_plan plan;
-    uint32_t computed_mask;
-    uint32_t released_mask;
-    uint64_t route_visible_us;
-    uint64_t prepared_us;
-    uint64_t finished_us;
-    uint64_t baseline_miss_bytes;
-    uint64_t submitted_bytes;
-    uint64_t unused_read_bytes;
-    // Native slot: queue, submit begin/end, up/gate/down CQE, CPU begin/end.
-    // For registered VRAM jobs, the final pair is a batch submit-to-finish
-    // host envelope, not per-expert CUDA kernel timing (see trace vram_mask).
-    uint64_t events[16][8];
-    uint64_t completed_bytes[16];
-    float final_weights[16];
-};
-GGML_BACKEND_API bool kimi_cpu_sink_run_cache_compute(
-        struct kimi_cpu_sink * sink,
-        const struct ggml_tensor * up, const struct ggml_tensor * gate,
-        const struct ggml_tensor * down, const float * input,
-        const int32_t * ids, const float * weights, int nslots,
-        const int32_t * native_ids, const float * native_weights, int native_count,
-        float routed_scale, bool guarded, const struct kimi_cache_compute_config * config,
-        float situ_beta, float situ_linear_beta, float * output,
-        struct kimi_cpu_sink_stats * stats, struct kimi_cache_compute_stats * decision,
-        char * error, size_t error_size);
 
 #ifdef __cplusplus
 }

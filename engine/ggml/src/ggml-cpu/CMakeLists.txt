@@ -30,7 +30,6 @@ function(ggml_add_cpu_backend_variant_impl tag_name)
     list (APPEND GGML_CPU_SOURCES
         ggml-cpu/ggml-cpu.c
         ggml-cpu/ggml-cpu.cpp
-        ggml-cpu/ssd/cpu-cache-executor.inc
         ggml-cpu/ssd/cpu-sink.cpp
         ggml-cpu/ssd/cpu-sink.h
         ggml-cpu/ssd/cpu-sink-internal.h

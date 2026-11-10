@@ -145,9 +145,9 @@ static void graph_case(ggml_backend_t cpu, int ntokens, bool prefill, bool decod
             }
         }
         require(ggml_backend_sched_get_tensor_backend(scheduler.get(), output) == cpu, "custom node not assigned to CPU");
-        require(bool(output->src[5]) == predicted, "the custom node must carry the prediction it was given");
+        require(bool(output->src[4]) == predicted, "the custom node must carry the prediction it was given");
         if (predicted) {
-            require(output->src[5]->type == GGML_TYPE_I32 && output->src[5]->ne[0] == slots,
+            require(output->src[4]->type == GGML_TYPE_I32 && output->src[4]->ne[0] == slots,
                     "the prediction must rank as many experts as the router selects");
         }
         require(output->src[0] && output->src[1] && output->src[2] && !output->src[3], "custom node source count mismatch");

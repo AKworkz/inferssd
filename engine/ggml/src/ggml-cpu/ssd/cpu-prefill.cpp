@@ -551,11 +551,6 @@ extern "C" bool kimi_cpu_prefill_run_activation(
         prefill->current.gpu_ssd_transient_upload_bytes = batch.gpu_ssd_transient_upload_bytes;
         prefill->current.gpu_ssd_transient_upload_us = batch.gpu_ssd_transient_upload_us;
         prefill->current.gpu_worker_us = batch.gpu_worker_us;
-        prefill->current.gpu_cold_admit_candidates = batch.gpu_cold_admit_candidates;
-        prefill->current.gpu_cold_admit_experts = batch.gpu_cold_admit_experts;
-        prefill->current.gpu_cold_admit_routes = batch.gpu_cold_admit_routes;
-        prefill->current.gpu_cold_admit_upload_bytes = batch.gpu_cold_admit_upload_bytes;
-        prefill->current.gpu_cold_admit_upload_us = batch.gpu_cold_admit_upload_us;
         prefill->current.ram_experts = batch.ram_experts;
         prefill->current.ram_routes = batch.ram_routes;
         prefill->current.ram_bytes = batch.ram_bytes;

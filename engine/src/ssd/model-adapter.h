@@ -44,7 +44,6 @@ struct expert_inputs {
     int64_t n_embd;
     int64_t n_tokens;
     bool silu;
-    bool cache_compute;
     bool prefill;
     bool weight_before_ffn;
     bool has_lora;
@@ -74,7 +73,6 @@ enum class expert_refusal {
     lora,
     quantization,
     not_silu_gated,
-    compute_cache,
     token_batch,
     invalid_clamp,
     missing_post_norm,

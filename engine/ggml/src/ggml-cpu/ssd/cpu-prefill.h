@@ -26,11 +26,6 @@ struct kimi_cpu_prefill_stats {
     uint64_t gpu_ssd_transient_upload_bytes;
     double gpu_ssd_transient_upload_us;
     double gpu_worker_us;              // resident + transient GPU worker wall
-    uint64_t gpu_cold_admit_candidates; // SSD candidates meeting the cold Q2 gate
-    uint64_t gpu_cold_admit_experts;    // successfully seeded empty decode slots
-    uint64_t gpu_cold_admit_routes;
-    uint64_t gpu_cold_admit_upload_bytes;
-    double gpu_cold_admit_upload_us;
     uint64_t ram_experts;              // distinct read-only retained RAM hits
     uint64_t ram_routes;               // token/slot routes sourced from retained RAM
     uint64_t ram_bytes;

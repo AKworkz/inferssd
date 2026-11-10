@@ -174,7 +174,7 @@ void llama_ssd_context::attach_backend(ggml_backend_t backend) {
     if (!get) { return; }
     if (services.gpu) { throw std::runtime_error("one GPU expert executor per context is supported"); }
     const auto * provider = get();
-    if (!provider || provider->version != 1 || provider->size != sizeof(*provider) ||
+    if (!provider || provider->version != 2 || provider->size != sizeof(*provider) ||
             !provider->device_is_unified || !provider->device_ordinal || !provider->attach_services || !provider->stream) {
         throw std::runtime_error("GPU backend has no compatible SSD provider table");
     }

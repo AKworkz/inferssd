@@ -45,9 +45,7 @@ policy directly from typed snapshots and do not consume these fixture objects.
 `fixture_inputs` is owned by each test invocation and passed through constructors
 and calls. CPU CTest matrix variants use `--fixture key=value`; unknown fields
 are rejected. The CTest matrix retains transport, split-CV, scheduler, replacement
-and allocation dimensions without process environment mutation. The retained
-cache-compute algorithm tests pass explicit algorithm objects; supported product
-configuration leaves that experiment off.
+and allocation dimensions without process environment mutation.
 
 The prefetch residency unit keeps its existing stand-in residency table and real
 CPU file reads. It is a decision-policy unit, not CUDA numerical or performance

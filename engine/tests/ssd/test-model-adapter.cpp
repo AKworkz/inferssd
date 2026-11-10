@@ -36,7 +36,7 @@ struct fixture {
     llama_ssd::expert_inputs inputs() const {
         return {true, true, &up, &gate, &down, nullptr, nullptr, nullptr,
             nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-            256, 1, true, false, false, false, false, &norm, 1e-5f, 0.0f};
+            256, 1, true, false, false, false, &norm, 1e-5f, 0.0f};
     }
 };
 
@@ -57,12 +57,11 @@ bool baseline_accepts(llm_arch arch, float clamp, const llama_ssd::expert_inputs
         !in.up_scale && !in.gate_scale && !in.down_scale &&
         !in.weight_before_ffn && !in.has_lora;
     const bool deepseek = layout && arch == LLM_ARCH_DEEPSEEK41 &&
-        in.silu && !in.cache_compute && (in.n_tokens == 1 || in.prefill) && in.gate->type == in.up->type &&
+        in.silu && (in.n_tokens == 1 || in.prefill) && in.gate->type == in.up->type &&
         std::isfinite(clamp) && clamp > 1e-6f;
-    const bool muse = layout && arch == LLM_ARCH_MUSE_SPARK && in.silu && !in.cache_compute &&
+    const bool muse = layout && arch == LLM_ARCH_MUSE_SPARK && in.silu &&
         in.post_norm && in.gate->type == in.up->type;
     const bool qwen = layout && (arch == LLM_ARCH_QWEN4EXP || arch == LLM_ARCH_QWEN35MOE) && in.silu &&
-        !in.cache_compute &&
         in.gate->type == in.up->type;
     return deepseek || muse || qwen;
 }
@@ -132,11 +131,6 @@ void model_and_numeric_boundaries() {
     CHECK(!compare(LLM_ARCH_MUSE_SPARK, 7.0f, in));
     CHECK(compare(LLM_ARCH_QWEN4EXP, 7.0f, in));
     CHECK(compare(LLM_ARCH_QWEN35MOE, 7.0f, in));
-    in = f.inputs(); in.cache_compute = true;
-    CHECK(!compare(LLM_ARCH_DEEPSEEK41, 7.0f, in));
-    CHECK(!compare(LLM_ARCH_MUSE_SPARK, 7.0f, in));
-    CHECK(!compare(LLM_ARCH_QWEN4EXP, 7.0f, in));
-    CHECK(!compare(LLM_ARCH_QWEN35MOE, 7.0f, in));
     for (int tokens : {1, 2, 32}) {
         for (bool prefill : {false, true}) {
             in = f.inputs(); in.n_tokens = tokens; in.prefill = prefill;
@@ -300,8 +294,6 @@ void refusal_reasons() {
     CHECK(refusal_of(LLM_ARCH_DEEPSEEK41, in) == refusal::lora);
     in = good; in.silu = false;
     CHECK(refusal_of(LLM_ARCH_DEEPSEEK41, in) == refusal::not_silu_gated);
-    in = good; in.cache_compute = true;
-    CHECK(refusal_of(LLM_ARCH_DEEPSEEK41, in) == refusal::compute_cache);
     in = good; in.n_tokens = 2;
     CHECK(refusal_of(LLM_ARCH_DEEPSEEK41, in) == refusal::token_batch);
     CHECK(refusal_of(LLM_ARCH_DEEPSEEK41, good, 0.0f) == refusal::invalid_clamp);

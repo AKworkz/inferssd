@@ -32,16 +32,13 @@ struct llama_kimi_cpu_sink_node {
     llama_kimi_cpu_sink_runtime * runtime;
     float situ_beta;
     float situ_linear_beta;
-    // SITU nodes keep the K3 entries (run, cache compute, grouped prefill).
+    // SITU nodes keep the K3 entries (run, grouped prefill).
     // Other activations are decode-only through kimi_cpu_sink_run_activation.
     kimi_cpu_sink_activation activation = { KIMI_CPU_SINK_ACTIVATION_SITU, 0.0f, 0.0f, 0.0f };
     int layer;
     bool post_exp_norm = false;
     float post_exp_norm_eps = 0.0f;
     bool prefill = false;
-    bool cache_compute = false;
-    bool guarded = false;
-    float routed_scale = 1.0f;
 };
 
 struct llama_kimi_cpu_sink_runtime {
@@ -55,9 +52,6 @@ struct llama_kimi_cpu_sink_runtime {
     llama_kimi_cpu_prefill_runtime prefill;
     decltype(&kimi_cpu_sink_run) run = nullptr;
     decltype(&kimi_cpu_sink_run_activation) run_activation = nullptr;
-    decltype(&kimi_cpu_sink_run_cache_compute) run_cache_compute = nullptr;
-    bool cache_compute_enabled = false;
-    kimi_cache_compute_config cache_compute_config = {};
     decltype(&kimi_cpu_sink_destroy) destroy = nullptr;
     decltype(&kimi_cpu_sink_cache_configure) cache_configure = nullptr;
     decltype(&kimi_cpu_sink_cache_begin) cache_begin = nullptr;
@@ -102,7 +96,7 @@ struct llama_kimi_cpu_sink_runtime {
         : settings(configured), services(runtime_services), source(source_view), epoch(context_epoch) {
         if (n_expert <= 0) { throw std::runtime_error("CPU sink requires a positive routed expert count"); }
         // Supported v0.1 profile: resource-sized RAM cache, model-order priority,
-        // fixed eight-expert read ring, no speculative cache-compute policy.
+        // fixed eight-expert read ring.
         cache_budget = std::numeric_limits<uint64_t>::max();
         cache_keep_across_requests = true;
         vram_budget = settings.vram_budget()->tier_bytes(services.gpu != nullptr);
@@ -424,7 +418,6 @@ inline void llama_kimi_cpu_sink_compute(ggml_tensor * dst, int ith, int nth, voi
         activation.post_exp_norm_eps = node.post_exp_norm_eps;
     }
     const bool situ = node.activation.kind == KIMI_CPU_SINK_ACTIVATION_SITU;
-    GGML_ASSERT(situ || !node.cache_compute);
     if (node.prefill) {
         runtime.prefill.initialize(node.cpu_reg, runtime.sink);
         ok = runtime.prefill.run_activation(runtime.prefill.context, &node.up, &node.gate, &node.down,
@@ -433,19 +426,6 @@ inline void llama_kimi_cpu_sink_compute(ggml_tensor * dst, int ith, int nth, voi
             &activation, static_cast<float *>(dst->data),
             &grouped_stats, error, sizeof(error));
         stats = grouped_stats.stream;
-    } else if (node.cache_compute) {
-        GGML_ASSERT(ntokens == 1 && runtime.run_cache_compute);
-        const ggml_tensor * native_ids = dst->src[3];
-        const ggml_tensor * native_weights = dst->src[4];
-        GGML_ASSERT(native_ids && native_ids->type == GGML_TYPE_I32 && ggml_is_contiguous(native_ids));
-        GGML_ASSERT(native_weights && native_weights->type == GGML_TYPE_F32 && ggml_is_contiguous(native_weights));
-        GGML_ASSERT(ggml_nelements(native_ids) == ggml_nelements(native_weights));
-        ok = runtime.run_cache_compute(runtime.sink, &node.up, &node.gate, &node.down,
-            static_cast<const float *>(input->data), static_cast<const int32_t *>(ids->data),
-            static_cast<const float *>(weights->data), nslots,
-            static_cast<const int32_t *>(native_ids->data), static_cast<const float *>(native_weights->data),
-            int(ggml_nelements(native_ids)), node.routed_scale, node.guarded, &runtime.cache_compute_config,
-            node.situ_beta, node.situ_linear_beta, static_cast<float *>(dst->data), &stats, nullptr, error, sizeof(error));
     } else if (situ) {
         GGML_ASSERT(ntokens == 1);
         ok = runtime.run(runtime.sink, &node.up, &node.gate, &node.down,
@@ -456,7 +436,7 @@ inline void llama_kimi_cpu_sink_compute(ggml_tensor * dst, int ith, int nth, voi
     } else {
         GGML_ASSERT(ntokens == 1);
         // the next layer's predicted experts, for the sink's prefetch
-        if (const ggml_tensor * hint = dst->src[5]; hint && runtime.prefetch_hint) {
+        if (const ggml_tensor * hint = dst->src[4]; hint && runtime.prefetch_hint) {
             GGML_ASSERT(hint->type == GGML_TYPE_I32 && ggml_is_contiguous(hint));
             runtime.prefetch_hint(runtime.sink, node.layer + 1, static_cast<const int32_t *>(hint->data),
                 static_cast<int>(ggml_nelements(hint)));
@@ -495,9 +475,6 @@ inline void llama_kimi_cpu_sink_compute(ggml_tensor * dst, int ith, int nth, voi
                 " gpu_ssd_transient_candidates=%" PRIu64 " gpu_ssd_transient_experts=%" PRIu64
                 " gpu_ssd_transient_routes=%" PRIu64 " gpu_ssd_transient_upload_bytes=%" PRIu64
                 " gpu_ssd_transient_upload_us=%.3f"
-                " gpu_cold_admit_candidates=%" PRIu64 " gpu_cold_admit_experts=%" PRIu64
-                " gpu_cold_admit_routes=%" PRIu64 " gpu_cold_admit_upload_bytes=%" PRIu64
-                " gpu_cold_admit_upload_us=%.3f"
                 " ram_experts=%" PRIu64 " ram_routes=%" PRIu64 " ram_bytes=%" PRIu64
                 " ssd_experts=%" PRIu64 " ssd_routes=%" PRIu64 " ssd_bytes=%" PRIu64 "\n",
                 node.layer, ntokens, nslots, stats.experts, grouped_stats.routed_slots,
@@ -509,9 +486,6 @@ inline void llama_kimi_cpu_sink_compute(ggml_tensor * dst, int ith, int nth, voi
                 grouped_stats.gpu_ssd_transient_candidates, grouped_stats.gpu_ssd_transient_experts,
                 grouped_stats.gpu_ssd_transient_routes, grouped_stats.gpu_ssd_transient_upload_bytes,
                 grouped_stats.gpu_ssd_transient_upload_us,
-                grouped_stats.gpu_cold_admit_candidates, grouped_stats.gpu_cold_admit_experts,
-                grouped_stats.gpu_cold_admit_routes, grouped_stats.gpu_cold_admit_upload_bytes,
-                grouped_stats.gpu_cold_admit_upload_us,
                 grouped_stats.ram_experts, grouped_stats.ram_routes, grouped_stats.ram_bytes,
                 grouped_stats.ssd_experts, grouped_stats.ssd_routes, grouped_stats.ssd_bytes);
         }

@@ -22,8 +22,5 @@ struct expert_request {
     size_t io_slot = 0;
     uint64_t read_bytes = 0; // positive CQE bytes; only the I/O thread writes
     void * read_target[3] = {}; // fixed before publishing the I/O job
-    bool cache_only = false; // must never allocate a read target or submit I/O
-    uint64_t ready_us = 0; // all successful CQEs, published under io_mutex
-    uint64_t events[8] = {}; // cache-compute audit; read only after I/O drain
 };
 }} // namespace ssd::host

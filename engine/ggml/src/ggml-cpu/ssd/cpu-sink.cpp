@@ -8,11 +8,9 @@
 #include "ggml-ssd/telemetry/telemetry.h"
 #include "ggml-ssd/place/runtime-policy.h"
 #include "ggml-ssd/host/page-lock.h"
-#include "ggml-ssd/gpu/kimi-cache-location-api.h"
 #include "ggml-ssd/host/arbiter.h"
 #include "ggml-ssd/host/expert-cache.h"
 #include "ggml-ssd/gpu/kimi-vram-tier-api.h"
-#include "ggml-ssd/gpu/kimi-vram-location-api.h"
 #include "ggml-ssd/io/read-ring.h"
 #include "ggml-ssd/platform/file.h"
 #include "ggml-ssd/platform/memory.h"
@@ -290,7 +288,7 @@ static void sink_copy_services(sink_configuration & value, const ssd::runtime_se
         const auto * gpu = services->gpu;
         // The tables a tier needs are checked when it starts (sink_vram::initialize): a tier with no residency
         // serves grouped prefill alone and has fewer of them.
-        if (gpu->version != 1 || gpu->size != sizeof(*gpu) || !gpu->api || !gpu->prefill || !gpu->settings || !gpu->stream ||
+        if (gpu->version != 2 || gpu->size != sizeof(*gpu) || !gpu->api || !gpu->prefill || !gpu->settings || !gpu->stream ||
                 !gpu->device_is_unified || !gpu->device_ordinal || !gpu->attach_services || services->gpu_device < 0) {
             throw std::runtime_error("GPU provider ABI missing or incompatible");
         }
@@ -397,9 +395,6 @@ struct sink_timeline_expert {
 };
 
 } // namespace
-
-static void sink_location_provider_initialize(kimi_cpu_sink * sink);
-
 
 // The median and the mean of a duration without keeping the samples: 32 bins per octave of 1 + us (2% wide).
 struct sink_duration_histogram {
@@ -661,9 +656,6 @@ struct kimi_cpu_sink {
     kimi_cpu_sink_stats current = {};
 
     const bool ready_first;
-    bool cache_compute_active = false;
-    kimi_cache_location_api locations = {};
-    void * locations_context = nullptr; // run_mutex; published with io_job
     const bool early_up_gate;
     const bool role_major;
     const bool nonblocking_down_sched;
@@ -824,10 +816,6 @@ struct kimi_cpu_sink {
         cache.before_discard = [](void * p, size_t first, size_t count) { static_cast<kimi_cpu_sink *>(p)->host_unlock(first, count); };
         cache.before_discard_arg = this;
         vram.ram_slot_locked = [this](int entry) { return entry >= 0 && host_lock.is_locked(size_t(entry)); };
-        sink_location_provider_initialize(this);
-        if (early_up_gate && vram.location_api) {
-            throw std::runtime_error("EARLY_UP_GATE cannot share the cache-location provider");
-        }
         if (role_major && !early_up_gate) {
             throw std::runtime_error("ROLE_MAJOR requires EARLY_UP_GATE=1");
         }
@@ -1128,7 +1116,7 @@ struct kimi_cpu_sink {
         std::vector<std::pair<int, prefetch_job *>> used;
         for (const auto & p : prefetch.pending) {
             for (const auto & r : requests) {
-                if (r.cache_hit == p.first && r.vram_slot < 0 && !r.cache_only) { used.push_back(p); break; }
+                if (r.cache_hit == p.first && r.vram_slot < 0) { used.push_back(p); break; }
             }
         }
         prefetch.pending.swap(used);
@@ -1137,7 +1125,7 @@ struct kimi_cpu_sink {
     void prefetch_count_used() {
         for (int i = 0; i < prefetch.selected_n; ++i) {
             for (const auto & r : requests) {
-                if (r.id != prefetch.selected_reads[i].second || r.cache_only) { continue; }
+                if (r.id != prefetch.selected_reads[i].second) { continue; }
                 prefetch.used_r[prefetch.selected_reads[i].first] += r.cache_hit >= 0 && r.vram_slot < 0;
                 break;
             }
@@ -1871,7 +1859,7 @@ struct kimi_cpu_sink {
         if (!in_place) { host_lock_decide(); }
         if (!in_place && !host_lock.enabled) { return; }
         auto reserved = [&](size_t i) { return i < 64 && ((c.reserved_rows >> i) & 1u); };
-        auto items = vram.place_items(requests, [&](size_t i) { return requests[i].cache_only ? 0 : 1; },
+        auto items = vram.place_items(requests, [](size_t) { return 1; },
             [](size_t) { return true; }, [&](size_t i) { return !reserved(i); });
         const auto pending = prefetch_pending_mb();
         ssd::place::describe_decode(plan, items, pending);
@@ -2029,7 +2017,7 @@ struct kimi_cpu_sink {
     void report_miss_cost() {
         size_t ram = 0, ssd = 0;
         for (const auto & r : requests) {
-            if (r.vram_slot >= 0 || r.cache_only) { continue; }
+            if (r.vram_slot >= 0) { continue; }
             if (r.cache_hit >= 0) { ++ram; } else { ++ssd; }
         }
         if (!(ram + ssd) || !(learning.cpu_expert_us > 0)) { return; }
@@ -2091,9 +2079,7 @@ struct kimi_cpu_sink {
     }
 
     void cancel_and_wait() {
-        // A provider cancellation must retain its native leases until the
-        // consumer has drained and explicitly released them.
-        if (!cache_compute_active || !locations.version) { vram.cancel(); }
+        vram.cancel();
         {
             std::unique_lock<std::mutex> lock(io_mutex);
             if (!io_done) {
@@ -2286,7 +2272,7 @@ struct kimi_cpu_sink {
         if (cqe.user_data >= 3 * slots.size()) { throw std::runtime_error("invalid CPU sink CQE target"); }
         if (cqe.res <= 0) { return; }
         auto & request = requests[slots[cqe.user_data / 3].request];
-        if (trace_enabled || cache_compute_active) { request.read_bytes += static_cast<uint64_t>(cqe.res); }
+        if (trace_enabled) { request.read_bytes += static_cast<uint64_t>(cqe.res); }
         current.read_bytes += static_cast<uint64_t>(cqe.res);
         if (request.cache_admit >= 0) { current.cache_fill_read_bytes += cqe.res; }
         else { current.ring_read_bytes += cqe.res; }
@@ -2397,8 +2383,6 @@ struct kimi_cpu_sink {
                 slot.ready_roles = 0;
                 slot.request = io_requests[io_next];
                 if (timeline_active) { timeline[slot.request].io[0] = ggml_time_us(); }
-                auto & request = requests[slot.request];
-                if (cache_compute_active) { request.events[0] = ggml_time_us(); }
                 if (!role_major) { for (unsigned role = 0; role < 3; ++role) { queue_role(io_next, role); } }
                 ++io_next;
             }
@@ -2414,15 +2398,8 @@ struct kimi_cpu_sink {
             }
         }
         if (!queued) { return; }
-        const uint64_t submit_begin = timeline_active || cache_compute_active ? ggml_time_us() : 0;
+        const uint64_t submit_begin = timeline_active ? ggml_time_us() : 0;
         sink_io_value(ring.submit(queued)); io_inflight += queued;
-        if (cache_compute_active) {
-            const uint64_t end = ggml_time_us();
-            for (size_t j = batch_begin; j < io_next; ++j) {
-                requests[io_requests[j]].events[1] = submit_begin;
-                requests[io_requests[j]].events[2] = end;
-            }
-        }
         if (timeline_active) {
             const uint64_t submit_end = ggml_time_us();
             for (size_t j = batch_begin; j < io_next; ++j) {
@@ -2447,7 +2424,6 @@ struct kimi_cpu_sink {
             std::lock_guard<std::mutex> lock(io_mutex);
             sink_slot & slot = slots[index];
             if (timeline_active) { timeline[slot.request].io[3 + role] = ggml_time_us(); }
-            if (cache_compute_active) { requests[slot.request].events[3 + role] = ggml_time_us(); }
             const auto & range = requests[slot.request].role[role];
             const size_t expected = range.nbytes;
             const size_t required = range.payload_nbytes ? range.data_offset + range.payload_nbytes : expected;
@@ -2465,10 +2441,7 @@ struct kimi_cpu_sink {
             } else {
                 slot.ready_roles |= 1u << role;
             }
-            if (!--slot.remaining) {
-                slot.state = sink_slot::ready;
-                if (cache_compute_active && slot.ready_roles == 7u) { requests[slot.request].ready_us = ggml_time_us(); }
-            }
+            if (!--slot.remaining) { slot.state = sink_slot::ready; }
             io_cv.notify_all();
         }
         return consumed;
@@ -2591,8 +2564,7 @@ struct kimi_cpu_sink {
     }
 
     void prepare(const ggml_tensor * up, const ggml_tensor * gate, const ggml_tensor * down,
-                 const int32_t * ids, const float * weights, int nslots, bool use_cache = true,
-                 const uint8_t * cache_only = nullptr) {
+                 const int32_t * ids, const float * weights, int nslots, bool use_cache = true) {
         const ggml_tensor * tensors[] = { up, gate, down };
         for (const auto * tensor : tensors) {
             if (!tensor || !ggml_is_contiguous(tensor) ||
@@ -2634,7 +2606,6 @@ struct kimi_cpu_sink {
             sink_request request = {};
             request.weight = weights[slot];
             request.id = ids[slot];
-            request.cache_only = cache_only && cache_only[slot];
             for (int role = 0; role < 3; ++role) {
                 auto & source = request.role[role];
                 if (!resolve(tensors[role]->name, ids[slot], &source)) {
@@ -2654,7 +2625,7 @@ struct kimi_cpu_sink {
                 const size_t capacity = source.payload_nbytes ?
                     std::max(source.nbytes, (bytes + 8190) / 4096 * 4096) : source.nbytes;
                 max_bytes[role] = std::max(max_bytes[role], capacity);
-                if (!request.cache_only) { current.demand_bytes += source.nbytes; }
+                current.demand_bytes += source.nbytes;
             }
             requests.push_back(request);
         }
@@ -2693,18 +2664,14 @@ struct kimi_cpu_sink {
                     }
                 }
             }
-            const bool provider_path = cache_compute_active && locations.version;
-            if (provider_path) { vram.hits = 0; }
-            else {
-                // The tier may size itself in this call (its first decode layer) while the RAM cache has not mapped
-                // its slots yet: tell it first what the cache will commit, which on unified memory is the same DRAM.
-                if (vram.context && !cache.arena) {
-                    vram.set_host_demand(cache.pending_bytes(max_bytes[0] + max_bytes[1] + max_bytes[2]));
-                }
-                if (vram.context) {
-                    vram.prepare(requests, up, down, latent, hidden, sink_vram::layer_list(cache), cache, post_exp_norm != nullptr);
-                } else { vram.hits = 0; }
+            // The tier may size itself in this call (its first decode layer) while the RAM cache has not mapped
+            // its slots yet: tell it first what the cache will commit, which on unified memory is the same DRAM.
+            if (vram.context && !cache.arena) {
+                vram.set_host_demand(cache.pending_bytes(max_bytes[0] + max_bytes[1] + max_bytes[2]));
             }
+            if (vram.context) {
+                vram.prepare(requests, up, down, latent, hidden, sink_vram::layer_list(cache), cache, post_exp_norm != nullptr);
+            } else { vram.hits = 0; }
             // Auto sizing reads memory.current. After GPU prefill, the CPU
             // read ring may still be absent or only virtually allocated. Its
             // first read/registration would otherwise consume the headroom
@@ -2733,7 +2700,7 @@ struct kimi_cpu_sink {
         }
         io_requests.clear();
         for (size_t i = 0; i < requests.size(); ++i) {
-            if (requests[i].cache_hit >= 0 || requests[i].vram_slot >= 0 || requests[i].cache_only) { continue; }
+            if (requests[i].cache_hit >= 0 || requests[i].vram_slot >= 0) { continue; }
             requests[i].io_slot = io_requests.size() % slots.size();
             io_requests.push_back(i);
         }
@@ -3125,9 +3092,6 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
         batch->gpu_ssd_transient_candidates = batch->gpu_ssd_transient_experts = 0;
         batch->gpu_ssd_transient_routes = batch->gpu_ssd_transient_upload_bytes = 0;
         batch->gpu_ssd_transient_upload_us = 0.0;
-        batch->gpu_cold_admit_candidates = batch->gpu_cold_admit_experts = 0;
-        batch->gpu_cold_admit_routes = batch->gpu_cold_admit_upload_bytes = 0;
-        batch->gpu_cold_admit_upload_us = 0.0;
         batch->ram_experts = batch->ram_routes = batch->ram_bytes = 0;
         batch->ssd_experts = batch->ssd_routes = batch->ssd_bytes = 0;
         std::vector<float> weights(static_cast<size_t>(nexperts), 1.0f);
@@ -3431,8 +3395,6 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
             "ssd_gpu_candidates=%llu ssd_gpu_experts=%llu ssd_gpu_routes=%llu "
             "ssd_gpu_upload_bytes=%llu ssd_gpu_upload_us=%.3f gpu_worker_us=%.3f "
             "gpu_expert_us=%.3f gpu_read_wait_us=%.3f gpu_dma_us=%.3f gpu_upload_wait_us=%.3f ring_locked=%d "
-            "cold_admit_candidates=%llu cold_admit_experts=%llu "
-            "cold_admit_routes=%llu cold_admit_upload_bytes=%llu cold_admit_upload_us=%.3f "
             "ram_experts=%llu ram_routes=%llu ram_bytes=%llu "
             "ssd_experts=%llu ssd_routes=%llu ssd_bytes=%llu ssd_read_us=%.1f\n",
             up->name, (unsigned long long) batch->gpu_experts,
@@ -3448,11 +3410,6 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
             batch->gpu_ssd_transient_upload_us,batch->gpu_worker_us,
             batch->gpu_expert_us,batch->gpu_read_wait_us,sink->vram.prefill_stats.transient_dma_us,
             sink->vram.prefill_stats.transient_wait_us,int(sink->vram.ring_locked),
-            (unsigned long long) batch->gpu_cold_admit_candidates,
-            (unsigned long long) batch->gpu_cold_admit_experts,
-            (unsigned long long) batch->gpu_cold_admit_routes,
-            (unsigned long long) batch->gpu_cold_admit_upload_bytes,
-            batch->gpu_cold_admit_upload_us,
             (unsigned long long) batch->ram_experts,
             (unsigned long long) batch->ram_routes,
             (unsigned long long) batch->ram_bytes, (unsigned long long) batch->ssd_experts,
@@ -4056,5 +4013,3 @@ extern "C" bool kimi_cpu_sink_run(
     return kimi_cpu_sink_run_activation(sink, up, gate, down, input, ids, weights, nslots, &activation,
         output, stats, error, error_size);
 }
-
-#include "ssd/cpu-cache-executor.inc"

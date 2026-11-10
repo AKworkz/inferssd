@@ -754,11 +754,6 @@ static void * ggml_backend_cpu_get_proc_address(ggml_backend_reg_t reg, const ch
     if (strcmp(name, "kimi_cpu_sink_create") == 0) {
         return (void *) kimi_cpu_sink_create;
     }
-    if (strcmp(name, "kimi_cpu_sink_set_cache_locations") == 0) { return (void *) kimi_cpu_sink_set_cache_locations; }
-    if (strcmp(name, "kimi_cpu_sink_run_cache_compute") == 0) { return (void *) kimi_cpu_sink_run_cache_compute; }
-    if (strcmp(name, "kimi_cache_compute_config_from_env") == 0) { return (void *) kimi_cache_compute_config_from_env; }
-    if (strcmp(name, "kimi_cache_compute_plan_init") == 0) { return (void *) kimi_cache_compute_plan_init; }
-    if (strcmp(name, "kimi_cache_compute_plan_update") == 0) { return (void *) kimi_cache_compute_plan_update; }
     if (strcmp(name, "kimi_cpu_sink_run") == 0) {
         return (void *) kimi_cpu_sink_run;
     }

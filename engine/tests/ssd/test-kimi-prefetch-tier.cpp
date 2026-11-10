@@ -81,14 +81,13 @@ const ssd::gpu::provider_v1 * stand_in_provider() {
     static const kimi_vram_policy_api policy = { 4, sizeof(kimi_vram_policy_api), [](void *, double) {},
         [](void *, uint64_t) {}, [](void *, uint64_t) {}, [](void *, uint64_t) { return 0; },
         [](void *) { return uint64_t(0); }, tier_place };
-    static const kimi_vram_location_api location = {};
     static const ssd::gpu::settings_api settings = {};
     static const ssd::gpu::testing::api testing = { 3, sizeof(ssd::gpu::testing::api),
         [](uint64_t, const ssd::gpu::testing::tier_options *, char *, size_t) noexcept -> void * {
             return &tier_context; } };
     static const ssd::gpu::transport_v1 transport = {};
-    static const ssd::gpu::provider_v1 provider = { 1, sizeof(ssd::gpu::provider_v1), &api, &residency, &location,
-        &format, &prefill, &elastic, &deferred, &host, &policy, &settings, &testing, &transport,
+    static const ssd::gpu::provider_v1 provider = { 2, sizeof(ssd::gpu::provider_v1), &api, &residency, &format,
+        &prefill, &elastic, &deferred, &host, &policy, &settings, &testing, &transport,
         [](int) { return false; }, [](ggml_backend_t) { return 0; },
         [](ggml_backend_t, const ssd::runtime_services *, char *, size_t) noexcept { return true; },
         [](ggml_backend_t) -> void * { return nullptr; } };

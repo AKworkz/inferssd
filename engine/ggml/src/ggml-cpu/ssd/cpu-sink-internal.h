@@ -53,11 +53,6 @@ struct kimi_cpu_sink_prefill_batch {
     double gpu_worker_us;
     double gpu_expert_us;    // the GPU's time in its expert chains
     double gpu_read_wait_us; // the GPU worker's wait for streamed SSD reads
-    uint64_t gpu_cold_admit_candidates;
-    uint64_t gpu_cold_admit_experts;
-    uint64_t gpu_cold_admit_routes;
-    uint64_t gpu_cold_admit_upload_bytes;
-    double gpu_cold_admit_upload_us;
     uint64_t ram_experts;
     uint64_t ram_routes;
     uint64_t ram_bytes;

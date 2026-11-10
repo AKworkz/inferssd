@@ -2,7 +2,6 @@
 #pragma once
 #include "ggml-backend.h"
 #include "kimi-vram-tier-api.h"
-#include "kimi-vram-location-api.h"
 #include "transport.h"
 #include "../gpu-tier-settings.h"
 #include "../testing/tier.h"
@@ -11,11 +10,10 @@ namespace ssd { namespace gpu {
 // Same-build L1 contract. L3 borrows the immutable table from the normal backend
 // registry, retains that registry, and attaches context-owned services before use.
 struct provider_v1 {
-    uint32_t version;
+    uint32_t version; // 2: no cache-location view
     size_t size;
     const kimi_vram_tier_api * api;
     const kimi_vram_residency_api * residency;
-    const kimi_vram_location_api * location;
     const kimi_vram_format_api * format;
     const kimi_vram_prefill_api * prefill;
     const kimi_vram_elastic_api * elastic;

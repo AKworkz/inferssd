@@ -6,7 +6,6 @@
 #include "ssd/cpu-sink.h"
 #include "ssd/cpu-prefill.h"
 #include "ggml-ssd/settings/settings.h"
-#include "ggml-ssd/gpu/kimi-cache-location-api.h"
 #include <thread>
 #include <array>
 #include <nlohmann/json.hpp>
@@ -785,139 +784,6 @@ static sample_result cache_case(fixture_inputs & inputs, const char * name, fixt
     cache_snapshot(sink);
     print_sample(name, result);
     return result;
-}
-
-// Compare both executors on identical packed Q3 data and cache histories. The
-// graph reference uses a tolerance; the scheduling change must be bit-exact.
-// A synthetic asynchronous transport tests the consumer/lease contract, not
-// CUDA arithmetic. Raw vectors are independently produced by the old executor.
-struct location_fixture {
-    std::vector<std::vector<float>> raw;
-    uint32_t resident=0, pinned=0, launched=0;
-    bool fail_finish=false, done=false;
-    int finished_count=0,cancel_count=0,offered=0;
-    std::thread work;
-    ~location_fixture(){if(work.joinable()){work.join();}}
-    static location_fixture & self(void *p){return *static_cast<location_fixture *>(p);}
-    static int acquire(void * p,const kimi_cache_location_candidate * c,int n,kimi_cache_location_lease * out,char *,size_t){
-        auto & f=self(p);require(!f.pinned,"leaked location lease between calls");
-        for(int i=0;i<n;++i){require(c[i].epoch && c[i].role[0].nbytes,"invalid location key");if(f.resident&(1u<<i)){out[i]={uint64_t(i+1),c[i].epoch};f.pinned|=1u<<i;}}return 0;
-    }
-    static int begin(void * p,const kimi_cache_location_candidate *,int,uint32_t base,uint32_t pin,char *,size_t){
-        auto & f=self(p);require(!(f.pinned&~pin),"unused VRAM leases not released before admission");require(base,"empty demand mask");f.done=false;f.launched=0;return 0;
-    }
-    static int launch(void * p,const kimi_cache_location_job * jobs,int count,const void *,size_t,int latent,int,float,float,char *,size_t){
-        auto & f=self(p);require(!f.work.joinable(),"multiple VRAM launches");
-        std::vector<kimi_cache_location_job> copy(jobs,jobs+count);
-        for(auto & j:copy){require(j.lease.handle==uint64_t(j.native_slot+1)&&(f.pinned&(1u<<j.native_slot)),"GPU job lacks live lease");f.launched|=1u<<j.native_slot;}
-        f.work=std::thread([&f,copy,latent]{std::this_thread::sleep_for(std::chrono::microseconds(300));for(const auto & j:copy){std::copy_n(f.raw[j.native_slot].data(),latent,j.raw_down);}});return 0;
-    }
-    static int admit(void *p,const kimi_cache_location_candidate *,const void *a,const void *b,const void *c,int,char *,size_t){require(a&&b&&c,"invalid upload source");self(p).offered++;return 0;}
-    static int finish(void *p,char *e,size_t n){auto & f=self(p);if(f.work.joinable()){f.work.join();}f.done=true;if(f.fail_finish){std::snprintf(e,n,"synthetic GPU completion failure");return 1;}return 0;}
-    static int cancel(void *p,char *,size_t){auto & f=self(p);if(f.work.joinable()){f.work.join();}f.done=true;f.cancel_count++;return 0;}
-    static int release(void *p,const kimi_cache_location_lease * ls,int count,char *,size_t){auto & f=self(p);require(!f.work.joinable(),"release before GPU drain");for(int i=0;i<count;++i){const uint32_t bit=1u<<(ls[i].handle-1);require(f.pinned&bit,"double/stale lease release");f.pinned&=~bit;}return 0;}
-    static int finished(void *p,kimi_cpu_sink *,char *,size_t){auto & f=self(p);require(f.done&&!f.pinned&&!f.work.joinable(),"RAM eviction callback before finish/unpin");f.finished_count++;return 0;}
-    static kimi_cache_location_api api(){return {1,sizeof(kimi_cache_location_api),acquire,begin,launch,admit,finish,cancel,release,finished};}
-};
-static void cache_location_tests(fixture_inputs & inputs, int threads,int depth){
-    ggml_cpu_init(); // Initialize FP16 lookup tables before the raw-vector oracle.
-    inputs.set("ready_first", "1");
-    inputs.set("early_up_gate", "0");inputs.set("cache_policy", "lru");
-    inputs.set("cache_allocation", "uniform");inputs.set("read_fixed", "0");
-    fixture f;make_synthetic(f);tensors meta(f,1);char error[512]={};
-    std::vector<float> input(f.latent);for(int i=0;i<f.latent;++i){input[i]=std::sin(i*.037f);}
-    const int32_t native[]={0,1,2,3,4,5};const float nw[]={.32f,.24f,.16f,.12f,.10f,.06f};
-    const int32_t ids[]={0,1,2,3};const float weights[]={.32f/.84f,.24f/.84f,.16f/.84f,.12f/.84f};
-    location_fixture transport;transport.raw.resize(6);auto api=location_fixture::api();
-    for(int i=0;i<6;++i){auto old=make_sink(inputs, f,threads,depth);transport.raw[i].resize(f.latent);const float one=1;require(kimi_cpu_sink_run(old.get(),meta.role[0],meta.role[1],meta.role[2],input.data(),&native[i],&one,1,4,25,transport.raw[i].data(),nullptr,error,sizeof(error)),error);}
-    for(const auto & raw:transport.raw){require(std::any_of(raw.begin(),raw.end(),[](float v){return v!=0;}),"uninitialized raw-vector oracle");}
-    for(int mode=0;mode<=3;++mode) for(uint32_t resident : {0u,17u,63u}) for(bool guard : {false,true}){
-        auto sink=make_sink(inputs, f,threads,depth);configure_cache(sink.get(),4*triplet_bytes(f),{1},4);begin_cache(sink.get(),1,1);
-        cache_case(inputs, "location_warm",f,sink.get(),1,input,{1,3,4,5},{.4f,.3f,.2f,.1f},0,4);
-        require(kimi_cpu_sink_set_cache_locations(sink.get(),&api,&transport,error,sizeof(error)),error);begin_cache(sink.get(),1,2);
-        transport.resident=resident;transport.finished_count=0;
-        kimi_cache_compute_config cfg{1,mode,1,2,0,.5f,0,.65f,2,0,1};kimi_cpu_sink_stats stats{};kimi_cache_compute_stats audit{};std::vector<float> actual(f.latent),expected(f.latent);
-        require(kimi_cpu_sink_run_cache_compute(sink.get(),meta.role[0],meta.role[1],meta.role[2],input.data(),ids,weights,4,native,nw,6,1,guard,&cfg,4,25,actual.data(),&stats,&audit,error,sizeof(error)),error);
-        require(transport.pinned==0&&transport.finished_count==1&&transport.launched==(audit.plan.final_mask&resident),"GPU final selection/leases differ");
-        const uint32_t misses=audit.plan.base_mask&~resident&~(2u|8u|16u|32u);
-        require(stats.read_bytes==uint64_t(__builtin_popcount(misses))*triplet_bytes(f),"GPU cache triggered SSD read or hid late read bytes");
-        require(!stats.pending_reads&&stats.read_requests==stats.read_completions&&!stats.read_errors,"mixed cache drain failed");
-        std::vector<int32_t> final_ids;std::vector<float> final_weights;
-        for(int n=0;n<6;++n){if(audit.plan.final_mask&(1u<<n)){final_ids.push_back(n);final_weights.push_back(audit.final_weights[n]);}}
-        auto old=make_sink(inputs, f,threads,depth);require(kimi_cpu_sink_run(old.get(),meta.role[0],meta.role[1],meta.role[2],input.data(),final_ids.data(),final_weights.data(),int(final_ids.size()),4,25,expected.data(),nullptr,error,sizeof(error)),error);
-        require(!std::memcmp(actual.data(),expected.data(),actual.size()*sizeof(float)),"RAM+GPU fixed final set not bit exact");
-        std::printf("CACHE_LOCATION_CASE mode=%d resident=%u guarded=%d final=%u GPU=%u bytes=%llu PASS\n",mode,resident,guard,audit.plan.final_mask,transport.launched,(unsigned long long)stats.read_bytes);
-    }
-    auto sink=make_sink(inputs, f,threads,depth);configure_cache(sink.get(),4*triplet_bytes(f),{1},4);begin_cache(sink.get(),2,1);
-    require(kimi_cpu_sink_set_cache_locations(sink.get(),&api,&transport,error,sizeof(error)),error);transport.resident=17;transport.fail_finish=true;
-    kimi_cache_compute_config cfg{1,1,1,2,0,.75f,0,.8f,2,0,1};kimi_cpu_sink_stats stats{};std::vector<float> actual(f.latent);
-    require(!kimi_cpu_sink_run_cache_compute(sink.get(),meta.role[0],meta.role[1],meta.role[2],input.data(),ids,weights,4,native,nw,6,1,false,&cfg,4,25,actual.data(),&stats,nullptr,error,sizeof(error)),"GPU failure ignored");
-    require(!transport.pinned&&transport.cancel_count==1&&!stats.pending_reads&&stats.read_requests==stats.read_completions,"GPU failure did not drain and unpin");
-    require(!cache_snapshot(sink.get()).mapped_bytes,"GPU failure retained borrowed RAM");
-    transport.fail_finish=false;require(kimi_cpu_sink_set_cache_locations(sink.get(),nullptr,nullptr,error,sizeof(error)),error);
-    begin_cache(sink.get(),2,2);cache_case(inputs, "location_failure_recover",f,sink.get(),1,input,{1},{1},0,1);
-    std::printf("CACHE_LOCATION_PASS threads=%d depth=%d\n",threads,depth);
-}
-
-static void cache_compute_tests(fixture_inputs & inputs, int threads, int depth) {
-    inputs.set("ready_first", "1");
-    inputs.set("early_up_gate", "0");
-    inputs.set("cache_policy", "lru");
-    inputs.set("cache_allocation", "uniform");
-    inputs.set("read_fixed", "0");
-    fixture f; make_synthetic(f); tensors meta(f,1);
-    const uint64_t unit=triplet_bytes(f);
-    std::vector<float> input(f.latent); for(int i=0;i<f.latent;++i){input[i]=std::sin(i*.037f);}
-    const int32_t native[]={0,1,2,3,4,5}; const float nw[]={.32f,.24f,.16f,.12f,.10f,.06f};
-    const int32_t ids[]={0,1,2,3}; const float weights[]={.32f/.84f,.24f/.84f,.16f/.84f,.12f/.84f};
-    char error[512]={};
-    for(int mode=0;mode<=3;++mode) for(int bonus : {0,1,2}) for(bool guarded : {false,true}) {
-        auto sink=make_sink(inputs, f,threads,depth);
-        // Four slots: all extra candidates remain pinned while two base misses
-        // seek admission. Ring depth 1 exercises completion/compute credits.
-        configure_cache(sink.get(),4*unit,{1},4);begin_cache(sink.get(),1,1);
-        cache_case(inputs, "compensate_warm",f,sink.get(),1,input,{1,3,4,5},{.4f,.3f,.2f,.1f},0,4);
-        begin_cache(sink.get(),1,2);
-        kimi_cache_compute_config cfg{1,mode,bonus,2,0,.5f,0,.65f,2,0,1};
-        std::vector<float> actual(f.latent),expected(f.latent);
-        kimi_cpu_sink_stats st{};kimi_cache_compute_stats audit{};
-        require(kimi_cpu_sink_run_cache_compute(sink.get(),meta.role[0],meta.role[1],meta.role[2],input.data(),
-            ids,weights,4,native,nw,6,1.0f,guarded,&cfg,4,25,actual.data(),&st,&audit,error,sizeof(error)),error);
-        require(!st.pending_reads && st.read_requests==st.read_completions && !st.read_errors,"compensate drain failed");
-        if(!guarded&&mode) {
-            require(audit.submitted_bytes==st.read_bytes,"all submitted SSD bytes must be charged");
-            require(audit.plan.original_mask==15 && (audit.computed_mask&audit.plan.final_mask)==audit.plan.final_mask,"final set incomplete");
-            const uint32_t extras=audit.plan.final_mask&~audit.plan.base_mask;
-            require(!(extras&~audit.plan.cached_mask) && !(extras&~audit.plan.pin_mask),"extra lacks a resident lease");
-            require(st.read_bytes==(mode==3?unit:2*unit),"shrinking failed to reduce submitted bytes");
-            if(mode==2){require(audit.plan.dropped_mask==4 && audit.unused_read_bytes==unit,"deadline-zero must discard and drain low miss 2");}
-        }
-        std::vector<int32_t> final_ids;std::vector<float> final_weights;
-        for(int n=0;n<6;++n) if(audit.plan.final_mask&(1u<<n)){final_ids.push_back(native[n]);final_weights.push_back(audit.final_weights[n]);}
-        auto baseline=make_sink(inputs, f,threads,depth);
-        kimi_cpu_sink_stats reference_stats{};
-        require(kimi_cpu_sink_run(baseline.get(),meta.role[0],meta.role[1],meta.role[2],input.data(),final_ids.data(),
-            final_weights.data(),int(final_ids.size()),4,25,expected.data(),&reference_stats,error,sizeof(error)),error);
-        require(!std::memcmp(actual.data(),expected.data(),actual.size()*sizeof(float)),"explicit final-set legacy output differs bitwise");
-        const auto independent=reference(f,1,input,final_ids,final_weights,4,25);
-        for(size_t j=0;j<actual.size();++j){require(std::abs(actual[j]-independent[j])<1e-4f,"independent ggml graph differs");}
-        std::printf("CACHE_COMPUTE_CASE mode=%d bonus=%d guarded=%d final=%u bytes=%llu bit_exact=1\n",mode,bonus,guarded,
-            audit.plan.final_mask,(unsigned long long)st.read_bytes);
-    }
-    // A low miss that would be discarded still owns its read buffers and must
-    // propagate a positive short CQE. It cannot silently become a cache bonus.
-    auto broken=make_sink(inputs, f,threads,depth);configure_cache(broken.get(),4*unit,{1},4);begin_cache(broken.get(),3,1);
-    f.fault=fixture::short_tail;f.fault_expert=2;f.fault_role=2;
-    kimi_cache_compute_config cfg{1,2,1,2,0,.75f,0,.65f,2,0,1};
-    kimi_cpu_sink_stats st{};kimi_cache_compute_stats audit{};std::vector<float> output(f.latent);
-    require(!kimi_cpu_sink_run_cache_compute(broken.get(),meta.role[0],meta.role[1],meta.role[2],input.data(),
-        ids,weights,4,native,nw,6,1.0f,false,&cfg,4,25,output.data(),&st,&audit,error,sizeof(error)),"unused short read was ignored");
-    require(st.read_errors && !st.pending_reads && st.read_requests==st.read_completions,"failed unused read not drained");
-    require(!cache_snapshot(broken.get()).mapped_bytes,"failed read retained cache targets");
-    f.fault=fixture::none;f.fault_expert=-1;f.fault_role=-1;
-    begin_cache(broken.get(),3,2);
-    cache_case(inputs, "compensate_recover",f,broken.get(),1,input,{0},{1},0,1);
-    std::printf("CACHE_COMPUTE_EXECUTOR_PASS threads=%d depth=%d\n",threads,depth);
 }
 
 static void schedule_tests(fixture_inputs & inputs, int threads, int depth, bool schedules = false, bool early_up_gate = false,
@@ -4050,7 +3916,7 @@ int main(int argc, char ** argv) {
         bool trace_profile_mode = false, max_cache_mode = false, hitrate_mode = false, elastic_cache_mode = false;
         bool schedules_mode = false, schedule_invalid_mode = false, early_up_gate_mode = false;
         bool role_major_mode = false, nonblocking_down_mode = false;
-        bool poll_mode = false, poll_early_mode = false, cache_compute_mode = false, cache_location_mode = false;
+        bool poll_mode = false, poll_early_mode = false;
         bool cache_policy_mode = false, cache_large_mode = false, cache_pressure_transition = false, cache_unbounded = false;
         bool activation_mode = false, q2_activation_mode = false, muse_q8_mode = false, muse_bf16_mode = false;
         bool auto_ring_mode = false, prefetch_mode = false, cache_load_mode = false, work_reclaim_mode = false, threadpool_mode = false;
@@ -4075,8 +3941,6 @@ int main(int argc, char ** argv) {
             else if (!std::strcmp(argv[i], "--early-up-gate-tests")) { early_up_gate_mode = true; }
             else if (!std::strcmp(argv[i], "--role-major-tests")) { role_major_mode = true; }
             else if (!std::strcmp(argv[i], "--nonblocking-down-tests")) { nonblocking_down_mode = true; }
-            else if (!std::strcmp(argv[i], "--cache-location-tests")) { cache_location_mode = true; }
-            else if (!std::strcmp(argv[i], "--cache-compute-tests")) { cache_compute_mode = true; }
             else if (!std::strcmp(argv[i], "--poll-tests")) { poll_mode = true; }
             else if (!std::strcmp(argv[i], "--poll-early-tests")) { poll_early_mode = true; }
             else if (!std::strcmp(argv[i], "--schedule-tests")) { schedules_mode = true; }
@@ -4109,7 +3973,7 @@ int main(int argc, char ** argv) {
             test_resources::io_ring();
         }
         if (cache_mode || hitrate_mode || elastic_cache_mode || cache_load_mode || work_reclaim_mode || max_cache_mode ||
-                cache_location_mode || cache_compute_mode || early_up_gate_mode ||
+                early_up_gate_mode ||
                 role_major_mode || nonblocking_down_mode || poll_mode || poll_early_mode || schedules_mode ||
                 prefetch_mode || cache_policy_mode || cache_large_mode || activation_mode || muse_q8_mode || muse_bf16_mode) {
             test_resources::finite_envelope();
@@ -4138,8 +4002,6 @@ int main(int argc, char ** argv) {
         }
         if (activation_mode) { activation_tests(inputs, options.threads, ring_set ? options.ring_experts : 2); return 0; }
         if (q2_activation_mode) { q2_activation_test(inputs, options.threads, ring_set ? options.ring_experts : 2); return 0; }
-        if (cache_location_mode) { cache_location_tests(inputs, options.threads, options.ring_experts); return 0; }
-        if (cache_compute_mode) { cache_compute_tests(inputs, options.threads, options.ring_experts); return 0; }
         if (hitrate_mode) { cache_hitrate_tests(inputs, options.threads, options.ring_experts); return 0; }
         if (elastic_cache_mode) { elastic_cache_tests(inputs, options.threads, ring_set ? options.ring_experts : 2); return 0; }
         if (cache_load_mode) { cache_load_tests(inputs, options.threads, ring_set ? options.ring_experts : 2); return 0; }

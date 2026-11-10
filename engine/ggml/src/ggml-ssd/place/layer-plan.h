@@ -514,7 +514,7 @@ inline kimi_place_result kimi_place_layer(const kimi_place_table & t, int ntoken
         for (size_t i = 0; i < n; ++i) {
             const auto & x = items[i];
             auto & y = e[i];
-            if (x.routes <= 0) { continue; }   // no work in this layer (decode's cache-only requests)
+            if (x.routes <= 0) { continue; }   // no work in this layer
             if (x.resident) { y.resident = true; y.gpu = engine.device.expert(x.routes); continue; }
             y.cpu = t.cpu(ntokens, x.routes);
             y.early = one ? t.cpu_early * y.cpu : 0.0;

@@ -802,7 +802,7 @@ struct expert_cache {
         l.seen = true; l.token = token;
         if (policy == count_decay2) {
             size_t nodes = 0;
-            for (const auto & r : requests) { nodes += !r.cache_only && l.count_frequency.find(r.id) == l.count_frequency.end(); }
+            for (const auto & r : requests) { nodes += l.count_frequency.find(r.id) == l.count_frequency.end(); }
             auto frequency_ticket = take_guard(multiply(nodes, allocation_cost(sizeof(std::pair<const int32_t, double>) + 4 * sizeof(void *))));
             if (!frequency_ticket) {
                 reject_admission(requests, current, "cgroup_count_frequency_headroom"); return;
@@ -814,7 +814,6 @@ struct expert_cache {
                 // Selection frequency, independent of routing weight. Count a
                 // duplicated ID once per layer/token, as the offline set did.
                 for (size_t j = 0; j < requests.size(); ++j) {
-                    if (requests[j].cache_only) { continue; }
                     const auto duplicate = std::find_if(requests.begin(), requests.begin() + j,
                         [&](const expert_request & r) { return r.id == requests[j].id; });
                     if (duplicate == requests.begin() + j) { l.count_frequency[requests[j].id] += 1.0; }
@@ -824,7 +823,7 @@ struct expert_cache {
         }
         if (policy == lfu || policy == decay) {
             size_t nodes = 0;
-            for (const auto & r : requests) { nodes += !r.cache_only && l.frequency.find(r.id) == l.frequency.end(); }
+            for (const auto & r : requests) { nodes += l.frequency.find(r.id) == l.frequency.end(); }
             // Each map node may fault a different allocator page/THP. Duplicate
             // IDs deliberately overcount; no allocation occurs before this guard.
             auto frequency_ticket = take_guard(multiply(nodes, allocation_cost(sizeof(std::pair<const int32_t, uint64_t>) + 4 * sizeof(void *))));
@@ -833,7 +832,6 @@ struct expert_cache {
             }
             try {
                 for (const auto & r : requests) {
-                    if (r.cache_only) { continue; }
                     auto & frequency = l.frequency[r.id];
                     if (frequency != UINT64_MAX) { ++frequency; }
                 }
@@ -848,18 +846,18 @@ struct expert_cache {
                         entries[i].id == r.id && matches(entries[i], r)) {
                     r.cache_hit = int(i);
                     entries[i].protected_now = true;
-                    if (entries[i].prefetched && !r.cache_only) { entries[i].prefetched = false; ++prefetch_hits; }
-                    if (!r.cache_only) { entries[i].last_touch = ++clock; }
+                    if (entries[i].prefetched) { entries[i].prefetched = false; ++prefetch_hits; }
+                    entries[i].last_touch = ++clock;
                     break;
                 }
             }
-            if (r.cache_hit >= 0 && !r.cache_only) {
+            if (r.cache_hit >= 0) {
                 ++current.cache_hits;
                 current.cache_hit_bytes = add(current.cache_hit_bytes, stride);
             }
         }
         for (auto & r : requests) {
-            if (r.cache_hit >= 0 || r.cache_only) { continue; }
+            if (r.cache_hit >= 0) { continue; }
             const bool already_reserved = std::any_of(entries.begin() + l.begin, entries.begin() + l.begin + l.count,
                 [&](const entry & e) { return e.enabled && e.reserved && e.layer_index == layer_index && e.id == r.id; });
             if (already_reserved) { ++stats.admission_skips; continue; }

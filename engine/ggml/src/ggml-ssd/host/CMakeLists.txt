@@ -1,4 +1,4 @@
-add_library(ggml-ssd-host STATIC arbiter.cpp cache-policy.cpp cache-policy.h
+add_library(ggml-ssd-host STATIC arbiter.cpp
     expert-cache.h expert-request.h cache-stats.h)
 target_compile_features(ggml-ssd-host PUBLIC cxx_std_17)
 target_include_directories(ggml-ssd-host PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/..")

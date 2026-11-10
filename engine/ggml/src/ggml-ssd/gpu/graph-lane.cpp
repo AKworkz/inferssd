@@ -613,8 +613,8 @@ void * no_stream(ggml_backend_t) { return nullptr; }
 
 const provider_v1 * graph_lane_provider() {
     static const provider_v1 provider = {
-        1, sizeof(provider_v1),
-        &tier_table, nullptr, nullptr, nullptr, &prefill_table, &elastic_table, nullptr,
+        2, sizeof(provider_v1),
+        &tier_table, nullptr, nullptr, &prefill_table, &elastic_table, nullptr,
         &host_table, nullptr, &settings_table, nullptr, nullptr,
         device_is_unified, device_ordinal, attach_services, no_stream,
     };

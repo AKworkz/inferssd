@@ -2,7 +2,6 @@
 #include "vram-slot-table.h"
 #include "vram-compute-api.h"
 #include "../../ggml-ssd/place/layer-plan.h"
-#include "ggml-ssd/gpu/kimi-vram-location-api.h"
 #include "ggml.h"
 #include "ggml-ssd/gpu/transport.h"
 #include "ggml-ssd/store/source.h"
@@ -2493,31 +2492,6 @@ int residency_release(void * p,const kimi_vram_ready_lease * lease,char * e,size
 void residency_held(void * p,int32_t layer,const int32_t * experts,int count,uint8_t * out){
     if(!out || count<=0)return;
     std::fill(out,out+count,uint8_t(0));if(p && experts)static_cast<tier *>(p)->held(layer,experts,count,out);}
-// Retired implicit-format location ABI. No callback issues native leases.
-// Reuse the allocation-free C-boundary rejection/drain path; borrowed explicit
-// CUDA payloads remain owned until release() has completed every drain.
-int location_configure(void * p,int,int,char * e,size_t n) noexcept {
-    return reject_implicit_format(p,e,n,"implicit cache-location provider retired");}
-int location_acquire(void * p,const kimi_cache_location_candidate *,int count,kimi_cache_location_lease * leases,char * e,size_t n) noexcept {
-    if(leases && count>0 && count<=16)std::fill(leases,leases+count,kimi_cache_location_lease{});
-    return reject_implicit_format(p,e,n,"implicit cache-location provider retired");}
-int location_begin(void * p,const kimi_cache_location_candidate *,int,uint32_t,uint32_t,char * e,size_t n) noexcept {
-    return reject_implicit_format(p,e,n,"implicit cache-location provider retired");}
-int location_launch(void * p,const kimi_cache_location_job *,int,const void *,size_t,int,int,float,float,char * e,size_t n) noexcept {
-    return reject_implicit_format(p,e,n,"implicit cache-location provider retired");}
-int location_admit(void * p,const kimi_cache_location_candidate *,const void *,const void *,const void *,int,char * e,size_t n) noexcept {
-    return reject_implicit_format(p,e,n,"implicit cache-location provider retired");}
-int location_finish(void * p,char * e,size_t n) noexcept {
-    return reject_implicit_format(p,e,n,"implicit cache-location provider retired");}
-int location_cancel(void * p,char * e,size_t n) noexcept {
-    // The consumer treats a nonzero cancel as failure to drain and aborts.
-    // Successful cleanup is still supported even though computation retired.
-    reject_implicit_format(p,e,n,"implicit cache-location provider retired");
-    if(e && n){e[0]=0;}
-    return 0;}
-int location_release(void * p,const kimi_cache_location_lease *,int count,char * e,size_t n) noexcept {
-    if(count==0)return location_cancel(p,e,n);
-    return reject_implicit_format(p,e,n,"implicit cache-location provider retired; no native leases are issued");}
 int host_available(void * p){return p && static_cast<tier *>(p)->format_mode;}
 int host_launch(void * p,const kimi_vram_host_job * jobs,int count,int * accepted,char * e,size_t n){
     auto * t=static_cast<tier *>(p);try{t->launch_host(jobs,count,accepted);return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
@@ -2648,11 +2622,6 @@ extern "C" const kimi_vram_tier_api * kimi_vram_tier_get_api(){
 extern "C" const kimi_vram_residency_api * kimi_vram_residency_get_api(){
     static const kimi_vram_residency_api api={2,sizeof(kimi_vram_residency_api),residency_acquire,residency_validate,residency_release,
         residency_held};return &api;
-}
-extern "C" const kimi_vram_location_api * kimi_vram_location_get_api(){
-    static const kimi_cache_location_api view={1,sizeof(kimi_cache_location_api),location_acquire,location_begin,
-        location_launch,location_admit,location_finish,location_cancel,location_release,nullptr};
-    static const kimi_vram_location_api api={1,sizeof(kimi_vram_location_api),&view,location_configure};return &api;
 }
 extern "C" const kimi_vram_deferred_api * kimi_vram_deferred_get_api(){
     static const kimi_vram_deferred_api api={3,sizeof(kimi_vram_deferred_api),deferred_admit,deferred_collect,deferred_wait};return &api;
