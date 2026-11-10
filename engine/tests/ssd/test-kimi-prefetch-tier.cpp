@@ -3,7 +3,8 @@
 // that run. The tier here is a stand-in provider the test injects: it holds the experts the test names and serves
 // none (every expert is the CPU's), so the outputs are the CPU's and only the prefetch's decisions change. Like the
 // other cache cases it needs a finite memory envelope. The same tier records where the sink places its threads
-// (kimi_vram_policy_api set_thread_cpus): on the CPUs of the runs' coordinator, again only when they change.
+// (kimi_vram_policy_api set_thread_cpus): on the process's CPUs other than those of the runs' coordinator (all of
+// them when none is left), again only when the coordinator's change.
 #define main original_sink_test_main
 #include "test-kimi-cpu-sink.cpp"
 #undef main
@@ -163,11 +164,20 @@ int main(int argc, char ** argv) {
             "the tier's residency did not decide the novelty: " + report);
     require(field("started_r") == "1,0,0,0" && field("spills") == "0" && field("spill_us") == "0" &&
             field("spill_us_r") == "0,0,0,0", "a read inside its window was counted as a spill: " + report);
-    // The coordinator here is the test thread: one placement for its four runs on two tokens.
+    // The coordinator here is the test thread: one placement for its four runs on two tokens. The process's CPUs are
+    // the test thread's when the sink starts (own), so the tier's threads take own less the coordinator's, or all of
+    // own when that leaves none, as here.
     ssd::platform::cpu_list own;
     require(ssd::platform::current_thread_cpus(own), "read the test thread's CPUs");
-    require(tier_placements.size() == 1 && tier_placements[0] == own,
-            "the tier's threads were not placed once on the coordinator's CPUs");
+    auto beside = [&](const ssd::platform::cpu_list & coordinator) {
+        ssd::platform::cpu_list rest;
+        for (int cpu : own) {
+            if (std::find(coordinator.begin(), coordinator.end(), cpu) == coordinator.end()) { rest.push_back(cpu); }
+        }
+        return rest.empty() ? own : rest;
+    };
+    require(tier_placements.size() == 1 && tier_placements[0] == beside(own),
+            "the tier's threads were not placed once beside the coordinator");
     if (ssd::platform::affinity_supported() && own.size() > 1) {
         // A coordinator that moves is seen at the first layer after the next begin, as ggml moves its thread 0 only
         // between graphs; the tier is told each move and nothing else.
@@ -186,7 +196,7 @@ int main(int argc, char ** argv) {
         require(ssd::platform::pin_current_thread(own), "move the coordinator back");
         begin_cache(sink.get(), 2, 3);
         cache_case(inputs, "place_back", f, sink.get(), 1, input, { 1, 2 }, { .4f, .6f }, 2, 0);
-        require(tier_placements == std::vector<ssd::platform::cpu_list>{ own, moved, own },
+        require(tier_placements == std::vector<ssd::platform::cpu_list>{ beside(own), beside(moved), beside(own) },
                 "the tier's threads did not follow the coordinator's moves");
     }
     std::printf("PREFETCH_TIER_OK %s placements=%zu\n", report.c_str(), tier_placements.size());

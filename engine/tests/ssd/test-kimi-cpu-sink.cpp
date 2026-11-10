@@ -631,15 +631,21 @@ struct fixture_selector {
 };
 
 #if defined(__linux__)
-// Linux only: io_uring fixed buffers are charged to RLIMIT_MEMLOCK; a forked child lowers it.
-static void drop_child_memlock() {
-    rlimit limit = { 0, 0 };
-    require(setrlimit(RLIMIT_MEMLOCK, &limit) == 0, "lowering child memlock failed");
+// Linux only: io_uring fixed buffers are charged to RLIMIT_MEMLOCK, unless the ring's creator held CAP_IPC_LOCK: the
+// kernel decides that at io_uring_setup, so a capability dropped after the ring exists exempts nothing (as root, the
+// registration would still succeed). A forked child drops the capability before its sink creates the ring, and lowers
+// the limit once the ring exists.
+static void drop_child_ipc_lock() {
     __user_cap_header_struct header = {}; header.version = _LINUX_CAPABILITY_VERSION_3;
     __user_cap_data_struct caps[2] = {};
     require(syscall(SYS_capget, &header, caps) == 0, "capget failed");
     caps[CAP_IPC_LOCK / 32].effective &= ~(uint32_t(1) << (CAP_IPC_LOCK % 32));
+    caps[CAP_IPC_LOCK / 32].permitted &= ~(uint32_t(1) << (CAP_IPC_LOCK % 32));
     require(syscall(SYS_capset, &header, caps) == 0, "dropping child IPC_LOCK failed");
+}
+static void drop_child_memlock() {
+    rlimit limit = { 0, 0 };
+    require(setrlimit(RLIMIT_MEMLOCK, &limit) == 0, "lowering child memlock failed");
 }
 
 static void registration_failure_child(fixture_inputs & inputs, fixture & f) {
@@ -649,8 +655,10 @@ static void registration_failure_child(fixture_inputs & inputs, fixture & f) {
     const pid_t child = fork(); require(child >= 0, "fork failed");
     if (child == 0) {
         try {
-            // The kernel may charge ring setup itself to memlock. Create the
-            // real ring first, then deny only the buffer registration under test.
+            // The ring is charged only if created without IPC_LOCK, and the kernel may charge
+            // ring setup itself to memlock. Drop the capability, create the real ring, then
+            // deny only the buffer registration under test.
+            drop_child_ipc_lock();
             auto sink = make_sink(inputs, f, 2, 1);
             drop_child_memlock();
             tensors meta(f, 1);
@@ -1059,8 +1067,10 @@ static void direct_cache_memlock_child(fixture_inputs & inputs, fixture & f, con
     const pid_t child = fork(); require(child >= 0, "direct cache memlock fork failed");
     if (child == 0) {
         try {
-            // The kernel may charge ring setup itself to memlock. Create the
-            // real ring first, then deny only the buffer registration under test.
+            // The ring is charged only if created without IPC_LOCK, and the kernel may charge
+            // ring setup itself to memlock. Drop the capability, create the real ring, then
+            // deny only the buffer registration under test.
+            drop_child_ipc_lock();
             auto sink = make_sink(inputs, f, 2, 1);
             drop_child_memlock();
             configure_cache(sink.get(), 2 * triplet_bytes(f), { 1 }, 2);
@@ -2029,11 +2039,17 @@ static void prefetch_tests(fixture_inputs & inputs, int threads, int depth) {
         require(field("predicted_r") == "1,1,1,1" && field("novel_r") == "1,1,1,0" &&
                 field("novel_routed_r") == "1,0,1,0" && field("issued_r") == (read ? "1,1,0,0" : "0,0,0,0") &&
                 field("used_r") == (read ? "1,0,0,0" : "0,0,0,0"), "prefetch report per rank: " + report);
-        // the reads of 6 (not selected, three roles) may still run when layer 2's run closes the window: then they
-        // spill, and only they; the reads of 5 are that run's own
+        // the reads of 6 (not selected, three roles) queue behind those of 5 and race layer 2's run, which closes the
+        // window: started by then, they may still run and spill, and only they (the reads of 5 are that run's own);
+        // not started (a drive slower than layer 1's run), they are dropped: 6 is cancelled, nothing is read for it,
+        // and nothing spills. Exactly one of the two, whichever the drive's latency gives.
         const uint64_t spills = std::stoull(field("spills"));
-        const std::string spill_r = field("spill_us_r");
-        require(field("started_r") == (read ? "1,1,0,0" : "0,0,0,0") && spills <= 3 && spill_r.rfind("0,", 0) == 0 &&
+        const std::string spill_r = field("spill_us_r"), started_r = field("started_r");
+        const bool started = started_r == "1,1,0,0";
+        const bool dropped = field("cancelled") == "1" && reader_bytes == unit && !spills && field("spill_us") == "0" &&
+                spill_r == "0,0,0,0";
+        require((read ? (started_r == "1,1,0,0" || started_r == "1,0,0,0") && started != dropped :
+                        started_r == "0,0,0,0") && spills <= 3 && spill_r.rfind("0,", 0) == 0 &&
                 spill_r.substr(spill_r.find(',', 2)) == ",0,0" &&
                 (spills || (field("spill_us") == "0" && spill_r == "0,0,0,0")), "prefetch report spill: " + report);
         std::printf("case=prefetch_depth%d status=PASS %s\n", k, report.c_str());
