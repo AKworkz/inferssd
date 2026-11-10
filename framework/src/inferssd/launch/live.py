@@ -99,17 +99,20 @@ class LiveArtifacts:
         python: str,
         machine: Optional[str] = None,
         strategy_host: Optional[strategy_inputs.Host] = None,
+        index_cache: Optional[Path] = None,
     ) -> None:
         """MACHINE: the characteristics text the launch strategy derives from, if any.
 
         STRATEGY_HOST reads the strategy's runtime facts; by default this host,
-        with the launch's environment.
+        with the launch's environment. INDEX_CACHE keeps expert indexes for later launches.
         """
         self.inputs, self.host = inputs, host
         self.run, self.replace, self.python = run, replace, python
         self.machine = machine
         self.strategy_host = strategy_host or strategy_inputs.NativeHost(dict(inputs.environment))
-        self.artifacts = RecordedArtifacts(inputs, {}, run=run, replace=replace, python=python)
+        self.artifacts = RecordedArtifacts(
+            inputs, {}, run=run, replace=replace, python=python, index_cache=index_cache
+        )
 
     def __call__(self, fact: Fact) -> Reply:
         if fact.name == "machine_characteristics":

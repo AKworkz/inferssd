@@ -14,7 +14,7 @@ from test_machine_identity import FakeHost
 
 from inferssd.app import command, hub
 from inferssd.configuration.settings import host_platform
-from inferssd.launch.resources import BUILDS, data_directory
+from inferssd.launch.resources import BUILDS, cache_directory, data_directory
 from inferssd.machine.identity import UnsupportedPlatform, drive_info, live_identity
 from inferssd.machine.profile import windows_topology
 from inferssd.platform.policy import Policy
@@ -546,6 +546,15 @@ def test_physical_memory_comes_from_win32_on_windows(monkeypatch):
     monkeypatch.setattr(command.sys, "platform", "win32")
     monkeypatch.setattr(win32, "system_memory", lambda: {"physical_total_bytes": 7})
     assert command.physical_memory() == 7
+
+
+def test_cache_directory_follows_the_platform(tmp_path):
+    linux = cache_directory({"XDG_CACHE_HOME": "/c"}, tmp_path, "linux")
+    assert linux == type(tmp_path)("/c/inferssd")
+    assert cache_directory({}, tmp_path, "linux") == tmp_path / ".cache/inferssd"
+    assert cache_directory({}, tmp_path, "darwin") == tmp_path / "Library/Caches/inferssd"
+    assert cache_directory({}, tmp_path, "windows") == tmp_path / "AppData/Local/inferssd"
+    assert str(cache_directory({"LOCALAPPDATA": "C:\\L"}, tmp_path, "windows")).startswith("C:")
 
 
 def test_data_directory_follows_the_platform(tmp_path):

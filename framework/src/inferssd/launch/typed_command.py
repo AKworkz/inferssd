@@ -21,7 +21,7 @@ from typing import Optional
 from inferssd.configuration.settings import PLATFORMS, cpus, host_platform
 from inferssd.launch.prepare import prepare
 from inferssd.launch.recorded import RecordedArtifacts, run_indexer
-from inferssd.launch.resources import read_resources
+from inferssd.launch.resources import cache_directory, read_resources
 from inferssd.launch.typed import (
     BATCH,
     CONTEXT,
@@ -132,13 +132,7 @@ def add_arguments(launch: argparse.ArgumentParser) -> None:
 
 def prompt_cache_directory() -> Path:
     """This user's cache directory for inferssd prompt caches."""
-    if sys.platform == "darwin":
-        root = Path.home() / "Library" / "Caches"
-    elif sys.platform == "win32":
-        root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
-    else:
-        root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    return root / "inferssd" / "prompts"
+    return cache_directory() / "prompts"
 
 
 def specification(args: argparse.Namespace, *, strategy: bool = False) -> LaunchSpec:
