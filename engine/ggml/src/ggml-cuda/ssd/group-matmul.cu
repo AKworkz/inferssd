@@ -25,6 +25,7 @@
 #include "../mmvf.cuh"
 #include "../mmvq.cuh"
 #include "../quantize.cuh"
+#include "backend-functions.h"
 
 #include <algorithm>
 #include <memory>
@@ -159,7 +160,8 @@ bool warm_kernels(moe_stream_mm & mm, ggml_type type, int64_t nrows, int64_t nco
     const size_t operand_bytes = aligned_bytes(ggml_cuda_moe_stream_mm_operand_bytes(&mm, type, ncols, max_columns));
     const size_t dst_bytes     = aligned_bytes(size_t(max_columns) * nrows * sizeof(float));
     char * scratch = nullptr;
-    if (cudaMalloc(&scratch, weight_bytes + input_bytes + ids_bytes + operand_bytes + dst_bytes) != cudaSuccess) {
+    if (ggml_cuda_malloc_reclaiming(reinterpret_cast<void **>(&scratch),
+            weight_bytes + input_bytes + ids_bytes + operand_bytes + dst_bytes, mm.device) != cudaSuccess) {
         (void) cudaGetLastError();
         return false;
     }
@@ -245,7 +247,7 @@ extern "C" bool ggml_cuda_moe_stream_mm_reserve(void * context, int type, int64_
                 mm->dequant = nullptr;
                 mm->dequant_bytes = 0;
             }
-            if (cudaMalloc(&mm->dequant, bytes) != cudaSuccess) {
+            if (ggml_cuda_malloc_reclaiming(&mm->dequant, bytes, mm->device) != cudaSuccess) {
                 (void) cudaGetLastError();
                 mm->dequant = nullptr;
                 return false;
@@ -253,7 +255,7 @@ extern "C" bool ggml_cuda_moe_stream_mm_reserve(void * context, int type, int64_
             mm->dequant_bytes = bytes;
         }
         if (!mm->workspace) {
-            if (cudaMalloc(&mm->workspace, moe_stream_mm_workspace_bytes) != cudaSuccess) {
+            if (ggml_cuda_malloc_reclaiming(&mm->workspace, moe_stream_mm_workspace_bytes, mm->device) != cudaSuccess) {
                 (void) cudaGetLastError();
                 mm->workspace = nullptr;
                 return false;

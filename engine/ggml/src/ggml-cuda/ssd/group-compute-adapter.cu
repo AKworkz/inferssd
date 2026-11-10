@@ -43,6 +43,13 @@ void cuda_check(cudaError_t rc, const char * operation) {
 
 size_t aligned(size_t bytes) { return (bytes + 255) & ~size_t(255); }
 
+// The engine's device buffers: an allocation that runs out of memory is retried once the OOM reclaimer gives memory back
+// (the VRAM tier's blocks), as a backend buffer's is. The room the tier makes before a reserve is an estimate of these
+// buffers; the card gives them more (whole 2 MiB pages, the products' own allocations, kernels loaded on first use).
+template <typename T> void device_alloc(int device, T ** ptr, size_t bytes, const char * operation) {
+    cuda_check(ggml_cuda_malloc_reclaiming(reinterpret_cast<void **>(ptr), bytes, device), operation);
+}
+
 __global__ void group_activate(const float * up, const float * gate, float * hidden, int count,
         int kind, float situ_beta, float situ_linear_beta, float swiglu_limit) {
     const int i = int(blockIdx.x * blockDim.x + threadIdx.x);
@@ -210,7 +217,7 @@ struct group_engine {
         const size_t latent_bytes = aligned(size_t(chunk) * latent * sizeof(float));
         scratch_bytes = 3 * hidden_bytes + latent_bytes + aligned(size_t(latent) * sizeof(float)) +
             aligned(up_operand_bytes) + aligned(down_operand_bytes);
-        const cudaError_t rc = cudaMalloc(reinterpret_cast<void **>(&scratch), scratch_bytes);
+        const cudaError_t rc = ggml_cuda_malloc_reclaiming(reinterpret_cast<void **>(&scratch), scratch_bytes, device);
         if (rc != cudaSuccess) {
             (void) cudaGetLastError();
             scratch = nullptr;
@@ -291,10 +298,10 @@ struct group_engine {
         free_pass();
         const size_t row_bytes = size_t(r) * latent * sizeof(float);
         try {
-            cuda_check(cudaMalloc(reinterpret_cast<void **>(&input), row_bytes), "cudaMalloc grouped input");
-            cuda_check(cudaMalloc(reinterpret_cast<void **>(&accumulator), row_bytes), "cudaMalloc grouped accumulator");
-            cuda_check(cudaMalloc(reinterpret_cast<void **>(&route_rows), size_t(n) * sizeof(int32_t)), "cudaMalloc grouped routes");
-            cuda_check(cudaMalloc(reinterpret_cast<void **>(&route_weights), size_t(n) * sizeof(float)), "cudaMalloc grouped weights");
+            device_alloc(device, &input, row_bytes, "cudaMalloc grouped input");
+            device_alloc(device, &accumulator, row_bytes, "cudaMalloc grouped accumulator");
+            device_alloc(device, &route_rows, size_t(n) * sizeof(int32_t), "cudaMalloc grouped routes");
+            device_alloc(device, &route_weights, size_t(n) * sizeof(float), "cudaMalloc grouped weights");
             cuda_check(cudaMallocHost(reinterpret_cast<void **>(&host_input), row_bytes), "cudaMallocHost grouped input");
             cuda_check(cudaMallocHost(reinterpret_cast<void **>(&host_output), row_bytes), "cudaMallocHost grouped output");
             cuda_check(cudaMallocHost(reinterpret_cast<void **>(&host_rows), size_t(n) * sizeof(int32_t)), "cudaMallocHost grouped routes");

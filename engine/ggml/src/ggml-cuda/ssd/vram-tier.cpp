@@ -1040,7 +1040,11 @@ struct tier {
     }
     // rows input rows a layer (and up to 16 routes a row); grows only (release frees it). Made room for like the
     // transient scratch: the pass's buffers, against what is free and the pass buffers the engine frees to grow (it
-    // keeps its fixed scratch; estimated at 64 MiB before the engine's first reserve).
+    // keeps its fixed scratch; estimated at 64 MiB before the engine's first reserve). The card gives the engine more
+    // than this estimate (whole 2 MiB pages, the products' own allocations, kernels loaded on first use), so the
+    // reclaimer is armed for the reserve, as for the prefill graph's: the engine's allocations retry through it, and
+    // one the estimate leaves short gets a block back. The graph's reserve has disarmed it by then, and the tier is
+    // quiescent until the pass's reads.
     void reserve_group(int rows){
         if(!group || rows<=group_rows)return;
         cuda_check(cudaSetDevice(device));
@@ -1063,7 +1067,11 @@ struct tier {
         // remains covered by the process margin, not a claimed exact quote.
         auto ticket=take_unified(pass_known+(held?0:fixed));
         char error[512]={};
-        if(group_api->reserve(group,rows,rows*16,error,sizeof(error)))throw std::runtime_error(error[0]?error:"grouped prefill engine reserve failed");
+        bool armed=false;
+        if(elastic_active){std::lock_guard<std::mutex> lock(lifecycle_mutex);armed=reclaimer_armed;reclaimer_armed=true;}
+        const int rc=group_api->reserve(group,rows,rows*16,error,sizeof(error));
+        if(elastic_active){std::lock_guard<std::mutex> lock(lifecycle_mutex);reclaimer_armed=armed;}
+        if(rc)throw std::runtime_error(error[0]?error:"grouped prefill engine reserve failed");
         publish_engine_held();
         ticket.commit();
         group_rows=rows;

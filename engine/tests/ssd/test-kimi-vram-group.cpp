@@ -904,6 +904,34 @@ void run_timing(fixture_inputs & inputs, const time_options & o) {
 }
 } // namespace
 
+// A reserve that runs out of device memory retries once the OOM reclaimer gives memory back, as a backend buffer's
+// allocation does; with nothing given back it fails and holds no pass buffers.
+void run_reserve_reclaim(size_t & checks) {
+    const auto * api = engine_api();
+    engine_ptr engine(api, 512, 512, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0);
+    struct reclaimer { int calls = 0; size_t give = 0; } r;
+    const ggml_cuda_oom_reclaimer_fn callback = [](void * p, size_t, size_t * freed) {
+        auto * x = static_cast<reclaimer *>(p);
+        ++x->calls;
+        *freed = x->give;
+        return x->give ? 1 : 0;
+    };
+    require(ggml_cuda_oom_reclaimer_register(0, callback, &r), "the OOM reclaimer registry is busy");
+    char error[512] = {};
+    r.give = size_t(1) << 20;
+    require(ggml_cuda_oom_reclaimer_inject_failures(0, 1), "OOM injection was not armed");
+    engine.check(api->reserve(engine.p, 64, 64 * 16, error, sizeof(error)), error);
+    require(r.calls == 1 && api->device_bytes(engine.p) > 0, "a reserve out of memory did not retry after the reclaimer");
+    engine.check(api->release(engine.p, error, sizeof(error)), error);
+    r = {};
+    require(ggml_cuda_oom_reclaimer_inject_failures(0, 1), "OOM injection was not armed");
+    require(api->reserve(engine.p, 64, 64 * 16, error, sizeof(error)) != 0 && std::strstr(error, "out of memory") &&
+        r.calls == 1 && api->device_bytes(engine.p) == 0, "a reserve out of memory with nothing given back did not fail");
+    require(ggml_cuda_oom_reclaimer_unregister(0, callback, &r), "the OOM reclaimer did not unregister");
+    std::printf("[kimi_vram_group_reclaim] retried=PASS refused=PASS\n");
+    checks += 2;
+}
+
 int main(int argc, char ** argv) {
     fixture_inputs inputs; inputs.set_runtime_services(test_gpu_services());
     try {
@@ -938,6 +966,7 @@ int main(int argc, char ** argv) {
         run_numerics(inputs, checks, worst);
         run_tier_lane(inputs, checks, lane_worst);
         run_tier_lane(inputs, checks, lane_worst, true);
+        run_reserve_reclaim(checks);
         std::printf("KIMI_VRAM_GROUP_PASS checks=%zu worst_token_nmse_against_exact=%.3g lane_against_cpu=%.3g\n", checks,
             worst, lane_worst);
         return 0;

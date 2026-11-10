@@ -63,7 +63,7 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `ggml/CMakeLists.txt` | 1 | 0 |
 | `ggml/include/ggml-alloc.h` | 4 | 0 |
 | `ggml/include/ggml-backend.h` | 58 | 0 |
-| `ggml/include/ggml-cuda.h` | 34 | 0 |
+| `ggml/include/ggml-cuda.h` | 35 | 0 |
 | `ggml/include/ggml-rpc.h` | 2 | 2 |
 | `ggml/include/ggml.h` | 158 | 1 |
 | `ggml/src/CMakeLists.txt` | 2 | 0 |
@@ -95,7 +95,7 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `ggml/src/ggml-cuda/fattn-common.cuh` | 35 | 7 |
 | `ggml/src/ggml-cuda/fattn.cu` | 10 | 0 |
 | `ggml/src/ggml-cuda/fattn.cuh` | 3 | 0 |
-| `ggml/src/ggml-cuda/ggml-cuda.cu` | 1498 | 132 |
+| `ggml/src/ggml-cuda/ggml-cuda.cu` | 1519 | 131 |
 | `ggml/src/ggml-cuda/mmq.cu` | 54 | 3 |
 | `ggml/src/ggml-cuda/mmq.cuh` | 28 | 10 |
 | `ggml/src/ggml-cuda/mmvf.cu` | 22 | 0 |
@@ -185,5 +185,5 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `tools/server/server-task.h` | 23 | 80 |
 | `tools/server/tests/utils.py` | 2 | 2 |
 
-Total: 17656 added, 5686 removed across 153 upstream paths.
+Total: 17678 added, 5685 removed across 153 upstream paths.
 <!-- END UPSTREAM INVENTORY -->

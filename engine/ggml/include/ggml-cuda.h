@@ -73,8 +73,9 @@ GGML_BACKEND_API void ggml_cuda_reserve_state(int device, size_t * held, size_t 
 // DRAM, so the reserve is made first (the OOM reclaimer gives memory back). False when no room could be made; the
 // caller may allocate anyway. True on a discrete GPU.
 GGML_BACKEND_API bool ggml_cuda_admit_host_alloc(size_t size);
-// Deterministic test hook; the next count backend-buffer allocations report
-// OOM before cudaMalloc and exercise the same reclaim-and-retry loop.
+// Deterministic test hook; the next count device allocations that retry through the
+// reclaimer (backend buffers, the SSD engines' own buffers) report OOM before
+// cudaMalloc and exercise the same reclaim-and-retry loop.
 GGML_BACKEND_API bool ggml_cuda_oom_reclaimer_inject_failures(int device, uint64_t count);
 
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);

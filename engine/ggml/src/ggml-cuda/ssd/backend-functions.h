@@ -20,4 +20,7 @@ size_t ggml_cuda_moe_stream_mm_operand_bytes(void *, int, int64_t, int64_t);
 bool ggml_cuda_moe_stream_mm_quantize(void *, int, const float *, const int32_t *, int64_t, int64_t, int64_t, void *, cudaStream_t);
 bool ggml_cuda_moe_stream_mm(void *, int, const void *, int64_t, int64_t, const void *, int64_t, float *, cudaStream_t);
 size_t ggml_cuda_moe_stream_mm_device_bytes(void *);
+// cudaMalloc for device memory outside ggml's buffers, admitted against the VRAM reserve and retried after the OOM
+// reclaimer gives memory back, as a backend buffer's allocation is. Freed with cudaFree.
+cudaError_t ggml_cuda_malloc_reclaiming(void ** ptr, size_t size, int device);
 }

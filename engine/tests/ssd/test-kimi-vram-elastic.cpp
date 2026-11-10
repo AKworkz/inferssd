@@ -189,6 +189,27 @@ int main() {
                 t.phase_reclaim_requests==1,"demand reclaim did not free exactly the physical tail block");
         t.phase_complete(false);
     }
+
+    // The grouped prefill engine reserves after the graph's reserve disarmed the reclaimer, while the tier is
+    // quiescent: the tier arms it for the reserve, so an engine allocation that runs out of memory gets the tail block
+    // back and succeeds, and the reclaimer is disarmed again after it. (Unified memory reclaims in any phase.)
+    {
+        tier t(20*stride, inputs.tier_policy());int slot=-1;
+        t.begin(20,1,true);lifecycle_prepare(t,&key,1,&slot);t.finish(output.data(),256);
+        if(unified)t.begin(20,2,true);
+        if(!t.group){
+            std::printf("case=engine_reserve_reclaim status=SKIP reason=no_grouped_engine_for_the_fixture_format\n");
+        }else{
+            t.prepare_prefill_reclaim();t.phase_complete(false);
+            require(!t.reclaimer_armed,"the graph's phase completion did not disarm the reclaimer");
+            const size_t before=t.table->slots.size();const uint64_t reactive=t.reactive_blocks;
+            require(ggml_cuda_oom_reclaimer_inject_failures(t.device,1),"engine OOM injection was not armed");
+            t.reserve_prefill_engine(64);
+            require(t.group_rows==64 && t.table->slots.size()<before && t.reactive_blocks==reactive+1 && !t.reclaimer_armed,
+                    "an engine reserve out of memory did not get a block back from the tier");
+            std::printf("case=engine_reserve_reclaim status=PASS slots=%zu->%zu\n",before,t.table->slots.size());
+        }
+    }
     inputs.set("tier.demand_reclaim", "0");
     inputs.set("tier.max_slots", "53");
 
