@@ -4,10 +4,10 @@
 ``derive`` is a pure function of the machine characteristics, the model's
 header facts, the runtime facts and the platform. It chooses thread counts and
 CPU placement, placement cost priors, the host memory budget and margin, and,
-where the engine has a GPU expert tier, which prompt passes the GPU graph
-prefills and that a prompt is prefilled in one pass. The last two change the
-computation (GPU against CPU kernels, the pass shape) for speed; everything else
-keeps it bit-exact. The VRAM budget's behaviour stays as the engine has it.
+where the engine has a GPU expert tier, that a prompt is prefilled in one pass.
+The pass shape changes the computation, for speed; everything else keeps it
+bit-exact. Every prompt pass takes the engine's own route, the SSD sink, and the
+VRAM budget's behaviour stays as the engine has it.
 
 Which settings apply on a platform comes from the settings registry's scopes, so
 every platform runs this one derivation.
@@ -19,7 +19,7 @@ import hashlib
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Optional, cast
+from typing import Optional
 
 from inferssd.configuration.settings import (
     PLATFORMS,
@@ -54,8 +54,6 @@ UNIFIED_HEADROOM_MIB = 4096
 # grow into. A GPU this launch has to itself keeps nothing back: that memory would
 # only cost expert slots.
 SHARED_GPU_RESERVE_MIB = 1024
-# The longest prompt pass the prefill route is priced for.
-MAX_PASS = 1 << 20
 
 
 @dataclass(frozen=True)
@@ -563,54 +561,6 @@ def link_rates(
     return terms, f"{gpu['name']} host-to-device " + (", ".join(parts) or "not measured")
 
 
-def prefill_split(
-    model: ModelFacts, line: tuple[float, float], drive_gbps: float, io_gbps: float
-) -> tuple[Optional[int], str]:
-    """The longest prompt pass the CPU prefills faster than the GPU graph, and why.
-
-    A pass of n tokens touches U(n) = E (1 - (1 - k/E)^n) of a layer's E
-    experts when each token routes to k of them uniformly. The CPU route reads
-    those experts from the drive while it computes them, n k routes a layer on
-    the CPU line, so it takes the longer of the two; the graph reads the same
-    experts into the GPU at the slower of the drive and the link, and its
-    compute is taken as free. Only a link slower than the drive leaves the CPU
-    faster, for short passes while U(n) still grows with n, and slower past the
-    crossing. A tie goes to the graph: it leaves those experts in the VRAM tier,
-    which decode reads next. None when the GPU never wins within MAX_PASS tokens.
-    """
-    k = model.experts_used
-    E, L, B = model.experts, model.layers, model.mean_expert_read_bytes
-    fixed, route = line
-    if not k:
-        return None, "the GGUF header gives no experts per token"
-
-    def cpu_faster(n: int) -> bool:
-        touched = L * E * (1 - (1 - k / E) ** n)
-        read = touched * B / (drive_gbps * GB)
-        cpu = (touched * fixed + n * k * L * route) * 1e-6
-        return max(read, cpu) < touched * B / (io_gbps * GB)
-
-    why = (
-        f"{L} layers of {E} experts, {k} a token, {size(B)} read an expert; CPU {fixed:.1f} + "
-        f"{route:.2f} us a route reading {drive_gbps:.2f} GB/s, "
-        f"GPU graph reading {io_gbps:.2f} GB/s"
-    )
-    if not cpu_faster(1):
-        return 0, why
-    lo, hi = 1, 2
-    while cpu_faster(hi):
-        lo, hi = hi, hi * 2
-        if hi > MAX_PASS:
-            return None, why + f": the CPU is faster up to {MAX_PASS} tokens"
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        if cpu_faster(mid):
-            lo = mid
-        else:
-            hi = mid
-    return lo, why
-
-
 def _costs(terms: Mapping[str, float], reasons: Sequence[str]) -> Optional[tuple[str, str]]:
     if not terms:
         return None
@@ -736,29 +686,18 @@ def derive(
                 "stress with the automatic VRAM tier",
             )
             notes.append(f"host.headroom_mib: {UNIFIED_HEADROOM_MIB}, the GPU shares host memory")
-        rates = (
-            None
-            if device is None or line is None or drive is None
-            else (
-                drive,
-                drive if device["integrated"] else min(drive, link.get("link_gbps", drive)),
-            )
+        # prefill.cpu_max_tokens keeps its default: every pass takes the SSD sink. The sink reads
+        # each expert a pass routes to once, from the VRAM tier, the RAM cache or the drive,
+        # places it on the CPU or the GPU by place.costs, and seeds the VRAM tier for decode as
+        # the GPU graph does. The graph reads every expert it routes to from the drive, whatever
+        # the tier and the RAM cache hold, and computes them all on the GPU.
+        notes.append(
+            "prefill: the SSD sink for every pass; it reads only what the VRAM tier and the "
+            "RAM cache do not hold"
         )
-        if rates is None:
-            notes.append(
-                "prefill: the CPU route for every pass and passes of the launch's batch; "
-                "no single profiled CUDA GPU with a CPU line and a drive rate"
-            )
+        if device is None:
+            notes.append("prefill: passes of the launch's batch; no single profiled CUDA GPU")
         else:
-            split, why = prefill_split(model, cast(tuple[float, float], line), *rates)
-            if split is None:
-                notes.append("prefill: the CPU route for every pass; " + why)
-            else:
-                choices["prefill.cpu_max_tokens"] = (
-                    str(split),
-                    f"the longest pass the CPU prefills faster than the GPU graph: {why}",
-                )
-                notes.append(f"prefill.cpu_max_tokens: {split}; {why}")
             one_pass = True
             notes.append(
                 "prefill: one pass a prompt, -b and -ub as large as the context; a pass reads "

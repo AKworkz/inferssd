@@ -98,17 +98,14 @@ memory, the available memory) to choose:
   the GPU (it refines them as it runs);
 - `vram.budget = 0` when the engine has CUDA and no CUDA GPU is usable, and on
   macOS and Windows the host memory budget from the runtime policy;
-- with an engine that has CUDA and one usable CUDA GPU, which prompt passes the CPU prefills
-  (`prefill.cpu_max_tokens`, the longest pass the CPU prefills faster than the
-  GPU graph reading the same experts; a tie goes to the graph, which warms the
-  VRAM tier for decode) and one prefill pass per prompt; on
+- with an engine that has CUDA and one usable CUDA GPU, one prefill pass per prompt; on
   a GPU sharing host memory, a host margin of 4096 MiB (`host.headroom_mib`).
 
 Without a measurement of the model's weight format, both pools take every
 allowed CPU but one.
 
-Only the prefill route and the pass size change the model's output, the way
-any GPU kernel or batch shape does; the rest keeps it bit for bit. The launch fills only the settings
+Only the pass size changes the model's output, the way
+any batch shape does; the rest keeps it bit for bit. The launch fills only the settings
 you left at their defaults: a value from `--set` or from the settings file always
 wins, and a choice that contradicts one of your values is left out. Every choice and its reason is written to `strategy.json` in the run
 directory and to the settings file the launch generates.

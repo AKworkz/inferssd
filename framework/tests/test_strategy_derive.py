@@ -35,7 +35,6 @@ from inferssd.strategy.derive import (
     launch_conflicts,
     literal,
     offered,
-    prefill_split,
     prefill_threads,
 )
 from inferssd.strategy.inputs import GPUState, RuntimeFacts, model_facts
@@ -113,10 +112,9 @@ def test_x86_uniform_machine_with_a_discrete_gpu(models):
     assert terms["drive_gbps"] == pytest.approx(9.623315)
     assert "4 MiB reads at QD 16" in s.settings["place.costs"].reason
     assert s.server_args == SERVER_ARGS == ("--ctx-checkpoints", "1")
-    # The 5090 graph reads at the drive's rate, slower than its link, so the CPU
-    # is never faster: every pass goes to the graph, each prompt in one pass.
-    assert s.settings["prefill.cpu_max_tokens"].value_text == "0"
-    assert "GPU graph reading 9.62 GB/s" in s.settings["prefill.cpu_max_tokens"].reason
+    # Every pass takes the engine's SSD sink, each prompt in one pass.
+    assert "prefill.cpu_max_tokens" not in s.settings
+    assert any(note.startswith("prefill: the SSD sink for every pass") for note in s.notes)
     assert s.one_pass
     assert "host.headroom_mib" not in s.settings  # a discrete GPU
     assert s.inputs.platform == "linux"
@@ -251,8 +249,7 @@ def test_arm_unified_memory(models):
     assert "vram.budget" not in s.settings
     assert any(note.startswith("vram.budget: default auto for ") for note in s.notes)
     assert s.settings["host.headroom_mib"].value_text == "4096"
-    # The graph reads at the drive's rate too: every pass goes to the GPU.
-    assert s.settings["prefill.cpu_max_tokens"].value_text == "0"
+    assert "prefill.cpu_max_tokens" not in s.settings
     assert s.one_pass
 
 
@@ -486,34 +483,6 @@ def test_decode_on_the_first_cpus_of_the_performance_cluster(models):
     assert launch_conflicts(s.threads, (), 0, "linux") == []
 
 
-def test_prefill_split_crossing(models):
-    dsv = models["dsv"]
-    line = (176.7, 114.28)
-    # A tie goes to the graph, which leaves the experts in the VRAM tier for decode.
-    split, why = prefill_split(dsv, line, 11.85, 11.85)
-    assert split == 0 and "40 layers of 384 experts, 6 a token" in why
-
-    # A link slower than the drive leaves the CPU the short passes, up to the crossing.
-    split, _ = prefill_split(dsv, line, 11.85, 5.0)
-
-    def seconds(n, graph):
-        touched = dsv.layers * dsv.experts * (1 - (1 - 6 / dsv.experts) ** n)
-        if graph:
-            return touched * dsv.expert_read_bytes / 5.0e9
-        read = touched * dsv.expert_read_bytes / 11.85e9
-        return max(read, (touched * line[0] + n * 6 * dsv.layers * line[1]) * 1e-6)
-
-    assert split > 0
-    assert seconds(split, False) < seconds(split, True)
-    assert seconds(split + 1, False) >= seconds(split + 1, True)
-    # A slower link makes the graph slower: the CPU keeps longer passes.
-    assert prefill_split(dsv, line, 11.85, 3.0)[0] > split
-    # A CPU that is slower even for one token leaves every pass to the graph.
-    assert prefill_split(dsv, (1e6, 1e6), 11.85, 5.0)[0] == 0
-    # A CPU that is never slower within the bound leaves the engine's default.
-    assert prefill_split(dsv, (0.0, 0.0), 11.85, 5.0)[0] is None
-
-
 def test_affinity_limits_the_threads_and_the_cpu_line(models):
     c = machine(X86)
     s = derive(c, models["dsv"], runtime([3, 4, 5, 6, 7, 99]), "linux", model_drive_key=None)
@@ -743,7 +712,7 @@ def test_experts_mixing_formats_across_layers_use_the_gpu_tier(tmp_path, experts
     gpu = GPUState(X86_GPU, 30 << 30, 0)
     s = derive(c, mixed, runtime(range(61), [gpu]), "linux", model_drive_key=drive(c))
     assert "vram.budget" not in s.settings
-    assert s.one_pass and "prefill.cpu_max_tokens" in s.settings
+    assert s.one_pass and "prefill.cpu_max_tokens" not in s.settings
 
 
 WINDOWS = "windows-x64-igpu.json"  # 4 + 4 Intel cores with an integrated GPU, one NVMe drive
