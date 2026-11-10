@@ -13,7 +13,7 @@ preserves its source attribution and license files.
 | Vulkan backend | Idle-submit keepalive every 20 ms; source-aware F16 `SET_ROWS` pipelines for F32/F16 destinations and I32/I64 indices, with unsupported conversions rejected. Shared copy shaders retain their F32 source variants. |
 | Backend operation files | New model operations and narrow native kernel entry points stay with their upstream operation/architecture files. Strict MXFP4 math is compiled separately with contraction and FTZ disabled. |
 | llama context | Runtime assembly, request phases, resource-aware graph reservation and failure recovery. Source, cache and telemetry owners reside in `src/ssd`. |
-| Model loading/mapping | Deferred expert ranges and compact Metal allocations where a GGUF interleaves the dense tensors with experts held elsewhere; fixed complete-page advice; read-ahead of the rows a lookup table (Engram, PLE) is about to read, on every OS; a refusal of GPU weights larger than the device's free memory. Source/range helpers reside in `src/ssd`. |
+| Model loading/mapping | Deferred expert ranges and compact Metal allocations where a GGUF interleaves the dense tensors with experts held elsewhere; under mmap, the tensors copied into a device buffer read with direct I/O into pinned buffers where the files read direct, as without mmap; fixed complete-page advice; read-ahead of the rows a lookup table (Engram, PLE) is about to read, on every OS; a refusal of GPU weights larger than the device's free memory. Source/range helpers reside in `src/ssd`. |
 | Model/architecture support | DeepSeek V4.1, Engram, Muse and Qwen3.8-Flash-Next (qwen4exp) architecture, metadata, graph and KV operations follow upstream model/op organization. They are intentional model exceptions. |
 | Common/server | CLI dispatch, rendering/parser hooks, prompt-cache/checkpoint and lifecycle calls. Owned implementations reside in `common/inferssd` and `tools/server/inferssd`. |
 | State serialization | Virtual/C API entry points call positional/range codecs under `src/inferssd`. |
@@ -161,8 +161,8 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `src/llama-memory.h` | 70 | 0 |
 | `src/llama-mmap.cpp` | 206 | 10 |
 | `src/llama-mmap.h` | 13 | 0 |
-| `src/llama-model-loader.cpp` | 164 | 7 |
-| `src/llama-model-loader.h` | 39 | 0 |
+| `src/llama-model-loader.cpp` | 190 | 11 |
+| `src/llama-model-loader.h` | 40 | 0 |
 | `src/llama-model-saver.cpp` | 9 | 2 |
 | `src/llama-model.cpp` | 1084 | 39 |
 | `src/llama-model.h` | 107 | 0 |
@@ -188,5 +188,5 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `tools/server/server.cpp` | 1 | 0 |
 | `tools/server/tests/utils.py` | 2 | 2 |
 
-Total: 18081 added, 5721 removed across 156 upstream paths.
+Total: 18108 added, 5725 removed across 156 upstream paths.
 <!-- END UPSTREAM INVENTORY -->
