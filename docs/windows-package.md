@@ -45,8 +45,8 @@ then publishes the complete release. There is no
 separate Windows-only version or prerelease channel. Publishing requires `APP_VERSIONING_TOKEN`.
 
 The numbered Windows installer pins its default package URLs to that release's
-`latest-windows.json` and `latest-windows-cuda.json`; it cannot silently install a newer rolling
-version. The asset preparation
+`latest-windows-vulkan.json` and `latest-windows-cuda.json`; it cannot silently install a newer
+rolling version. The asset preparation
 step rejects packages with a different version, revision, build, label or checksum. Existing
 published releases are never overwritten. A draft remains private until all assets and every
 normal package feed are ready.

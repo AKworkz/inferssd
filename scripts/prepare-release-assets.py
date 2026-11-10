@@ -15,7 +15,7 @@ from typing import Any
 # Each package by the suffix of its name: its platform, archive extension and package list.
 PACKAGES = {
     "macos-arm64": ("darwin-arm64", ".tar.gz", "latest-macos.json"),
-    "windows-x64": ("windows-x64", ".zip", "latest-windows.json"),
+    "windows-x64": ("windows-x64", ".zip", "latest-windows-vulkan.json"),
     "windows-x64-cuda": ("windows-x64", ".zip", "latest-windows-cuda.json"),
 }
 
@@ -132,7 +132,7 @@ def prepare(
         "$DefaultRef = '" + tag + "'",
     )
     for variable, listing in (
-        ("Packages", "latest-windows.json"),
+        ("VulkanPackages", "latest-windows-vulkan.json"),
         ("CudaPackages", "latest-windows-cuda.json"),
     ):
         powershell = replace_once(

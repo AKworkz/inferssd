@@ -30,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish the checked package and update latest-windows.json (main only)
+        description: Publish the checked packages and update their package lists (main only)
         type: boolean
         default: false
 

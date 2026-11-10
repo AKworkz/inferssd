@@ -7,8 +7,8 @@ Usage: APP_VERSIONING_TOKEN=... scripts/publish-package.py DIST_DIR
 DIST_DIR holds one versioned macOS tar.gz or Windows ZIP (Vulkan or CUDA) and its .json. The archive goes to
 cdn.wici.ai/apps/inferssd/ through WiCi AI's release service, which hands out an upload URL for it,
 as the desktop app's releases do. Then the package list, the .json with the archive's URL added,
-replaces latest-macos.json, latest-windows.json or latest-windows-cuda.json, which the installers read.
-The list never moves to an older build.
+replaces latest-macos.json, latest-windows-vulkan.json or latest-windows-cuda.json, which the
+installers read. The list never moves to an older build.
 
 The CDN keeps a file for a year, so a name never gets other bytes: a package built again from a
 commit already uploaded is refused. Re-run the failed publish job of the run that built it
@@ -28,7 +28,7 @@ from pathlib import Path
 SERVICE = os.environ.get("INFERSSD_PUBLISH_SERVICE", "https://appapi.wici.ai/versioning/inferssd")
 # Each package by the suffix of its name: its platform, package list and archive extension.
 LISTS = {"macos-arm64": ("darwin-arm64", "latest-macos.json", ".tar.gz"),
-         "windows-x64": ("windows-x64", "latest-windows.json", ".zip"),
+         "windows-x64": ("windows-x64", "latest-windows-vulkan.json", ".zip"),
          "windows-x64-cuda": ("windows-x64", "latest-windows-cuda.json", ".zip")}
 # The CDN in front of the service refuses Python's default User-Agent.
 AGENT = "inferssd-publish"

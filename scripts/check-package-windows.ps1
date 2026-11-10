@@ -34,7 +34,7 @@ try {
   if ($LASTEXITCODE -ne 0) { throw 'Relocated package checks failed.' }
   $listing = $manifest | Select-Object *
   $listing | Add-Member -Force -NotePropertyName url -NotePropertyValue ([Uri]$archivePath).AbsoluteUri
-  $listPath = Join-Path $work 'latest-windows.json'
+  $listPath = Join-Path $work 'latest.json'
   [IO.File]::WriteAllText($listPath, ($listing | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
   $env:INFERSSD_PACKAGES = ([Uri]$listPath).AbsoluteUri
   [Environment]::SetEnvironmentVariable('INFERSSD_RESOURCES', $null, 'Process')

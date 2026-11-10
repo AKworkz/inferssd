@@ -5,7 +5,7 @@
 
 # The release workflow replaces this with the tag it publishes.
 $DefaultRef = 'main'
-$Packages = 'https://appapi.wici.ai/versioning/inferssd/config/latest-windows.json'
+$VulkanPackages = 'https://appapi.wici.ai/versioning/inferssd/config/latest-windows-vulkan.json'
 $CudaPackages = 'https://appapi.wici.ai/versioning/inferssd/config/latest-windows-cuda.json'
 
 function Install-InferSSD {
@@ -187,7 +187,7 @@ No administrator rights are used. Models, settings and previous releases are pre
                         'this installer again to use CUDA.')
                     $package = $null
                 }
-                if (-not $package) { $package = Get-PackageList $Packages $listing }
+                if (-not $package) { $package = Get-PackageList $VulkanPackages $listing }
             }
             # Package lists from before the CUDA package carry no backend: they are Vulkan's.
             $backend = if ($package.backend) { $package.backend } else { 'vulkan' }

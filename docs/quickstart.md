@@ -41,7 +41,7 @@ including its own Python runtime, native engine, probes and runtime DLLs. It doe
 or require Git, Python, Visual Studio or a Vulkan SDK. On a machine with an NVIDIA GPU whose
 driver is at least the CUDA package's minimum it installs the CUDA package; otherwise the
 Vulkan package, which also runs on the CPU, and it says when a newer NVIDIA driver would give
-CUDA. Its package lists are `latest-windows-cuda.json` and `latest-windows.json` under
+CUDA. Its package lists are `latest-windows-cuda.json` and `latest-windows-vulkan.json` under
 `https://appapi.wici.ai/versioning/inferssd/config/` on `main`; a numbered release's installer
 pins its own release manifests instead.
 `INFERSSD_PACKAGES` can select another list. A missing package list reports an error rather

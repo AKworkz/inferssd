@@ -12,7 +12,7 @@ import pytest
     "suffix,platform,extension,listing",
     [
         ("macos-arm64", "darwin-arm64", ".tar.gz", "latest-macos.json"),
-        ("windows-x64", "windows-x64", ".zip", "latest-windows.json"),
+        ("windows-x64", "windows-x64", ".zip", "latest-windows-vulkan.json"),
         ("windows-x64-cuda", "windows-x64", ".zip", "latest-windows-cuda.json"),
     ],
 )

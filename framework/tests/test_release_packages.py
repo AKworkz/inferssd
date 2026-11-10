@@ -64,7 +64,7 @@ def test_one_release_contains_every_package_and_both_pinned_installers(inputs):
         "install.sh",
         "install.ps1",
         "latest-macos.json",
-        "latest-windows.json",
+        "latest-windows-vulkan.json",
         "latest-windows-cuda.json",
     } <= set(files)
     for platform, _, listing in release.PACKAGES.values():
@@ -84,7 +84,7 @@ def test_one_release_contains_every_package_and_both_pinned_installers(inputs):
     )
     assert "$DefaultRef = 'v0.1.3'" in powershell
     base = "https://github.com/wici-ai/inferssd/releases/download/v0.1.3/"
-    assert f"$Packages = '{base}latest-windows.json'" in powershell
+    assert f"$VulkanPackages = '{base}latest-windows-vulkan.json'" in powershell
     assert f"$CudaPackages = '{base}latest-windows-cuda.json'" in powershell
     for name, original in originals.items():
         assert (root / "scripts" / name).read_bytes() == original
