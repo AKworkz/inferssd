@@ -3,7 +3,8 @@
 The build number is the branch's commit count and the day the commit's, both read from the clone
 by scripts/engine-resources.py at install time; together with the commit they name the engine as
 the app does, <yymmdd>.<build>.<commit>. Whether an engine is one the app works with is the app's
-own call, by this build number.
+own call, by this build number. The GPU backends the build was made with come from the same file,
+so a caller can tell the Windows packages, one per backend, apart.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from collections.abc import Mapping
 from typing import Any, Optional
 
 from inferssd import __version__
-from inferssd.launch.resources import installed_resources
+from inferssd.launch.resources import GPU_BACKENDS, installed_resources
 from inferssd.launch.typed import PROFILES
 
 
@@ -26,7 +27,8 @@ def label(build: Optional[int], date: Optional[str], revision: Optional[str]) ->
 
 
 def report(environ: Mapping[str, str] = os.environ) -> dict[str, Any]:
-    """The version and, when the installer recorded them, the build, commit, day and branch."""
+    """The version and, when the installer recorded them, the build, commit, day, branch and the
+    GPU backends the build has (`capabilities.gpu_backends`, empty for a CPU-only build)."""
     value: dict[str, Any] = {
         "version": __version__,
         "build": None,
@@ -48,6 +50,12 @@ def report(environ: Mapping[str, str] = os.environ) -> dict[str, Any]:
         item = data.get(key)
         if isinstance(item, kind) and not isinstance(item, bool) and item != "unknown":
             value[key] = item
+    capabilities = data.get("capabilities")
+    backends = capabilities.get("gpu_backends") if isinstance(capabilities, dict) else None
+    if isinstance(backends, list) and all(
+        isinstance(item, str) and item in GPU_BACKENDS for item in backends
+    ):
+        value["capabilities"]["gpu_backends"] = list(backends)
     value["label"] = label(
         build if isinstance(build, int) else None,
         value["date"],

@@ -41,7 +41,8 @@ engine is one it works with; the engine does not know the app.
 
 Use `darwin` for an Apple Silicon deployment and `windows` for a Windows one.
 `gpu_backends` lists the GPU backends the engine was built with, of `CUDA`,
-`Metal` and `Vulkan`; an empty list is a CPU-only build. The launch takes the CUDA
+`Metal` and `Vulkan`; an empty list is a CPU-only build, and `inferssd --version --json`
+reports the list under `capabilities`. The launch takes the CUDA
 expert tier's settings only from an engine that has `CUDA`. Without the field,
 the launch reads the backends from the `CMakeCache.txt` of the build holding the
 server; when neither says, the launch strategy takes them to be those of the

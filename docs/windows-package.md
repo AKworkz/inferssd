@@ -18,7 +18,9 @@ for each GPU backend the launch's table names on Windows:
 
 A GPU vendor's normal graphics driver is needed for GPU execution; the Vulkan SDK and the CUDA
 toolkit are CI build dependencies only. The installer installs the CUDA package where an NVIDIA
-GPU's driver is new enough, else the Vulkan package.
+GPU's driver is new enough, else the Vulkan package. `inferssd --version --json` says which is
+installed, in `capabilities.gpu_backends` (`["CUDA"]` or `["Vulkan"]`), so an updater reads that
+package's list, `latest-windows-cuda.json` or `latest-windows-vulkan.json`.
 
 An archive has one directory, `inferssd-<date.build.commit>-windows-x64-vulkan` (or `-cuda`),
 containing:

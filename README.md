@@ -127,8 +127,13 @@ field:
 $ inferssd --version
 inferssd 0.1.3 (261106.202.03af979)
 $ inferssd --version --json
-{"version": "0.1.3", "build": 202, "revision": "03af97…", "date": "2026-11-06", "branch": "main", "label": "261106.202.03af979"}
+{"version": "0.1.3", "build": 202, "revision": "03af97…", "date": "2026-11-06", "branch": "main", "label": "261106.202.03af979", "capabilities": {"model_profiles": […], "gpu_backends": ["Metal"]}}
 ```
+
+`capabilities` lists the model profiles the engine launches and, when the installer recorded them,
+the GPU backends it was built with (an empty list for a CPU-only build). The Windows packages are
+one per backend, so this is how something running the engine knows which one is installed, and
+so which package list names its updates.
 
 The engine only says what it is. Whether a build is one it can work with is for whatever runs
 the engine to decide; the WiCi AI desktop app, for one, installs `main`, offers its newer
