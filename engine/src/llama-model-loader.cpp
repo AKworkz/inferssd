@@ -1498,11 +1498,6 @@ bool llama_model_loader::load_all_data(
     }
     GGML_ASSERT(size_data != 0 && "call init_mappings() first");
 
-    constexpr bool drop_mmap_tensor_after_upload = false;
-    size_t mmap_upload_advised_bytes = 0;
-    size_t mmap_upload_drop_ranges = 0;
-    size_t mmap_upload_drop_failures = 0;
-
     std::vector<no_init<uint8_t>> read_buf;
     std::vector<std::future<std::pair<ggml_tensor *, bool>>> validation_result;
     const bool drop_gpu_dense_sources = should_defer_expert_mmaps();
@@ -1671,21 +1666,10 @@ bool llama_model_loader::load_all_data(
                 ggml_backend_tensor_set(cur, data, 0, n_size);
                 ggml_backend_buffer_t target_buffer = cur->view_src ? cur->view_src->buffer : cur->buffer;
                 uint32_t expert_layer = 0;
-                if (!drop_mmap_tensor_after_upload && drop_gpu_dense_sources && target_buffer &&
+                if (drop_gpu_dense_sources && target_buffer &&
                         !ggml_backend_buffer_is_host(target_buffer) &&
                         !llama_is_expert_tensor_name(ggml_get_name(cur), expert_layer)) {
                     gpu_dense_ranges.at(weight->idx).push_back({ weight->offs, weight->offs + n_size });
-                }
-                if (drop_mmap_tensor_after_upload) {
-                    size_t dropped = 0;
-                    const bool ok = mapping->dontneed_fragment(
-                            weight->offs, weight->offs + n_size, &dropped);
-                    ++mmap_upload_drop_ranges;
-                    if (ok) {
-                        mmap_upload_advised_bytes += dropped;
-                    } else {
-                        ++mmap_upload_drop_failures;
-                    }
                 }
             }
         } else {
@@ -1766,15 +1750,6 @@ bool llama_model_loader::load_all_data(
         }
 
         size_done += n_size;
-    }
-
-    if (drop_mmap_tensor_after_upload && mmap_upload_drop_ranges > 0) {
-        LLAMA_LOG_INFO(
-                "%s: immediate mmap upload dontneed advised=%.2f MiB ranges=%zu failures=%zu (not reclaimed bytes)\n",
-                __func__,
-                mmap_upload_advised_bytes / 1024.0 / 1024.0,
-                mmap_upload_drop_ranges,
-                mmap_upload_drop_failures);
     }
 
     // free temporary resources used for async uploads

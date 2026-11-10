@@ -83,12 +83,12 @@ static void placement_contract() {
 
     std::vector<prefill_expert> experts = {{9,false,true,true,1024},{2,false,true,true,1024},{1,false,false,false,1024}};
     std::vector<int> routes = {4,4,4}; std::vector<kimi_place_item> empty;
-    prefill_input input{experts,routes,empty,t,32,1,1,1,4,2,false}; uint64_t candidates = 0;
-    const auto ranked = rank_prefill(input,candidates);
-    check(candidates == 1 && ranked.ranked.size() == 3 && ranked.ranked[0].index == 1 && ranked.ranked[1].index == 0 && ranked.ranked[2].index == 2,
-        "equal-route prefill candidates retain RAM before SSD, then expert-id order");
-    bool in_place = false; const auto selected = plan_prefill(input,ranked,in_place);
-    check(selected.ssd_limit == 1 && !selected.chosen.empty(), "legacy threshold profile consumes the same explicit plan contract");
+    prefill_input input{experts,routes,empty,t,32,1,2}; uint64_t candidates = 0;
+    const auto counted = count_prefill(input,candidates);
+    check(candidates == 1 && counted.ram_candidates == 2 && counted.ssd_candidates == 1 && counted.ssd_limit == 1,
+        "prefill candidates: leased RAM entries and drive reads, the reads limited by the staging");
+    bool in_place = false; const auto selected = plan_prefill(input,counted,in_place);
+    check(selected.ssd_limit == 1 && selected.chosen.empty(), "a plan without placeable items moves nothing");
 }
 
 static void calibration_contract() {

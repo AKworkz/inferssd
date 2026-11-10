@@ -275,8 +275,7 @@ struct kimi_vram_prefill_api {
                      char * error, size_t error_size);
     int (*seed_wait)(void * context, int32_t request_index, char * error, size_t error_size);
 };
-// Optional deferred-upload extension (GGML_KIMI_CPU_SINK_VRAM_DEFERRED_UPLOAD=1 in the tier and its CPU owner,
-// with ASYNC_UPLOAD=1). admit replaces ABI 2 admit for a borrowed RAM source, but the upload may outlive finish:
+// Optional deferred-upload extension (deferred and async uploads on in the tier and its CPU owner). admit replaces ABI 2 admit for a borrowed RAM source, but the upload may outlive finish:
 // when *queued is 1 the caller keeps that source unchanged and leased until collect returns the request, and the
 // reserved GPU slot is never evicted meanwhile. collect runs outside prepare..finish and without a live residency
 // lease, except with KIMI_VRAM_COLLECT_IF_IDLE. It waits for the in-flight uploads of wait_layer (>= 0) or as named

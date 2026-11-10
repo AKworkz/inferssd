@@ -261,84 +261,41 @@ struct prefill_input {
     const std::vector<int> & routes;
     const std::vector<kimi_place_item> & items;
     const kimi_place_table & table;
-    int ntokens, ram_threshold, ssd_threshold, ssd_cap;
+    int ntokens;
     size_t ssd_staging_limit, ring_slots;
-    bool makespan;
 };
 struct prefill_candidates {
-    std::vector<prefill_choice> ranked;
     size_t ram_candidates = 0, ssd_candidates = 0, ssd_limit = 0;
 };
-inline prefill_candidates rank_prefill(const prefill_input & in, uint64_t & candidate_count) {
+// The experts a layer could move to the GPU: from a leased RAM entry, or from the drive.
+inline prefill_candidates count_prefill(const prefill_input & in, uint64_t & candidate_count) {
     const auto & source = in.experts;
-    const auto & token_routes = in.routes;
-    const auto ram_movable = [&](size_t i) {
-        return in.ram_threshold && source[i].ram && source[i].leased && token_routes[i] >= in.ram_threshold;
-    };
-    const auto ssd_movable = [&](size_t i) {
-        return in.ssd_threshold && !source[i].ram && token_routes[i] >= in.ssd_threshold;
-    };
     prefill_candidates out;
-    auto & candidates = out.ranked;
     for (size_t i = 0; i < source.size(); ++i) {
-        if (source[i].resident) { continue; }
-        if (ram_movable(i)) { candidates.push_back({i, 0}); ++out.ram_candidates; }
-        else if (ssd_movable(i)) { candidates.push_back({i, 1}); ++out.ssd_candidates; }
+        if (source[i].resident || in.routes[i] <= 0) { continue; }
+        if (source[i].ram && source[i].leased) { ++out.ram_candidates; }
+        else if (!source[i].ram) { ++out.ssd_candidates; }
     }
-    // Publish this scalar at the same point, including when stable_sort throws.
     candidate_count = out.ssd_candidates;
-    std::stable_sort(candidates.begin(), candidates.end(), [&](const prefill_choice & a, const prefill_choice & b) {
-        if (token_routes[a.index] != token_routes[b.index]) { return token_routes[a.index] > token_routes[b.index]; }
-        if (a.source != b.source) { return a.source < b.source; }
-        return source[a.index].id < source[b.index].id;
-    });
-    out.ssd_limit = in.ssd_cap < 0 ? in.ssd_staging_limit : std::min(in.ssd_staging_limit, size_t(in.ssd_cap));
+    out.ssd_limit = in.ssd_staging_limit;
     return out;
 }
-inline prefill_selection plan_prefill(const prefill_input & in, const prefill_candidates & ranked, bool & in_place) {
+inline prefill_selection plan_prefill(const prefill_input & in, const prefill_candidates & counted, bool & in_place) {
     const auto & source = in.experts;
-    const auto & token_routes = in.routes;
     const auto & table = in.table;
-    const auto & candidates = ranked.ranked;
     prefill_selection out;
-    out.ram_candidates = ranked.ram_candidates; out.ssd_candidates = ranked.ssd_candidates;
-    out.ssd_limit = ranked.ssd_limit;
-    if (in.makespan) {
-        kimi_place_limits limits;
-        limits.reads = out.ssd_limit;
-        out.placed = kimi_place_layer(table, in.ntokens, in.ring_slots, in.items.data(), in.items.size(), limits);
-        in_place = !table.one(in.ntokens) && out.placed.in_place;
-        for (size_t i : out.placed.moved) { out.chosen.push_back({ i, source[i].ram ? 0 : 1 }); }
-        out.time_before = out.placed.time_none; out.time_after = out.placed.time; out.in_ring = out.placed.ring;
-        for (size_t i = 0; i < source.size(); ++i) {
-            if (!source[i].resident) { out.cpu_before += table.cpu(in.ntokens, token_routes[i]); }
-        }
-        out.cpu_after = out.placed.cpu; out.gpu_after = out.placed.gpu_lane; out.link_after = out.placed.link;
-    } else {
-        const auto cpu_cost = [](int routes) { return routes ? 70.0 + 95.0 * routes : 0.0; };
-        const auto gpu_cost = [](int routes) { return routes ? 55.0 + 7.0 * routes : 0.0; };
-        const auto upload_cost = [](uint64_t bytes) { return double(bytes) / 6740.0 + 10.0; };
-        for (size_t i = 0; i < source.size(); ++i) {
-            if (source[i].resident) { out.gpu_before += gpu_cost(token_routes[i]); }
-            else { out.cpu_before += cpu_cost(token_routes[i]); }
-        }
-        double cpu_backlog = out.cpu_before, gpu_backlog = out.gpu_before;
-        out.time_before = std::max(cpu_backlog, gpu_backlog);
-        size_t ssd_selected = 0;
-        for (const prefill_choice & item : candidates) {
-            if (item.source == 1 && ssd_selected >= out.ssd_limit) { continue; }
-            const int routes = token_routes[item.index];
-            const double old_makespan = std::max(cpu_backlog, gpu_backlog);
-            const double next_cpu = cpu_backlog - cpu_cost(routes);
-            const double next_gpu = gpu_backlog + gpu_cost(routes) + upload_cost(source[item.index].bytes);
-            if (std::max(next_cpu, next_gpu) + std::max(50.0, old_makespan * 0.02) >= old_makespan) { continue; }
-            cpu_backlog = next_cpu; gpu_backlog = next_gpu;
-            ssd_selected += item.source == 1;
-            out.chosen.push_back(item);
-        }
-        out.time_after = std::max(cpu_backlog, gpu_backlog);
-        out.cpu_after = cpu_backlog; out.gpu_after = gpu_backlog;
+    out.ram_candidates = counted.ram_candidates; out.ssd_candidates = counted.ssd_candidates;
+    out.ssd_limit = counted.ssd_limit;
+    kimi_place_limits limits;
+    limits.reads = out.ssd_limit;
+    out.placed = kimi_place_layer(table, in.ntokens, in.ring_slots, in.items.data(), in.items.size(), limits);
+    in_place = !table.one(in.ntokens) && out.placed.in_place;
+    for (size_t i : out.placed.moved) { out.chosen.push_back({ i, source[i].ram ? 0 : 1 }); }
+    out.time_before = out.placed.time_none; out.time_after = out.placed.time; out.in_ring = out.placed.ring;
+    for (size_t i = 0; i < source.size(); ++i) {
+        if (!source[i].resident) { out.cpu_before += table.cpu(in.ntokens, in.routes[i]); }
     }
+    out.cpu_after = out.placed.cpu; out.gpu_after = out.placed.gpu_lane; out.link_after = out.placed.link;
     return out;
 }
 

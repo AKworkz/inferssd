@@ -3688,10 +3688,8 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
         // among the hits, the experts the previous layer's call read ahead
         sink->lookahead_count_used();
         // Streamed transients hold a ring slot and a device slot each (in place, a ring slot alone), whatever their
-        // number, so only the optional cap limits them.
-        const int streaming_cap = sink->vram.prefill_ssd_gpu_max_experts_per_layer;
-        const size_t staging_limit = !streaming_ssd ? sink->slots.size() :
-            streaming_cap < 0 ? sink->requests.size() : size_t(streaming_cap);
+        // number, so they are not limited.
+        const size_t staging_limit = streaming_ssd ? sink->requests.size() : sink->slots.size();
         if (streaming_ssd) {
             std::fprintf(stderr,
                 "[kimi_prefill_staging] selected_cap=%zu ring_buffers=%zu streaming=1\n",
@@ -3749,7 +3747,7 @@ bool kimi_cpu_sink_stream_hybrid(struct kimi_cpu_sink * sink,
                 cpu_ssd_requests.push_back(i);
             }
         }
-        if (streaming_ssd && !sink->vram.prefill_legacy_schedule) {
+        if (streaming_ssd) {
             // Issue the reads in the order the two consumers need them: by each expert's predicted start
             // on its lane (the makespan rule's lane_start_us), so that both lanes run through the whole
             // layer. Each consumer keeps its own order, so a ring credit is always returned by an earlier

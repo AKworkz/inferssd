@@ -59,7 +59,7 @@ struct tier {
     static constexpr size_t elastic_block_slots=16;
     static constexpr size_t driver_margin_mib=64;
     size_t engine_held=0;
-    static constexpr uint64_t automatic_budget=UINT64_MAX; // GGML_KIMI_CPU_SINK_VRAM_BYTES=auto
+    static constexpr uint64_t automatic_budget=UINT64_MAX; // vram.budget=auto
     using reclaimer_callback=int (*)(void *,size_t,size_t *);
     using reclaimer_register_fn=bool (*)(int,reclaimer_callback,void *);
     using reclaimer_unregister_fn=bool (*)(int,reclaimer_callback,void *);
@@ -74,7 +74,7 @@ struct tier {
     bool memory_trace=false;
     // Opt-in: keep the arena, slot heat and residency through prefill for the same model/context epoch.
     bool keep_across_requests=false;uint64_t arena_epoch=0;
-    // Opt-in timing split (GGML_KIMI_CPU_SINK_VRAM_TIMING=1): launch-to-worker handoff and the sink's wait in finish.
+    // Opt-in timing split (the profile debug channel): launch-to-worker handoff and the sink's wait in finish.
     bool timing=false;uint64_t launches=0;double handoff_us=0,finish_drain_us=0;clock_type::time_point launch_time{};
     uint64_t memory_samples=0,memory_free_min=UINT64_MAX,memory_free_max=0;
     uint64_t ready_sequence=0,live_ready_generation=0;
@@ -222,7 +222,7 @@ struct tier {
     double cold_prefill_admission_us=0;
     kimi_vram_prefill_stats prefill_job_stats={};
     kimi_vram_activation prefill_activation={};
-    // Opt-in deferred uploads (GGML_KIMI_CPU_SINK_VRAM_DEFERRED_UPLOAD=1): a borrowed upload runs on its own thread and
+    // Deferred uploads (on with every production tier): a borrowed upload runs on its own thread and
     // stream and may outlive finish; its slot stays reserved until collect publishes it (kimi_vram_deferred_api).
     bool deferred_upload=false;
     // aborted: its slot went with a block an OOM or host reclaim gave back; collect reports it, nothing is published.
@@ -255,10 +255,10 @@ struct tier {
             throw std::runtime_error("VRAM watermark high margin must exceed low reserve");
         }
         pending_uploads.reserve(16);
-        if(deferred_upload && !async_upload)throw std::runtime_error("GGML_KIMI_CPU_SINK_VRAM_DEFERRED_UPLOAD requires ASYNC_UPLOAD=1");
+        if(deferred_upload && !async_upload)throw std::runtime_error("deferred VRAM uploads require async uploads");
         // auto sizes an elastic tier only; a fixed arena would take all free memory and could never give it back
         if(budget==automatic_budget && !(elastic_requested && keep_across_requests && configuration.global))
-            throw std::runtime_error("GGML_KIMI_CPU_SINK_VRAM_BYTES=auto requires VRAM_ELASTIC=1, VRAM_GLOBAL_POOL=1 and VRAM_KEEP_ACROSS_REQUESTS=1");
+            throw std::runtime_error("an automatic VRAM budget requires an elastic global tier kept across requests");
     }
     ~tier(){
         try {
@@ -865,9 +865,9 @@ struct tier {
             (unsigned long long)phase_generation,requested,*freed,slot_locations.size()<base_slots?1:0);
         return 1;
     }
-    // Slots of the first allocation. A byte budget (GGML_KIMI_CPU_SINK_VRAM_BYTES=N) keeps its legacy meaning, the
-    // base. Without one (auto, elastic only) the tier starts from one block and grows into what is free. The caller
-    // has checked that one slot fits above the safety reserve.
+    // Slots of the first allocation. A byte budget (vram.budget=N) is the base. Without one (auto, elastic only) the
+    // tier starts from one block and grows into what is free. The caller has checked that one slot fits above the
+    // safety reserve.
     size_t initial_slots(size_t free_bytes,size_t logical_max,bool global) const{
         if(budget==automatic_budget && elastic_requested && global && keep_across_requests){
             const size_t low=watermark_low_mib<<20,above=free_bytes>low?(free_bytes-low)/stride:0;
@@ -2342,7 +2342,7 @@ struct tier {
     void admit_deferred(const kimi_vram_request & r,const void * const * data,int * queued){
         if(!queued)throw std::runtime_error("null deferred VRAM admission result");
         *queued=0;
-        if(!deferred_upload)throw std::runtime_error("deferred VRAM upload is off in the tier (GGML_KIMI_CPU_SINK_VRAM_DEFERRED_UPLOAD)");
+        if(!deferred_upload)throw std::runtime_error("deferred VRAM upload is off in the tier");
         if(!active || !table || !table->in_flight)return;
         for(size_t j=0;j<table->admissions.size();++j){
             const int slot=table->admissions[j];
@@ -2371,7 +2371,7 @@ struct tier {
     void collect(int32_t wait_layer,kimi_vram_request * out,int32_t * aborted,int capacity,int * count){
         if(!count || capacity<0 || (capacity && (!out || !aborted)) || wait_layer<KIMI_VRAM_COLLECT_IF_IDLE)throw std::runtime_error("invalid deferred VRAM collect");
         *count=0;
-        if(!deferred_upload)throw std::runtime_error("deferred VRAM upload is off in the tier (GGML_KIMI_CPU_SINK_VRAM_DEFERRED_UPLOAD)");
+        if(!deferred_upload)throw std::runtime_error("deferred VRAM upload is off in the tier");
         if((table && (table->in_flight || table->lease_generation)) || live_ready_generation){
             if(wait_layer==KIMI_VRAM_COLLECT_IF_IDLE)return;
             throw std::runtime_error("deferred VRAM collect inside a layer or a residency lease");
