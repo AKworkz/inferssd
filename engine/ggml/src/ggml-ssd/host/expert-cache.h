@@ -1328,14 +1328,20 @@ struct expert_cache {
         for (size_t i = found->begin; i < found->begin + found->count; ++i) {
             auto & e = entries[i];
             if (!e.valid || e.id != request.id || e.layer_index != layer_index || !matches(e, request)) { continue; }
-            if (e.leases || e.protected_now || e.reserved || e.inflight) { return -1; }
-            e.valid = false;
-            stats.valid_bytes -= stride;
-            // Keep resident and committed/page-table accounting: the physical
-            // slot is reused in place, without a second payload allocation.
-            return 1;
+            return drop_entry(i);
         }
         return 0;
+    }
+    // Entry `index`'s copy, which the other tier holds ready too: 1 dropped, -1 an executor still owns it, 0 not valid.
+    int drop_entry(size_t index) {
+        auto & e = entries.at(index);
+        if (!e.valid) { return 0; }
+        if (e.leases || e.protected_now || e.reserved || e.inflight) { return -1; }
+        e.valid = false;
+        stats.valid_bytes -= stride;
+        // Keep resident and committed/page-table accounting: the physical
+        // slot is reused in place, without a second payload allocation.
+        return 1;
     }
 };
 

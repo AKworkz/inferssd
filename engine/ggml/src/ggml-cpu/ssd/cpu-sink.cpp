@@ -4168,6 +4168,7 @@ static bool sink_phase_begin(struct kimi_cpu_sink * sink, uint64_t epoch, uint64
         sink->file_identities.clear();
         sink->vram.begin(epoch, token, decode, sink->cache, request);
         sink->cache.begin(epoch, token, decode);
+        if (decode) { sink->vram.drop_held(sink->cache); }
         sink->begin_margin_interval(decode);
     } catch (const std::exception & e) {
         sink->vram.cancel(); sink->cache.release();
