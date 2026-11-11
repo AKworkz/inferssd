@@ -106,9 +106,11 @@ struct tier {
     // Grouped prefill passes of at most this many tokens run the vector engine, a call of the layer's residents a
     // token, as a decode token does: the same code and the same lines at one token (kimi_vram_host_costs).
     static constexpr int vector_tokens=1;
-    // Admission threshold from measured costs (kimi_vram_policy_api); MIN_COUNT is only the starting value.
-    double miss_us=0,upload_us_per_expert=0,last_min_count=0;bool adaptive_admission=false;uint64_t admission_updates=0;
-    double last_cost_hits=0,last_expected[3]={};uint64_t last_evictions=0;
+    // The measured costs that price decode's replacements (update_admission); MIN_COUNT is the rule until then.
+    double ram_us=0,drive_us=0,upload_us_per_expert=0;bool adaptive_admission=false;uint64_t admission_updates=0;
+    uint64_t last_evictions=0;
+    // The sink's RAM cache (kimi_vram_policy_api's set_ram_holds): whether it keeps a copy of an expert.
+    int (*ram_holds)(void *,int32_t,int32_t)=nullptr;void * ram_holds_arg=nullptr;
     // The model's expert formats (kimi_vram_expert_format's per-layer types, fixed by the first call): each its role
     // bytes and its decode engine. A slot holds an expert of any of them: stride is the largest one's. layer_format:
     // a layer ID's format; cur: the format of the layer being prepared, which its jobs on the worker run with.
@@ -358,33 +360,30 @@ struct tier {
         }
         return free_bytes>=need;
     }
-    // An admission pays one upload and earns the hits the table expects at its selection count; evicting a
-    // resident gives up the hits that entry is still expected to earn. Each hit saves a miss minus a hit.
-    // Admit when the difference, times that saving, exceeds the upload. Starts at the token boundary after both
-    // costs are measured: the upload by probe_upload when the tier gets its storage, the miss over the last decode
-    // token (the sink reports one per layer), as at every later token, not from one layer. A first token's misses
-    // are first touches read from the drive (4.6-5.0 ms a miss on the Spark against about 1.2 ms from the fourth
-    // token, when recurring experts come from the RAM cache): the price follows what a miss costs at the time.
+    // Decode's replacements are priced by what a use of an expert saves when the tier serves it
+    // (vram_slot_table::candidate_saving): a use outside the tier costs ram_us from the RAM cache and drive_us from
+    // the drive (the sink reports both for each decode layer), one the tier serves its resident cost. A candidate's
+    // uses outside the tier come from the RAM cache where the sink has one (it has served a use from it), else from
+    // the drive. Starts at the token boundary after the sink has reported a cost, and follows the costs at every later
+    // token; a source the sink has not used costs what the other does.
     void update_admission(){
-        const bool enabled = configuration.adaptive_admission;
-        if(!enabled || !table || !table->count_decay)return;
-        double miss=0,hit=0,upload=0; // the sink, the worker and the upload thread write them under mutex
-        {std::lock_guard<std::mutex> lock(mutex);miss=miss_us;hit=resident_us_per_expert;upload=upload_us_per_expert;}
-        if(!(miss>0) || !(upload>0))return;
-        const double saved=miss-hit;
-        table->admission_hits=saved>0?upload/saved:1e9;
-        table->refresh_expected();
-        const double before=last_min_count,next=table->admission_count();
-        last_min_count=next;adaptive_admission=true;++admission_updates;
-        last_cost_hits=table->admission_hits;last_evictions=table->earned_samples;
-        for(int c=1;c<=3;++c)last_expected[c-1]=table->expected_hits(c);
-        if(std::fabs(next-before)>0.25 || admission_updates==1 || admission_updates%2048==0)admission_log("");
+        if(!configuration.adaptive_admission || !table || !table->count_decay)return;
+        double ram=0,drive=0,hit=0; // the sink and the worker write them under mutex
+        {std::lock_guard<std::mutex> lock(mutex);ram=ram_us;drive=drive_us;hit=resident_us_per_expert;}
+        if(!(ram>0) && !(drive>0))return;
+        const bool ram_cache=ram>0;
+        if(!(ram>0))ram=drive;
+        if(!(drive>0))drive=ram;
+        table->ram_saving=std::max(0.0,ram-hit);table->drive_saving=std::max(0.0,drive-hit);
+        table->candidate_saving=ram_cache?table->ram_saving:table->drive_saving;
+        adaptive_admission=true;++admission_updates;last_evictions=table->evictions;
+        if(admission_updates==1 || admission_updates%256==0)admission_log("");
     }
     // From the last update, so that it can also report after the table is gone.
     void admission_log(const char * tag){
-        std::fprintf(stderr,"[kimi_vram_admission] %smin_count=%.3f cost_hits=%.3f upload_us=%.1f miss_us=%.1f hit_us=%.1f expected_hits_c1=%.2f c2=%.2f c3=%.2f evictions=%llu updates=%llu\n",
-            tag,last_min_count,last_cost_hits,upload_us_per_expert,miss_us,resident_us_per_expert,
-            last_expected[0],last_expected[1],last_expected[2],(unsigned long long)last_evictions,(unsigned long long)admission_updates);
+        std::fprintf(stderr,"[kimi_vram_admission] %sram_us=%.1f drive_us=%.1f hit_us=%.1f upload_us=%.1f evictions=%llu updates=%llu\n",
+            tag,ram_us,drive_us,resident_us_per_expert,upload_us_per_expert,(unsigned long long)last_evictions,
+            (unsigned long long)admission_updates);
     }
     void grow_after_first_token(){
         if(!unified || !elastic_active || decode_growth_done || ++phase_decode_tokens<2)return;
@@ -1720,6 +1719,7 @@ struct tier {
         base_slots=count;
         table=std::make_unique<vram_slot_table>(count,priority,configuration.count_policy,configuration.min_count,
                 global,configuration.half_life,0,KIMI_VRAM_MAX_LAYERS-1,n_experts);
+        table->ram_holds=ram_holds;table->ram_holds_arg=ram_holds_arg;
         configure_elastic(global,logical_max);
         memory_sample("before_allocate");
         const auto allocate_start=memory_trace?clock_type::now():clock_type::time_point{};
@@ -2491,9 +2491,14 @@ int policy_reclaim_host(void * p,uint64_t bytes){
     auto * t=static_cast<tier *>(p);if(!t)return 1;
     try{return t->reclaim_host(size_t(std::min<uint64_t>(bytes,SIZE_MAX)),bytes?"host_reserve":"floor")?0:1;}catch(const std::exception & x){
         std::fprintf(stderr,"[kimi_vram_elastic] event=host_reclaim status=fail error=%s\n",x.what());return 1;}}
-void policy_set_miss_cost(void * p,double us){
-    auto * t=static_cast<tier *>(p);if(!t || !std::isfinite(us) || us<0)return;
-    std::lock_guard<std::mutex> lock(t->mutex);t->miss_us=t->miss_us>0?0.9*t->miss_us+0.1*us:us;}
+void policy_set_miss_cost(void * p,double ram_us,double drive_us){
+    auto * t=static_cast<tier *>(p);if(!t)return;
+    const auto smooth=[](double & value,double us){if(std::isfinite(us) && us>0)value=value>0?0.9*value+0.1*us:us;};
+    std::lock_guard<std::mutex> lock(t->mutex);smooth(t->ram_us,ram_us);smooth(t->drive_us,drive_us);}
+void policy_set_ram_holds(void * p,int (*holds)(void *,int32_t,int32_t),void * arg){
+    auto * t=static_cast<tier *>(p);if(!t)return;
+    t->ram_holds=holds;t->ram_holds_arg=arg;
+    if(t->table){t->table->ram_holds=holds;t->table->ram_holds_arg=arg;}}
 int policy_set_thread_cpus(void * p,const int * cpus,int count,char * e,size_t n){
     auto * t=static_cast<tier *>(p);
     if(!t || !cpus || count<1){if(n)std::snprintf(e,n,"invalid GPU tier thread CPUs");return 1;}
@@ -2551,8 +2556,8 @@ void * create_configured_tier(const ssd::settings::snapshot * input, const ssd::
 }
 } // namespace
 extern "C" const kimi_vram_policy_api * kimi_vram_policy_get_api(){
-    static const kimi_vram_policy_api api={4,sizeof(kimi_vram_policy_api),policy_set_miss_cost,policy_set_host_demand,
-        policy_set_host_floor,policy_reclaim_host,policy_host_bytes,policy_set_thread_cpus};return &api;
+    static const kimi_vram_policy_api api={5,sizeof(kimi_vram_policy_api),policy_set_miss_cost,policy_set_host_demand,
+        policy_set_host_floor,policy_reclaim_host,policy_host_bytes,policy_set_thread_cpus,policy_set_ram_holds};return &api;
 }
 extern "C" const kimi_vram_host_api * kimi_vram_host_get_api(){
     static const kimi_vram_host_api api={3,sizeof(kimi_vram_host_api),host_available,host_launch,host_costs,

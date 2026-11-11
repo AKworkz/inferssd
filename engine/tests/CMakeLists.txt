@@ -316,7 +316,7 @@ if (TARGET ggml-cpu AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if (TARGET kimi-vram-tier)
         # GPU tests require explicit ownership of a lane and normally linked
         # backend objects; do not acquire a shared GPU automatically in ctest.
-        foreach(tier_test test-ssd-vram-async test-ssd-vram-deferred test-ssd-vram-exclusive
+        foreach(tier_test test-ssd-vram-async test-ssd-vram-deferred test-ssd-vram-backup
                 test-ssd-vram-format-compat test-ssd-vram-pool-cuda
                 test-ssd-vram-elastic test-ssd-vram-reclaim test-ssd-vram-mixed)
             add_executable(${tier_test} ssd/${tier_test}.cpp)

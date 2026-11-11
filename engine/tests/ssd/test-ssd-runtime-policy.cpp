@@ -79,7 +79,9 @@ static void placement_contract() {
     items[0].locked = items[1].locked = items[2].locked = false;
     const auto locks = plan_locks(t, 4, items, limits, 300);
     check(locks.considered && !locks.requests.empty() && locks.saved_us > 0, "page-lock plan contains request indices and saved time only");
-    check(near(miss_cost(1, 1, 100, 600, true, 80), 340), "admission compares in-place compute with each miss share of reads");
+    const auto use = miss_costs(1, 100, 600, true, 80), hidden = miss_costs(4, 100, 200, false, 80);
+    check(near(use.ram_us, 80) && near(use.drive_us, 600), "a use from RAM costs the in-place compute, one from the drive its share of the reads");
+    check(near(hidden.ram_us, 100) && near(hidden.drive_us, 100), "a use from the drive costs no less than its compute");
 
     std::vector<prefill_expert> experts = {{9,false,true,true,1024},{2,false,true,true,1024},{1,false,false,false,1024}};
     std::vector<int> routes = {4,4,4}; std::vector<kimi_place_item> empty;

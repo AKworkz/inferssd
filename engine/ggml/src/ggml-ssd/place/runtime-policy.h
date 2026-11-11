@@ -306,12 +306,13 @@ inline prefill_selection plan_prefill(const prefill_input & in, const prefill_ca
     return out;
 }
 
-inline double miss_cost(size_t ram, size_t ssd, double cpu_expert_us, double io_us,
-        bool in_place, double host_expert_us) {
+// What a decode use of an expert outside the GPU tier costs: from the RAM cache, its compute by the faster processor
+// that can take it; from the drive, no less than its share of the layer's reads (io_us over its `ssd` drive experts).
+struct expert_use_costs { double ram_us = 0, drive_us = 0; };
+inline expert_use_costs miss_costs(size_t ssd, double cpu_expert_us, double io_us, bool in_place, double host_expert_us) {
     double compute = cpu_expert_us;
     if (in_place && host_expert_us > 0) { compute = std::min(compute, host_expert_us); }
-    const double read = ssd ? io_us / double(ssd) : 0.0;
-    return (double(ram) * compute + double(ssd) * std::max(compute, read)) / double(ram + ssd);
+    return { compute, ssd ? std::max(compute, io_us / double(ssd)) : 0.0 };
 }
 
 }} // namespace ssd::place

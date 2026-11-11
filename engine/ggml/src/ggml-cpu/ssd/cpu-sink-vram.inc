@@ -20,7 +20,7 @@ struct sink_vram {
     // this layer's use of it, and whether this pass's streamed transients are read in place.
     kimi_vram_prefill_lane prefill_lane = {};
     bool prefill_batched = false, prefill_in_place = false;
-    bool exclusive = false, decode = false, prefill_open = false, async_upload = false, prefill_enabled = false;
+    bool decode = false, prefill_open = false, async_upload = false, prefill_enabled = false;
     // A tier with no residency table holds nothing across layers: it serves grouped prefill alone, decode never calls it.
     bool prefill_only = false;
     bool prefill_job_active = false;
@@ -43,7 +43,7 @@ struct sink_vram {
     std::vector<kimi_vram_prefill_transient> prefill_transient;
     std::vector<ssd::place::prefill_expert> prefill_policy_experts;
     kimi_vram_prefill_stats prefill_stats = {};
-    uint64_t epoch = 0, ram_drops = 0, ram_drop_blocked = 0, ready_confirmations = 0, ram_swept = 0;
+    uint64_t epoch = 0;
     std::vector<int> ram_leases;
     // Opt-in deferred uploads: the RAM source of an upload that outlives its layer stays leased until collected.
     const kimi_vram_deferred_api * deferred_api = nullptr;
@@ -87,7 +87,6 @@ struct sink_vram {
         uint64_t bytes = configuration.policy.vram_budget;
         if (!configuration.production) {
             async_upload = configuration.policy.vram_async;
-            exclusive = configuration.policy.vram_exclusive;
             deferred_upload = configuration.policy.vram_deferred;
             prefill_enabled = configuration.policy.vram_prefill;
         }
@@ -95,7 +94,7 @@ struct sink_vram {
             const auto * budget = configuration.settings.vram_budget();
             if (!budget) { throw std::runtime_error("missing typed vram.budget"); }
             bytes = budget->tier_bytes(configuration.has_gpu);
-            async_upload = exclusive = deferred_upload = prefill_enabled = bytes != 0;
+            async_upload = deferred_upload = prefill_enabled = bytes != 0;
         }
         {
             const auto * costs = configuration.production ? configuration.settings.costs() : &configuration.policy.place_costs;
@@ -126,7 +125,7 @@ struct sink_vram {
         if (!ready_first) { throw std::runtime_error("GPU tier requires READY_FIRST=1 for ordered reduction"); }
         if (!configuration.has_gpu) { throw std::runtime_error("GPU provider was not injected; no fallback"); }
         prefill_only = !configuration.gpu.residency;
-        if (prefill_only) { async_upload = exclusive = deferred_upload = false; }
+        if (prefill_only) { async_upload = deferred_upload = false; }
         api = configuration.gpu.api;
         if (!api || api->version != 2 || api->size != sizeof(*api) || !api->create || !api->destroy ||
                 !api->begin || !api->prepare || !api->launch || !api->admit || !api->finish || !api->cancel) {
@@ -158,10 +157,9 @@ struct sink_vram {
             }
         }
         if (!prefill_only) {
-            // what the tier holds (the next-layer prefetch asks), and with VRAM_EXCLUSIVE its ready leases
+            // what the tier holds: the next-layer prefetch asks, and the RAM cache, whose copy of such an expert is a backup
             residency = configuration.gpu.residency;
-            if (!residency || residency->version != 2 || residency->size != sizeof(*residency) || !residency->held ||
-                    (exclusive && (!residency->acquire || !residency->validate || !residency->release))) {
+            if (!residency || residency->version != 2 || residency->size != sizeof(*residency) || !residency->held) {
                 throw std::runtime_error("GPU residency ABI missing or incompatible; no fallback");
             }
         }
@@ -174,7 +172,7 @@ struct sink_vram {
             }
             deferred.reserve(64);
         }
-        if (exclusive || async_upload) { ram_leases.reserve(16); }
+        if (async_upload) { ram_leases.reserve(16); }
         char error[512] = {};
         if (configuration.production) {
             const auto * settings_api = configuration.gpu.settings;
@@ -195,9 +193,9 @@ struct sink_vram {
         if (!context) { throw std::runtime_error(std::string("GPU tier create: ") + error); }
         if (configuration.gpu.policy) {
             policy_api = configuration.gpu.policy;
-            if (!policy_api || policy_api->version != 4 || policy_api->size != sizeof(*policy_api) ||
+            if (!policy_api || policy_api->version != 5 || policy_api->size != sizeof(*policy_api) ||
                     !policy_api->set_miss_cost || !policy_api->set_host_demand || !policy_api->set_host_floor ||
-                    !policy_api->reclaim_host || !policy_api->host_bytes || !policy_api->set_thread_cpus) {
+                    !policy_api->reclaim_host || !policy_api->host_bytes || !policy_api->set_thread_cpus || !policy_api->set_ram_holds) {
                 throw std::runtime_error("GPU tier admission-policy ABI mismatch");
             }
         }
@@ -213,9 +211,6 @@ struct sink_vram {
     ~sink_vram() {
         if (host_experts) { std::fprintf(stderr, "[kimi_vram_host_sink] gpu_host_experts=%llu\n", (unsigned long long) host_experts); }
         if (context) { api->destroy(context); }
-        if (exclusive) { std::fprintf(stderr, "[kimi_vram_exclusive] ram_drops=%llu ram_drop_blocked=%llu ready_confirmations=%llu swept=%llu\n",
-            (unsigned long long) ram_drops, (unsigned long long) ram_drop_blocked, (unsigned long long) ready_confirmations,
-            (unsigned long long) ram_swept); }
         if (deferred_upload) { std::fprintf(stderr, "[kimi_vram_deferred_sink] queued=%llu collected=%llu aborted=%llu stale_leases=%llu\n",
             (unsigned long long) deferred_queued, (unsigned long long) deferred_collected, (unsigned long long) deferred_aborted,
             (unsigned long long) deferred_stale); }
@@ -373,7 +368,7 @@ struct sink_vram {
         check(result, error);
     }
     void pin_ram_batch(sink_cache & cache, const std::vector<sink_request> & source) {
-        if ((!exclusive && !async_upload) || !decode) { return; }
+        if (!async_upload || !decode) { return; }
         if (!ram_leases.empty()) { throw std::runtime_error("GPU tier still holds a previous RAM batch"); }
         // One lease per physical slot covers CPU, its read CQEs and a possible
         // borrowed upload. Repeated router IDs cannot release it twice.
@@ -417,8 +412,14 @@ struct sink_vram {
     uint64_t host_bytes() {
         return context && policy_api ? policy_api->host_bytes(context) : 0;
     }
-    void set_miss_cost(double us) {
-        if (context && policy_api && decode && us > 0) { policy_api->set_miss_cost(context, us); }
+    // The tier prices a replacement by whether the RAM cache keeps a copy of the expert it gives up.
+    void set_ram_holds(sink_cache & cache) {
+        if (!context || !policy_api) { return; }
+        policy_api->set_ram_holds(context, [](void * p, int32_t layer, int32_t expert) {
+            return int(static_cast<const sink_cache *>(p)->holds(layer, expert)); }, &cache);
+    }
+    void set_miss_cost(double ram_us, double drive_us) {
+        if (context && policy_api && decode && (ram_us > 0 || drive_us > 0)) { policy_api->set_miss_cost(context, ram_us, drive_us); }
     }
     // The GPU can compute a decode expert from host memory in this layer (in place, or after a copy: costs2 says).
     bool host_ready() {
@@ -458,7 +459,6 @@ struct sink_vram {
         if (!decode) { return; }
         if (deferred_upload) { retain_deferred(cache, source); }
         release_ram_batch(cache);
-        drop_ready(cache,source);
         if (deferred_upload) { collect_deferred(cache, KIMI_VRAM_COLLECT_NONE); }
     }
     // The layer's grouped prefill on the tier: every format the tier has a lane for (it initializes the format on a cold
@@ -796,20 +796,17 @@ struct sink_vram {
         }
         return true;
     }
-    // Publishes completed deferred uploads, releases their RAM leases and, when exclusive, drops the RAM copy.
+    // Publishes completed deferred uploads and releases their RAM leases; the RAM copies stay (backups).
     void collect_deferred(sink_cache & cache, int32_t wait_layer) {
         if (!deferred_upload || !context) { return; }
         try {
             kimi_vram_request done[16] = {};
             int32_t aborted[16] = {};
-            std::vector<kimi_vram_request> keys;
-            std::vector<sink_request> sources;
             int count = 0;
             do {
                 char error[512] = {};
                 check(deferred_api->collect(context, wait_layer, done, aborted, 16, &count, error, sizeof(error)), error);
                 wait_layer = -2;
-                keys.clear(); sources.clear();
                 for (int k = 0; k < count; ++k) {
                     const auto it = std::find_if(deferred.begin(), deferred.end(),
                         [&](const deferred_source & d) { return same_key(d.key, done[k]); });
@@ -820,29 +817,13 @@ struct sink_vram {
                     cache.release_lease(it->lease);
                     // An aborted upload's slot went with a reclaimed block: the RAM copy stays the only one.
                     if (aborted[k]) { ++deferred_aborted; }
-                    else if (exclusive && decode && have_token) { keys.push_back(it->key); sources.push_back(it->source); }
                     deferred.erase(it);
                 }
-                if (!keys.empty()) { drop_collected(cache, keys, sources); }
             } while (count == 16);
         } catch (...) {
             abandon_deferred(cache);
             throw;
         }
-    }
-    void drop_collected(sink_cache & cache, const std::vector<kimi_vram_request> & keys, const std::vector<sink_request> & sources) {
-        char error[512] = {};
-        int ready[16] = {}; kimi_vram_ready_lease lease = {};
-        int rc = residency->acquire(context, epoch, keys.data(), int(keys.size()), &lease, ready, error, sizeof(error));
-        check(rc, error);
-        rc = residency->validate(context, &lease, error, sizeof(error)); check(rc, error);
-        for (size_t i = 0; i < keys.size(); ++i) {
-            if (!ready[i]) { continue; }
-            ++ready_confirmations;
-            const int dropped = cache.drop_duplicate(keys[i].layer, sources[i]);
-            ram_drops += dropped > 0; ram_drop_blocked += dropped < 0;
-        }
-        rc = residency->release(context, &lease, error, sizeof(error)); check(rc, error);
     }
     // After a failed collect: let every copy finish (a failed tier has already drained), then return the leases.
     void abandon_deferred(sink_cache & cache) {
@@ -864,70 +845,6 @@ struct sink_vram {
     void release_ram_batch(sink_cache & cache) {
         for (int index : ram_leases) { cache.release_lease(index); }
         ram_leases.clear();
-    }
-    // At a decode token's begin, with no layer live: the RAM copies of experts the tier holds ready go, so that an
-    // expert is cached once. A layer's finish drops a copy as its upload lands or its expert is a tier hit (drop_ready);
-    // a copy an executor still held then, and one a prefill seeded into the tier (published at this begin), are found
-    // here. A copy an upload still reads stays until the upload lands: the tier does not hold that one ready yet.
-    void drop_held(sink_cache & cache) {
-        if (!exclusive || !decode || !context || !residency || !cache.arena) { return; }
-        std::vector<int32_t> ids;
-        std::vector<size_t> at;
-        std::vector<uint8_t> held;
-        std::vector<kimi_vram_request> keys;
-        std::vector<size_t> copies;
-        for (size_t li = 0; li < cache.layers.size(); ++li) {
-            const auto & l = cache.layers[li];
-            ids.clear(); at.clear();
-            for (size_t i = l.begin; i < l.begin + l.count && i < cache.entries.size(); ++i) {
-                const auto & e = cache.entries[i];
-                if (e.enabled && e.valid && e.layer_index == li && e.id >= 0) { ids.push_back(e.id); at.push_back(i); }
-            }
-            if (ids.empty()) { continue; }
-            held.assign(ids.size(), 0);
-            residency->held(context, l.id, ids.data(), int(ids.size()), held.data());
-            keys.clear(); copies.clear();
-            for (size_t k = 0; k < ids.size(); ++k) {
-                if (!held[k]) { continue; }
-                kimi_vram_request r = {};
-                r.layer = l.id; r.expert = ids[k]; r.weight = 1.0f;
-                for (int role = 0; role < 3; ++role) {
-                    const auto & s = cache.entries[at[k]].source[role];
-                    r.role[role] = { s.device, s.inode, s.size, s.offset, s.bytes, s.mtime_s, s.mtime_ns, s.ctime_s, s.ctime_ns, s.inode_hi };
-                }
-                keys.push_back(r); copies.push_back(at[k]);
-            }
-            for (size_t first = 0; first < keys.size(); first += 16) {
-                const int n = int(std::min<size_t>(16, keys.size() - first));
-                char error[512] = {};
-                int ready[16] = {};
-                kimi_vram_ready_lease lease = {};
-                check(residency->acquire(context, epoch, keys.data() + first, n, &lease, ready, error, sizeof(error)), error);
-                check(residency->validate(context, &lease, error, sizeof(error)), error);
-                for (int k = 0; k < n; ++k) {
-                    if (!ready[k]) { continue; }
-                    ++ready_confirmations;
-                    const int dropped = cache.drop_entry(copies[first + size_t(k)]);
-                    ram_swept += dropped > 0; ram_drop_blocked += dropped < 0;
-                }
-                check(residency->release(context, &lease, error, sizeof(error)), error);
-            }
-        }
-    }
-    void drop_ready(sink_cache & cache,const std::vector<sink_request> & source) {
-        if (!exclusive || source.empty()) { return; }
-        char error[512]={};
-        int ready[16] = {}; kimi_vram_ready_lease lease = {};
-        int rc = residency->acquire(context, epoch, requests.data(), int(requests.size()), &lease, ready, error, sizeof(error));
-        check(rc, error);
-        rc = residency->validate(context, &lease, error, sizeof(error)); check(rc, error);
-        for (size_t i = 0; i < source.size(); ++i) {
-            if (!ready[i]) { continue; }
-            ++ready_confirmations;
-            const int dropped = cache.drop_duplicate(requests[i].layer, source[i]);
-            ram_drops += dropped > 0; ram_drop_blocked += dropped < 0;
-        }
-        rc = residency->release(context, &lease, error, sizeof(error)); check(rc, error);
     }
     void cancel() {
         if (!context) { return; }

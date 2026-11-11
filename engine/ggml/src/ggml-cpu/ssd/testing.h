@@ -32,7 +32,7 @@ struct execution_policy {
     size_t cache_prefill_slots = 0;
     std::map<int32_t, size_t> cache_layer_quotas;
     uint64_t vram_budget = 0;
-    bool vram_async = false, vram_exclusive = false, vram_deferred = false, vram_prefill = false;
+    bool vram_async = false, vram_deferred = false, vram_prefill = false;
     ssd::gpu::testing::tier_options tier;
     std::map<std::string, double> place_costs;
 };

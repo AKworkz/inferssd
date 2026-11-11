@@ -228,32 +228,32 @@ int main() {
                 t.slot_base(1)==t.arena+stride,"non-global path no longer uses its single arena");
     }
 
-    // Admissions are priced from the second decode token: the tier measures an upload when it gets its storage and
-    // the miss over the first token, not from one layer (the first here at 5 times the others). Until then the fixed
-    // minimum count (2.5 here) decides. From the second token a free slot follows the price, not the minimum count,
-    // and one expensive layer does not make the upload look cheap. In a table two tokens old one selection is a
-    // count of 2 over its memory (half-life 2), worth 2.1 hits by the prior: a count-1 miss takes a free slot where
-    // an upload costs 0.3 misses (a DGX Spark) and 2.1 (an RTX 5060 Ti) alike, and not where it costs 4.
+    // Replacements are priced from the second decode token, by the costs the sink reports for each layer of the first
+    // (a use from the RAM cache, one from the drive) against the resident cost. Until then the fixed minimum count
+    // (2.5 here) decides. From the second token a free slot takes a count-1 miss where a RAM hit costs more than a
+    // resident expert, and none where it costs less; one layer whose drive reads cost 5 times the others' weighs little.
     inputs.set("tier.global", "1");
     inputs.set("tier.policy", "count_decay2");
     inputs.set("tier.min_count", "2.5");
-    for (const double upload_misses : {0.3, 2.1, 4.0}) {
+    for (const double ram_over_hit : {4.0, 0.5}) {
         tier t(20*stride, inputs.tier_policy());int slot=-1;
         auto r=key;
         t.begin(21,1,true);
+        const double hit=100,drive=2000;
         for (int layer = 1; layer <= 40; ++layer) {
             r.layer=layer;lifecycle_prepare(t,&r,1,&slot);
-            require(t.upload_us_per_expert>0 && !t.adaptive_admission && t.table->admissions[0]<0,
-                    "the first decode token was priced, or the tier did not measure an upload first");
+            require(!t.adaptive_admission && t.table->admissions[0]<0,"the first decode token was priced");
             t.finish(output.data(),256);
-            const double miss=t.upload_us_per_expert/upload_misses;
-            policy_set_miss_cost(&t,layer==1?5*miss:miss);
+            policy_set_miss_cost(&t,ram_over_hit*hit,layer==1?5*drive:drive);
         }
+        {std::lock_guard<std::mutex> lock(t.mutex);t.resident_us_per_expert=hit;}
         t.begin(21,2,true);
-        require(t.adaptive_admission && t.admission_updates==1 && std::fabs(t.table->admission_hits/upload_misses-1)<0.1,
-                "the second decode token was not priced from the first token's misses");
+        require(t.adaptive_admission && t.admission_updates==1 && t.table->candidate_saving==t.table->ram_saving &&
+                std::fabs(t.table->ram_saving-std::max(0.0,(ram_over_hit-1)*hit))<1e-6 &&
+                std::fabs(t.table->drive_saving/(drive-hit)-1)<0.1,
+                "the second decode token was not priced from the first token's costs");
         r.layer=1;r.expert=8;lifecycle_prepare(t,&r,1,&slot);
-        require(upload_misses<3?t.table->admissions[0]>=0:t.table->admissions[0]<0,
+        require(ram_over_hit>1?t.table->admissions[0]>=0:t.table->admissions[0]<0,
                 "a free slot did not follow the priced rule in the second decode token");
         t.finish(output.data(),256);
     }

@@ -82,9 +82,10 @@ const ssd::gpu::provider_v1 * stand_in_provider() {
         [](void *, double * resident, double * hosted) { *resident = *hosted = 0; },
         [](void *, const void *, size_t, char *, size_t) { return 0; }, [](void *, const void *, char *, size_t) { return 0; },
         [](void *, kimi_vram_host_costs * costs) { *costs = {}; } };
-    static const kimi_vram_policy_api policy = { 4, sizeof(kimi_vram_policy_api), [](void *, double) {},
+    static const kimi_vram_policy_api policy = { 5, sizeof(kimi_vram_policy_api), [](void *, double, double) {},
         [](void *, uint64_t) {}, [](void *, uint64_t) {}, [](void *, uint64_t) { return 0; },
-        [](void *) { return uint64_t(0); }, tier_place };
+        [](void *) { return uint64_t(0); }, tier_place,
+        [](void *, int (*)(void *, int32_t, int32_t), void *) {} };
     static const ssd::gpu::settings_api settings = {};
     static const ssd::gpu::testing::api testing = { 3, sizeof(ssd::gpu::testing::api),
         [](uint64_t, const ssd::gpu::testing::tier_options *, char *, size_t) noexcept -> void * {
@@ -118,7 +119,7 @@ int main(int argc, char ** argv) {
             { "cache_policy", "lru" }, { "cache_allocation", "uniform" },
             { "read_fixed", "0" }, { "profile", "0" },
             { "prefetch_depth", "2" }, { "vram_budget", "1" },
-            { "vram_exclusive", "0" }, { "vram_async", "0" },
+            { "vram_async", "0" },
             { "vram_deferred", "0" }, { "vram_prefill", "0" } }) {
         require(inputs.set(kv.first, kv.second) == 0, "set prefetch tier test environment");
     }

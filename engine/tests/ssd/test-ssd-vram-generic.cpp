@@ -56,7 +56,6 @@ void run_shape(fixture_inputs & inputs, int latent, int hidden, int experts, mod
 
     inputs.set("vram_budget", "0");
     set_switch(inputs, "tier.global", false);
-    set_switch(inputs, "vram_exclusive", false);
     set_switch(inputs, "vram_async", false);
     set_switch(inputs, "vram_deferred", false);
     set_switch(inputs, "early_up_gate", false);
@@ -67,7 +66,6 @@ void run_shape(fixture_inputs & inputs, int latent, int hidden, int experts, mod
     const uint64_t vram_bytes = selected.production ? uint64_t(2 * experts) * unit : 2 * unit;
     inputs.set("vram_budget", std::to_string(vram_bytes).c_str());
     set_switch(inputs, "tier.global", selected.production);
-    set_switch(inputs, "vram_exclusive", selected.production);
     set_switch(inputs, "vram_async", selected.production);
     set_switch(inputs, "vram_deferred", selected.production);
     set_switch(inputs, "tier.keep_across_requests", true);

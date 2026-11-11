@@ -38,7 +38,7 @@ void run_case(fixture_inputs & inputs, ggml_type type, int tokens, int activatio
     inputs.set("ready_first", "1");
     inputs.set("tier.keep_across_requests", "1");
     inputs.set("tier.min_count", "0");
-    for (const char * key : {"tier.global", "vram_exclusive",
+    for (const char * key : {"tier.global",
             "vram_async", "vram_deferred",
             "tier.elastic", "early_up_gate",
             "role_major", "nonblocking_down_sched"}) {
@@ -111,9 +111,9 @@ void run_case(fixture_inputs & inputs, ggml_type type, int tokens, int activatio
 // An SSD-sink prefill seeds the tier's empty slots with the experts its CPU computes, and decode then reads them. The
 // seeded tier's decode admits nothing, so only the seeds can put the experts on the GPU for a later pass, whose output
 // matches that of a tier which took the same experts by decode admission: the same kernels over the same bytes.
-// exclusive: the experts reach the pass from the RAM cache (decode admits them there, the tier does not), the pass
-// seeds the tier from those copies, and the next decode token's begin drops the RAM copies the tier then holds.
-void run_seed_case(fixture_inputs & inputs, ggml_type type, int tokens, int activation_kind, bool exclusive = false) {
+// retained: the experts reach the pass from a retained RAM cache (decode admits them there, the tier does not), the
+// pass seeds the tier from those copies, and the RAM copies stay, backups the cache has room for.
+void run_seed_case(fixture_inputs & inputs, ggml_type type, int tokens, int activation_kind, bool retained = false) {
     fixture f; f.type = f.down_type = type;
     f.latent = 512; f.hidden = 256; f.experts = 4;
     make_synthetic(f, 20261110);
@@ -127,16 +127,16 @@ void run_seed_case(fixture_inputs & inputs, ggml_type type, int tokens, int acti
     inputs.set("tier.adaptive_admission", "0");
     inputs.set("tier.min_count", "4");
     inputs.set("tier.global", "1");
-    for (const char * key : {"vram_exclusive", "vram_async", "vram_deferred", "tier.elastic", "early_up_gate",
+    for (const char * key : {"vram_async", "vram_deferred", "tier.elastic", "early_up_gate",
             "role_major", "nonblocking_down_sched"}) {
         inputs.set(key, "0");
     }
-    // the production's exclusive caching, and a retained RAM cache a prefill reads
-    std::vector<std::unique_ptr<scoped_fixture_input>> exclusive_inputs;
-    if (exclusive) {
+    // a retained RAM cache a prefill reads
+    std::vector<std::unique_ptr<scoped_fixture_input>> retained_inputs;
+    if (retained) {
         for (const auto & kv : std::vector<std::pair<const char *, const char *>>{
-                {"vram_exclusive", "1"}, {"cache_policy", "lru"}, {"cache_keep", "1"}, {"cache_prefill_read", "1"}}) {
-            exclusive_inputs.push_back(std::make_unique<scoped_fixture_input>(inputs, kv.first, kv.second));
+                {"cache_policy", "lru"}, {"cache_keep", "1"}, {"cache_prefill_read", "1"}}) {
+            retained_inputs.push_back(std::make_unique<scoped_fixture_input>(inputs, kv.first, kv.second));
         }
     }
     tensors meta(f, 1);
@@ -172,23 +172,26 @@ void run_seed_case(fixture_inputs & inputs, ggml_type type, int tokens, int acti
     // Seeded: a decode token gives the tier its format and admits nothing; a pass computes all four experts on the CPU
     // and seeds them from its payloads; decode reads them.
     auto seeded = make_sink(inputs, f, 4, 2);
-    configure_cache(seeded.get(), exclusive ? 8 * unit : 0, {1}, 4);
+    configure_cache(seeded.get(), retained ? 8 * unit : 0, {1}, 4);
     prefill_ptr seeded_prefill(kimi_cpu_prefill_create(seeded.get(), error, sizeof(error)), kimi_cpu_prefill_destroy);
     require(bool(seeded_prefill), error);
-    decode(seeded.get(), 0, exclusive ? 4 : 1);
-    if (exclusive) {
+    decode(seeded.get(), 0, retained ? 4 : 1);
+    uint64_t held_bytes = 0;
+    if (retained) {
         const auto held = cache_snapshot(seeded.get());
         require(held.valid_bytes && held.valid_bytes == held.enabled_bytes,
             "decode did not leave the four experts in the RAM cache's four slots");
+        held_bytes = held.valid_bytes;
     }
     std::vector<float> cpu_output, seeded_output, admitted_output;
     auto stats = run(seeded_prefill.get(), cpu_output);
-    require(stats.gpu_experts == 0 && stats.ssd_experts + stats.ram_experts == 4 && (!exclusive || stats.ram_experts == 4),
+    require(stats.gpu_experts == 0 && stats.ssd_experts + stats.ram_experts == 4 && (!retained || stats.ram_experts == 4),
         "the seeding pass must compute every expert on the CPU");
     require(kimi_cpu_sink_vram_phase_complete(seeded.get(), true, error, sizeof(error)), error);
     decode(seeded.get(), 0, 4);
-    if (exclusive) {
-        require(cache_snapshot(seeded.get()).valid_bytes == 0, "the RAM cache kept copies of the experts seeded into the tier");
+    if (retained) {
+        require(cache_snapshot(seeded.get()).valid_bytes == held_bytes,
+            "the RAM cache dropped its copies of the experts seeded into the tier, which it had room for");
     }
     stats = run(seeded_prefill.get(), seeded_output);
     require(stats.gpu_experts == 4 && stats.ssd_experts == 0, "the seeded experts must serve the next pass on the GPU");
@@ -205,8 +208,8 @@ void run_seed_case(fixture_inputs & inputs, ggml_type type, int tokens, int acti
     const bool same = std::memcmp(seeded_output.data(), admitted_output.data(), seeded_output.size() * sizeof(float)) == 0;
     ++cases;
     if (!same) { ++failures; }
-    std::printf("PREFILL_SEED type=%s tokens=%d exclusive=%d seeded_vs_admitted=%s\n", ggml_type_name(type), tokens,
-        int(exclusive), same ? "PASS" : "FAIL");
+    std::printf("PREFILL_SEED type=%s tokens=%d retained=%d seeded_vs_admitted=%s\n", ggml_type_name(type), tokens,
+        int(retained), same ? "PASS" : "FAIL");
     std::fflush(stdout);
 }
 
@@ -233,7 +236,7 @@ void run_lookahead_case(fixture_inputs & inputs, int tokens) {
     inputs.set("tier.keep_across_requests", "1");
     inputs.set("tier.policy", "lru");
     inputs.set("tier.min_count", "0");
-    for (const char * key : {"tier.global", "vram_exclusive", "vram_async", "vram_deferred", "tier.elastic",
+    for (const char * key : {"tier.global", "vram_async", "vram_deferred", "tier.elastic",
             "early_up_gate", "role_major", "nonblocking_down_sched"}) {
         inputs.set(key, "0");
     }

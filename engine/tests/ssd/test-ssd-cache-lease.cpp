@@ -22,16 +22,8 @@ int main() {
         r.role[role] = {fd,uint64_t(role)*4096,4096}; e.source[role] = sink_cache::key(r.role[role]);
     }
     cache.stats.valid_bytes = cache.stats.committed_bytes = cache.stride;
-    cache.acquire_lease(0,r); require(cache.drop_duplicate(1,r) == -1);
-    e.protected_now = true; cache.release_lease(0); require(!e.protected_now);
-    e.reserved = true; require(cache.drop_duplicate(1,r) == -1); e.reserved = false;
-    e.protected_now = true; require(cache.drop_duplicate(1,r) == -1); e.protected_now = false;
-    auto stale = r; stale.role[0].offset += 4096;
-    require(cache.drop_duplicate(1,stale) == 0 && e.valid);
-    require(cache.drop_duplicate(2,r) == 0 && e.valid);
-    require(cache.drop_duplicate(1,r) == 1 && !e.valid && e.resident);
-    require(cache.stats.valid_bytes == 0 && cache.stats.committed_bytes == cache.stride);
-    require(cache.drop_duplicate(1,r) == 0);
+    cache.acquire_lease(0,r); require(e.leases == 1);
+    e.protected_now = true; cache.release_lease(0); require(!e.protected_now && !e.leases && e.valid);
     {
         // A read-ahead slot comes from an entry its pass is not likely to use (keep), the older one first otherwise;
         // a load-time preload takes only an empty slot, and none while decode runs.
@@ -57,6 +49,15 @@ int main() {
         c.active = true; require(c.preload_reserve(1, 11, n.role) == -1); c.active = false;
         require(c.preload_reserve(1, 11, n.role) == 0 && c.entries[0].inflight);
         c.prefetch_done(0, c.generation, false);
+        // A copy of an expert the GPU tier holds (tier_held) is a backup: a read-ahead takes its slot before any other
+        // entry's, even one older, and even where the pass is likely to use the expert (the tier serves it).
+        c.entries[0].id = 5; c.entries[0].valid = true; c.entries[0].last_touch = 1; c.stats.valid_bytes += c.stride;
+        c.entries[1].last_touch = 2;
+        c.tier_held = [](void *, int32_t layer, const int32_t * experts, int count, uint8_t * held) {
+            for (int i = 0; i < count; ++i) { held[i] = layer == 1 && experts[i] == 9; } };
+        keep[9] = 1;
+        require(c.prefetch_reserve(1, 12, n.role, &keep) == 1 && c.entries[0].valid && c.entries[1].inflight);
+        c.prefetch_done(1, c.generation, false);
         c.arena = nullptr; // the test's own buffer
     }
     ssd::platform::close_fd(fd); test_resources::remove_file(path); std::printf("CACHE_LEASE_PASS assertions=%d payload_allocated=0\n",checks); return 0;

@@ -190,6 +190,34 @@ struct expert_cache {
     void * before_release_arg = nullptr;
     void (*before_unmap)(void *) = nullptr; // waits for prefetch reads into the arena
     void * before_unmap_arg = nullptr;
+    // The GPU tier, through the sink: which of a layer's experts it holds (none without a tier). A RAM copy of an
+    // expert the tier holds is a backup: the tier serves the expert's uses, and the copy serves them only after the
+    // tier gives the expert up. Nothing drops the copy when the tier takes the expert: where the cache has room, both
+    // copies stay, and an expert the tier gives up is still a RAM hit; where it has none, a backup is the first entry
+    // an allocation takes after an empty slot (decode's admission, a prefetch, a read-ahead, a borrow), whatever its
+    // count, so the cache then holds each expert once. A model whose experts the cache holds, and one whose experts
+    // exceed it, take the same rule.
+    void (*tier_held)(void *, int32_t layer_id, const int32_t * experts, int count, uint8_t * held) = nullptr;
+    void * tier_held_arg = nullptr;
+    // backup_slots[k]: slot l.begin + k of the layer find_backups last looked at holds a backup.
+    std::vector<uint8_t> backup_slots, backup_held;
+    std::vector<int32_t> backup_ids;
+    std::vector<size_t> backup_at;
+    void find_backups(const layer & l, size_t layer_index) {
+        backup_slots.assign(l.count, 0);
+        if (!tier_held) { return; }
+        backup_ids.clear(); backup_at.clear();
+        for (size_t i = l.begin; i < l.begin + l.count; ++i) {
+            const auto & e = entries[i];
+            if (e.enabled && e.valid && e.id >= 0 && e.layer_index == layer_index) {
+                backup_ids.push_back(e.id); backup_at.push_back(i - l.begin);
+            }
+        }
+        if (backup_ids.empty()) { return; }
+        backup_held.assign(backup_ids.size(), 0);
+        tier_held(tier_held_arg, l.id, backup_ids.data(), int(backup_ids.size()), backup_held.data());
+        for (size_t k = 0; k < backup_ids.size(); ++k) { backup_slots[backup_at[k]] = backup_held[k] != 0; }
+    }
     // Before slots' pages are discarded or the arena released: entries [first, first + count). The decode
     // registrar's page-locks must go first, or the device would keep the old pages.
     void (*before_discard)(void *, size_t first, size_t count) = nullptr;
@@ -862,6 +890,7 @@ struct expert_cache {
                 current.cache_hit_bytes = add(current.cache_hit_bytes, stride);
             }
         }
+        find_backups(l, layer_index);
         for (auto & r : requests) {
             if (r.cache_hit >= 0) { continue; }
             const bool already_reserved = std::any_of(entries.begin() + l.begin, entries.begin() + l.begin + l.count,
@@ -871,15 +900,17 @@ struct expert_cache {
                 [](const entry & e) { return e.enabled && !e.valid && !e.reserved && !e.inflight; });
             if (free == entries.begin() + l.begin + l.count && policy != window) {
                 auto frequency = [&](const entry & e) { return score(e.layer_index, e.id); };
+                bool backup = false; // a backup goes before any other entry, whatever the counts
                 for (auto candidate = entries.begin() + l.begin; candidate != entries.begin() + l.begin + l.count; ++candidate) {
                     if (!candidate->enabled || candidate->protected_now || candidate->reserved || candidate->inflight) { continue; }
-                    if (free == entries.begin() + l.begin + l.count ||
-                            (policy != lru && frequency(*candidate) < frequency(*free)) ||
-                            ((policy == lru || frequency(*candidate) == frequency(*free)) && candidate->last_touch < free->last_touch)) {
-                        free = candidate;
+                    const bool b = backup_slots[size_t(candidate - (entries.begin() + l.begin))] != 0;
+                    if (free == entries.begin() + l.begin + l.count || (b && !backup) || (b == backup &&
+                            ((policy != lru && frequency(*candidate) < frequency(*free)) ||
+                            ((policy == lru || frequency(*candidate) == frequency(*free)) && candidate->last_touch < free->last_touch)))) {
+                        free = candidate; backup = b;
                     }
                 }
-                if (free != entries.begin() + l.begin + l.count && policy != lru && score(layer_index, r.id) < frequency(*free)) {
+                if (free != entries.begin() + l.begin + l.count && !backup && policy != lru && score(layer_index, r.id) < frequency(*free)) {
                     free = entries.begin() + l.begin + l.count;
                 }
                 if (free != entries.begin() + l.begin + l.count) {
@@ -1156,17 +1187,23 @@ struct expert_cache {
         for (int role = 0; role < 3; ++role) { if (roles[role].nbytes > role_bytes[role]) { return -1; } }
         source_key keys[3];
         for (int role = 0; role < 3; ++role) { keys[role] = key(roles[role]); }
-        int victim = -1;
+        // an empty slot, else a backup (even of an expert `keep` names: the tier serves that one), else the coldest
+        if (empty_only) { backup_slots.assign(found->count, 0); } else { find_backups(*found, layer_index); }
+        int victim = -1, victim_rank = 3;
         for (size_t i = found->begin; i < found->begin + found->count; ++i) {
             const auto & e = entries[i];
             if (!e.enabled) { continue; }
             if ((e.valid || e.reserved || e.inflight) && e.layer_index == layer_index && e.id == expert &&
                     e.source[0] == keys[0] && e.source[1] == keys[1] && e.source[2] == keys[2]) { return -2; }
             if (!e.resident || e.reserved || e.inflight || e.leases || e.protected_now || e.lent) { continue; }
-            if (e.valid && (empty_only || (keep && e.id >= 0 && size_t(e.id) < keep->size() && (*keep)[size_t(e.id)]))) {
+            const bool backup = backup_slots[i - found->begin] != 0;
+            if (e.valid && !backup && (empty_only || (keep && e.id >= 0 && size_t(e.id) < keep->size() && (*keep)[size_t(e.id)]))) {
                 continue;
             }
-            if (victim < 0 || (entries[size_t(victim)].valid && (!e.valid || colder(i, size_t(victim))))) { victim = int(i); }
+            const int rank = !e.valid ? 0 : backup ? 1 : 2;
+            if (victim < 0 || rank < victim_rank || (rank == victim_rank && rank > 0 && colder(i, size_t(victim)))) {
+                victim = int(i); victim_rank = rank;
+            }
         }
         for (const size_t i : lent) {
             const auto & e = entries[i];
@@ -1194,13 +1231,17 @@ struct expert_cache {
         const auto found = std::find_if(layers.begin(), layers.end(), [&](const layer & l) { return l.id == layer_id; });
         if (found == layers.end()) { return -1; }
         for (int role = 0; role < 3; ++role) { if (roles[role].nbytes > role_bytes[role]) { return -1; } }
-        int victim = -1;
+        int victim = -1, victim_rank = 3; // an empty slot, else a backup, else the coldest
         for (const auto & l : layers) {
             if (l.id >= finished_below || l.id == layer_id) { continue; }
+            find_backups(l, size_t(&l - layers.data()));
             for (size_t i = l.begin; i < l.begin + l.count; ++i) {
                 const auto & e = entries[i];
                 if (!e.enabled || !e.resident || e.reserved || e.inflight || e.leases || e.protected_now || e.lent) { continue; }
-                if (victim < 0 || (entries[size_t(victim)].valid && (!e.valid || colder(i, size_t(victim))))) { victim = int(i); }
+                const int rank = !e.valid ? 0 : backup_slots[i - l.begin] ? 1 : 2;
+                if (victim < 0 || rank < victim_rank || (rank == victim_rank && rank > 0 && colder(i, size_t(victim)))) {
+                    victim = int(i); victim_rank = rank;
+                }
             }
         }
         if (victim < 0) { return -1; }
@@ -1332,31 +1373,6 @@ struct expert_cache {
         auto & e = entries.at(size_t(index));
         if (!e.leases || e.reserved) { throw std::runtime_error("CPU sink cache lease released before completion"); }
         if (!--e.leases) { e.protected_now = false; }
-    }
-    // Called only while the other tier holds a versioned ready lease. Return
-    // -1 if an executor still owns this RAM copy, 0 if absent, 1 if dropped.
-    int drop_duplicate(int layer_id, const expert_request & request) {
-        if (entries.empty()) { return 0; } // RAM admission may have paused.
-        const auto found = std::find_if(layers.begin(), layers.end(), [&](const layer & l) { return l.id == layer_id; });
-        if (found == layers.end()) { return 0; }
-        const size_t layer_index = size_t(found - layers.begin());
-        for (size_t i = found->begin; i < found->begin + found->count; ++i) {
-            auto & e = entries[i];
-            if (!e.valid || e.id != request.id || e.layer_index != layer_index || !matches(e, request)) { continue; }
-            return drop_entry(i);
-        }
-        return 0;
-    }
-    // Entry `index`'s copy, which the other tier holds ready too: 1 dropped, -1 an executor still owns it, 0 not valid.
-    int drop_entry(size_t index) {
-        auto & e = entries.at(index);
-        if (!e.valid) { return 0; }
-        if (e.leases || e.protected_now || e.reserved || e.inflight) { return -1; }
-        e.valid = false;
-        stats.valid_bytes -= stride;
-        // Keep resident and committed/page-table accounting: the physical
-        // slot is reused in place, without a second payload allocation.
-        return 1;
     }
 };
 

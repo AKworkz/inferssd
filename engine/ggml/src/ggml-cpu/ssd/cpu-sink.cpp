@@ -888,6 +888,12 @@ struct kimi_cpu_sink {
             throw std::runtime_error("DYNAMIC_ROWS and ROW_WEIGHTS are mutually exclusive row schedulers");
         }
         vram.initialize(ready_first, configuration);
+        if (vram.context && !vram.prefill_only) {
+            cache.tier_held = [](void * p, int32_t layer, const int32_t * experts, int count, uint8_t * out) {
+                static_cast<const sink_vram *>(p)->held(layer, experts, count, out); };
+            cache.tier_held_arg = &vram;
+            vram.set_ram_holds(cache);
+        }
         refresh_floor("init");
         if (vram.deferred_upload) {
             cache.before_release = [](void * p) { static_cast<sink_vram *>(p)->wait_deferred(); };
@@ -1382,6 +1388,7 @@ struct kimi_cpu_sink {
         }
         cache.before_unmap = nullptr;
         cache.before_release = nullptr; // vram is destroyed before cache
+        cache.tier_held = nullptr;
         stop_threads(); // the I/O thread stops a read-ahead and waits for its reads before it returns
         ring_unlock(); // the tier is still here, and the ring's buffers too
         lookahead_summary();
@@ -2220,8 +2227,8 @@ struct kimi_cpu_sink {
     // In a decode layer's wait for reads (io_mutex held): the reads left, at the drive's decode rate, as the shadow a
     // registration may take (kimi_host_lock::offer; before the first registration its price is one slot at 13.6 GB/s).
     // Only wanted slots: a page-locked slot's admission upload is a DMA copy, cheaper, and the tier's admission rule
-    // then admits more; with every slot page-locked an RTX 5090 admitted 15% more, evicted 25% more and, the RAM
-    // copies of admitted experts dropped (exclusive), read 2.5% more experts from the drive.
+    // then admits more; with every slot page-locked an RTX 5090 admitted 15% more, evicted 25% more and read 2.5% more
+    // experts from the drive (when the RAM cache dropped its copy of an expert the tier took).
     void host_lock_in_shadow() {
         host_lock_decide();
         if (!host_lock.enabled || !(learning.read_bytes_per_us > 0)) { return; }
@@ -2247,8 +2254,9 @@ struct kimi_cpu_sink {
         }
         cache.before_discard = nullptr;
     }
-    // What an expert the GPU tier does not hold costs this layer: computed by the faster processor that can
-    // take it, and for an SSD miss no less than its share of the layer's reads. Feeds the tier's admission.
+    // What a use of an expert the GPU tier does not hold costs this layer, by where it comes from: one from the RAM
+    // cache its compute by the faster processor that can take it, one from the drive no less than its share of the
+    // layer's reads. Prices the tier's replacements; a kind the layer did not have is not reported.
     void report_miss_cost() {
         size_t ram = 0, ssd = 0;
         for (const auto & r : requests) {
@@ -2262,8 +2270,8 @@ struct kimi_cpu_sink {
         if (vram.host_ready()) { vram.host_api->costs2(vram.context, &costs); }
         double resident = 0, host = 0;
         if (costs.in_place) { vram.host_costs(resident, host); }
-        vram.set_miss_cost(ssd::place::miss_cost(ram, ssd, learning.cpu_expert_us, current.io_us,
-            costs.in_place != 0, host));
+        const auto cost = ssd::place::miss_costs(ssd, learning.cpu_expert_us, current.io_us, costs.in_place != 0, host);
+        vram.set_miss_cost(ram ? cost.ram_us : 0.0, ssd ? cost.drive_us : 0.0);
     }
     // `last`: the run dispatches no phase after this one, so its participants next wait for the close.
     void compute_phase(bool is_down, bool last = false) {
@@ -4321,7 +4329,6 @@ static bool sink_phase_begin(struct kimi_cpu_sink * sink, uint64_t epoch, uint64
         sink->file_identities.clear();
         sink->vram.begin(epoch, token, decode, sink->cache, request);
         sink->cache.begin(epoch, token, decode);
-        if (decode) { sink->vram.drop_held(sink->cache); }
         sink->begin_margin_interval(decode);
     } catch (const std::exception & e) {
         sink->vram.cancel(); sink->cache.release();

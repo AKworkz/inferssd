@@ -375,10 +375,10 @@ struct kimi_vram_host_api {
     void (*costs2)(void * context, struct kimi_vram_host_costs * costs);
 };
 // Optional extension, the sink's side of the tier's decisions.
-// set_miss_cost: the measured cost of an expert the tier does not hold (microseconds: the slower of its
-// compute and its share of the layer's SSD reads). The tier admits an expert when the hits it can expect to
-// earn are worth more than its upload: selection count > upload / (hits per count x (miss cost - hit
-// cost)), from its own measured upload time and hit history.
+// set_miss_cost (version 5): what a decode layer's use of an expert the tier does not hold costs, in microseconds,
+// by where it comes from: the RAM cache (its compute) and the drive (the slower of its compute and its share of the
+// layer's drive reads); 0 for one the layer did not have. The tier prices its replacements with them
+// (vram_slot_table::candidate_saving).
 // set_host_demand: host memory the sink may still commit (its RAM cache's mapped but not yet resident
 // slots). On unified memory the tier keeps it free, with the host floor, instead of taking it first.
 // set_host_floor: the floor of the sink's host-memory ledger (file reserve + margin + explicit reserves). On
@@ -394,14 +394,18 @@ struct kimi_vram_host_api {
 // calls itself. The tier moves its threads there, or places them there when it starts them; until the first call they
 // keep the CPUs of the thread that started them. The sink calls it at its first layer on the tier and again when the
 // coordinator's CPUs change.
+// set_ram_holds (version 5): the sink's RAM cache, which keeps its copy of an expert the tier takes (a backup it
+// drops first when it needs the slot): holds(arg, layer, expert) is nonzero while it has a copy. The tier asks it on
+// the sink's thread, in a decode layer's prepare, to price a replacement (vram_slot_table::ram_copy).
 struct kimi_vram_policy_api {
-    uint32_t version, size;   // 4
-    void (*set_miss_cost)(void * context, double miss_us);
+    uint32_t version, size;   // 5
+    void (*set_miss_cost)(void * context, double ram_us, double drive_us);
     void (*set_host_demand)(void * context, uint64_t bytes);
     void (*set_host_floor)(void * context, uint64_t bytes);
     int (*reclaim_host)(void * context, uint64_t bytes);
     uint64_t (*host_bytes)(void * context);
     int (*set_thread_cpus)(void * context, const int * cpus, int count, char * error, size_t error_size);
+    void (*set_ram_holds)(void * context, int (*holds)(void * arg, int32_t layer, int32_t expert), void * arg);
 };
 #ifdef __cplusplus
 extern "C" {
