@@ -128,7 +128,6 @@ def test_recorded_strategy_fills_what_the_user_left_unset(tmp_path):
         "place.costs",
     ]
     # Every pass takes the engine's SSD sink.
-    assert settings.at("prefill.cpu_max_tokens").origin == "default"
     assert any(note.startswith("prefill: the SSD sink for every pass") for note in receipt["notes"])
     assert receipt["chosen"]["threads"] == {"decode": 61, "batch": 60}
     assert receipt["chosen"]["server_args"] == ["--ctx-checkpoints", "1"]

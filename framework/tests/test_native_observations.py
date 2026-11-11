@@ -17,13 +17,6 @@ def events(turns):
         values += [
             {"ev": "ssd.prefill.graph", "requested_tokens": prompt, "configured_max": 128},
             {"ev": "ssd.place.layer", "decode": False, "success": True, "compute_us": 12000},
-            {
-                "ev": "ssd.prefill.copy",
-                "bytes": 1048576,
-                "read_us": 500,
-                "passes": 1,
-                "tokens": prompt,
-            },
         ]
         for i in range(tokens):
             for layer in range(2):
@@ -73,10 +66,6 @@ def test_routes_profiles_and_prefill_graphs(tmp_path):
             "ubatch": 128,
             "cpu_s": 0.012,
             "sink_bytes": 0.0,
-            "graph_bytes": 1048576,
-            "graph_read_us": 500,
-            "graph_passes": 1,
-            "graph_tokens": prompt,
         }
         for prompt in (128, 64)
     ]

@@ -1392,7 +1392,7 @@ struct kimi_cpu_sink {
 
     // On unified memory the floor moves between token boundaries: a prefill refaults file pages (the ledger adds
     // them to its file reserve), and allocations outside the ledger take what the tier left. Decode restores it at
-    // every token boundary, but a prefill on the graph passes no boundary for minutes. Ten times a second the
+    // every token boundary, but a prefill passes no token boundary for minutes. Ten times a second the
     // ledger measures again and, below the floor, the RAM cache's demand and 64 MiB, the tier gives back blocks until
     // MemAvailable keeps the floor, the demand and the tier's low watermark. A sink run in progress keeps run_mutex
     // and is not waited for: the watcher acts between a decode's layers and outside the sink's runs. MemAvailable is

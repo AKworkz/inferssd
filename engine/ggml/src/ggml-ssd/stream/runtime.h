@@ -19,8 +19,6 @@ private:
     int phase_ = 0;
     bool drive_home(const ggml_tensor *) const noexcept;
     bool copy_dense(ggml_backend_t, const ggml_tensor *, ggml_tensor *, const ggml_tensor *, uint64_t) noexcept;
-    int copy_experts(ggml_backend_t, const ggml_tensor *, ggml_tensor *, int64_t, size_t, const int32_t *) noexcept;
-    bool fence(ggml_backend_t) const noexcept;
     bool publish(const char *, uint64_t, uint64_t, uint64_t) noexcept;
 };
 }}

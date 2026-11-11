@@ -8,7 +8,7 @@ preserves its source attribution and license files.
 
 | Integration group | Reason and boundary |
 | --- | --- |
-| ggml scheduler and allocator | Borrowed SSD copy hooks; graph buffer measurement/admission; first touch; backend scratch reservation; a pass that keeps an in-place op with the backend holding its storage. No core implementation is linked into ggml-base. |
+| ggml scheduler and allocator | Borrowed SSD copy hooks for the weights homed on the drive; graph buffer measurement/admission; first touch; backend scratch reservation; a pass that keeps an in-place op with the backend holding its storage. No core implementation is linked into ggml-base. |
 | CPU/CUDA registries | Normal private provider discovery and context-service attachment. CPU and CUDA do not link each other. On Windows the CUDA backend loads the driver's nvcuda.dll on first use, so a CUDA build starts where no NVIDIA driver is. |
 | Vulkan backend | Idle-submit keepalive every 20 ms; source-aware F16 `SET_ROWS` pipelines for F32/F16 destinations and I32/I64 indices, with unsupported conversions rejected. Shared copy shaders retain their F32 source variants. |
 | Backend operation files | New model operations and narrow native kernel entry points stay with their upstream operation/architecture files. Strict MXFP4 math is compiled separately with contraction and FTZ disabled. |
@@ -63,7 +63,7 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `common/speculative.h` | 6 | 0 |
 | `ggml/CMakeLists.txt` | 1 | 0 |
 | `ggml/include/ggml-alloc.h` | 4 | 0 |
-| `ggml/include/ggml-backend.h` | 58 | 0 |
+| `ggml/include/ggml-backend.h` | 46 | 0 |
 | `ggml/include/ggml-cuda.h` | 35 | 0 |
 | `ggml/include/ggml-rpc.h` | 2 | 2 |
 | `ggml/include/ggml.h` | 158 | 1 |
@@ -71,7 +71,7 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `ggml/src/ggml-alloc.c` | 38 | 2 |
 | `ggml/src/ggml-backend-impl.h` | 5 | 0 |
 | `ggml/src/ggml-backend-meta.cpp` | 29 | 1 |
-| `ggml/src/ggml-backend.cpp` | 413 | 64 |
+| `ggml/src/ggml-backend.cpp` | 355 | 16 |
 | `ggml/src/ggml-blas/ggml-blas.cpp` | 1 | 0 |
 | `ggml/src/ggml-cann/ggml-cann.cpp` | 1 | 0 |
 | `ggml/src/ggml-common.h` | 1 | 0 |
@@ -142,8 +142,8 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `src/CMakeLists.txt` | 20 | 0 |
 | `src/llama-arch.cpp` | 168 | 2 |
 | `src/llama-arch.h` | 109 | 2 |
-| `src/llama-context.cpp` | 1320 | 45 |
-| `src/llama-context.h` | 149 | 2 |
+| `src/llama-context.cpp` | 1191 | 46 |
+| `src/llama-context.h` | 100 | 2 |
 | `src/llama-cparams.h` | 9 | 0 |
 | `src/llama-ext.h` | 16 | 0 |
 | `src/llama-graph.cpp` | 747 | 50 |
@@ -188,5 +188,5 @@ InferSSD and upstream documentation, which is not bundled, are not counted.
 | `tools/server/server.cpp` | 1 | 0 |
 | `tools/server/tests/utils.py` | 2 | 2 |
 
-Total: 18083 added, 5725 removed across 156 upstream paths.
+Total: 17835 added, 5678 removed across 156 upstream paths.
 <!-- END UPSTREAM INVENTORY -->

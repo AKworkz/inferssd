@@ -113,7 +113,6 @@ def test_x86_uniform_machine_with_a_discrete_gpu(models):
     assert "4 MiB reads at QD 16" in s.settings["place.costs"].reason
     assert s.server_args == SERVER_ARGS == ("--ctx-checkpoints", "1")
     # Every pass takes the engine's SSD sink, each prompt in one pass.
-    assert "prefill.cpu_max_tokens" not in s.settings
     assert any(note.startswith("prefill: the SSD sink for every pass") for note in s.notes)
     assert s.one_pass
     assert "host.headroom_mib" not in s.settings  # a discrete GPU
@@ -249,7 +248,6 @@ def test_arm_unified_memory(models):
     assert "vram.budget" not in s.settings
     assert any(note.startswith("vram.budget: default auto for ") for note in s.notes)
     assert s.settings["host.headroom_mib"].value_text == "4096"
-    assert "prefill.cpu_max_tokens" not in s.settings
     assert s.one_pass
 
 
@@ -712,7 +710,7 @@ def test_experts_mixing_formats_across_layers_use_the_gpu_tier(tmp_path, experts
     gpu = GPUState(X86_GPU, 30 << 30, 0)
     s = derive(c, mixed, runtime(range(61), [gpu]), "linux", model_drive_key=drive(c))
     assert "vram.budget" not in s.settings
-    assert s.one_pass and "prefill.cpu_max_tokens" not in s.settings
+    assert s.one_pass
 
 
 WINDOWS = "windows-x64-igpu.json"  # 4 + 4 Intel cores with an integrated GPU, one NVMe drive

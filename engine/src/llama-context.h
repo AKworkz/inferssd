@@ -26,27 +26,6 @@ class llama_io_write_i;
 struct llama_memory_i;
 struct llama_memory_context_i;
 
-// The prefill route of one ubatch of n_tokens tokens: the CPU sink's grouped prefill when the sink is on and the ubatch
-// has at most max_tokens tokens, or when the GPU would not take a MUL_MAT_ID of that size off the CPU (the scheduler
-// would compute it from the mmap'd experts on the CPU); the ggml graph on the GPU otherwise, which copies every layer's
-// experts to the device.
-inline bool llama_cpu_sink_prefill_route(bool sink, uint32_t max_tokens, uint32_t n_tokens, bool gpu_offloads) {
-    return sink && (n_tokens <= max_tokens || !gpu_offloads);
-}
-
-// The expert copies of one prefill's graph-route passes (the [moe_prefill_copy] line): begin when the prefill starts,
-// pass for each ubatch on the graph route, end when the prefill ends with the scheduler's counters then.  end returns
-// the line, without a newline, and nothing for a prefill that had no graph-route pass.
-struct llama_prefill_copy_meter {
-    uint32_t passes = 0;
-    uint64_t tokens = 0;
-    ggml_backend_sched_kimi_copy_stats start = {};
-
-    void begin(const ggml_backend_sched_kimi_copy_stats & now) { passes = 0; tokens = 0; start = now; }
-    void pass(uint32_t n_tokens) { ++passes; tokens += n_tokens; }
-    std::string end(const ggml_backend_sched_kimi_copy_stats & now);
-};
-
 // The copies of the weights homed on the drive in one phase of a request (the [dense_stream] line): the prefill from
 // the request's start to its end, the decode from there to the request's end.  begin when the phase starts, add the
 // tokens of each ubatch, end when it ends with the scheduler's counters then.  end returns the line, without a
@@ -61,24 +40,11 @@ struct llama_dense_stream_meter {
     std::string end(const ggml_backend_sched_kimi_copy_stats & now);
 };
 
-// Whether one of the GPU devices gpus would compute a MUL_MAT_ID of n_tokens tokens over each of the expert tensors
-// experts, weights in host memory, instead of the CPU: the scheduler's test for such an op
-// (ggml_backend_sched_backend_id_from_cur), that the device supports it and offloads it, the latter by its batch
-// (ne[2]).  An expert tensor the GPU does not take would be computed from the mmap'd experts on the CPU.
-bool llama_gpu_offloads_mul_mat_id(const std::vector<ggml_backend_dev_t> & gpus,
-        const std::vector<const ggml_tensor *> & experts, int64_t n_expert_used, uint32_t n_tokens);
-
 // The ubatch of a request's prefill graph when a graph of the request's own size, target, does not fit (graphs sized
 // to the request).  Every pass of a smaller ubatch reads its layers' experts again, so the search takes the largest
-// size that fits on a route that can serve the request.  When the target takes the ggml graph: the graph's sizes,
-// those above the threshold that the GPU offloads.  When none of them fits: the sink at the target, since one sink
-// pass reads each expert once and a split reads the union again at the same compute; for that the request's
-// threshold max_sink_tokens is raised to the target.  Then smaller sink sizes.  The search is binary, in steps of
-// the granularity, at least 256 tokens and at most half the target, and ends with one token.
-// sink_route(n, max_sink_tokens): whether a ubatch of n tokens takes the sink at that threshold; reserve(n):
-// reserve the graph of n tokens at the threshold in max_sink_tokens.  Returns the selected ubatch, 0 if none fits.
-uint32_t llama_prefill_ubatch_search(uint32_t target, uint32_t granularity, uint32_t & max_sink_tokens,
-        const std::function<bool(uint32_t, uint32_t)> & sink_route, const std::function<bool(uint32_t)> & reserve);
+// size that fits: binary, in steps of the granularity, at least 256 tokens and at most half the target, and ending
+// with one token.  reserve(n): reserve the graph of n tokens.  Returns the selected ubatch, 0 if none fits.
+uint32_t llama_prefill_ubatch_search(uint32_t target, uint32_t granularity, const std::function<bool(uint32_t)> & reserve);
 
 struct llama_context {
     // init scheduler and compute buffers, reserve worst-case graphs
@@ -105,16 +71,6 @@ struct llama_context {
     // Request-scoped scheduler/cache exchange used by the default-off K3
     // grouped-prefill capacity ladder.
     bool moe_prefill_phase_workspace(bool active, uint32_t requested_tokens, uint32_t prefill_tokens);
-
-    // whether a prefill ubatch of n_tokens runs on the CPU sink (llama_cpu_sink_prefill_route) in this context, at
-    // this request's threshold or at max_tokens
-    bool cpu_sink_prefill_route(uint32_t n_tokens) const;
-    bool cpu_sink_prefill_route(uint32_t n_tokens, uint32_t max_tokens) const;
-    // whether the scheduler would compute a MUL_MAT_ID of n_tokens over the model's expert tensors on a GPU
-    // (llama_gpu_offloads_mul_mat_id)
-    bool gpu_offloads_experts(uint32_t n_tokens) const;
-    // the threshold: GGML_KIMI_CPU_PREFILL_MAX_TOKENS, else GGML_KIMI_CPU_PREFILL (1: every ubatch, 0: none)
-    uint32_t cpu_prefill_max_tokens_get() const { return cpu_prefill_max_tokens; }
 
     // room in host memory for an allocation outside the RAM expert cache (llama_host_reserve)
     bool host_reserve(size_t bytes);
@@ -364,13 +320,8 @@ private:
     bool dense_gpu_phase_gate_enabled = false;
     bool dense_gpu_prefill_phase_active = false;
     int dense_gpu_scheduler_graph_phase = 0;
-    bool cpu_sink_enabled = false;
-    uint32_t cpu_prefill_max_tokens = 0; // prefill ubatches up to this size run on the CPU sink
+    bool cpu_sink_enabled = false; // every pass computes the experts on the CPU sink
     bool cpu_prefill_hint = false; // a sink prefill predicts each next layer's routes for its read-ahead
-    // the threshold of this request: cpu_prefill_max_tokens, or the request's size when the graph does not fit
-    uint32_t cpu_prefill_request_max_tokens = 0;
-    // this request's prefill on the graph route: passes, their tokens, the expert-copy counters at its start
-    llama_prefill_copy_meter prefill_copy;
     llama_dense_stream_meter dense_stream;
     bool cpu_prefill_actual_shape_enabled = false;
     bool cpu_prefill_actual_shape_active = false;

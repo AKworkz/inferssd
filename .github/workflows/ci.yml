@@ -112,12 +112,12 @@ jobs:
       - name: Configure
         run: cmake --preset linux-cpu -DGGML_NATIVE=OFF
       - name: Build
-        run: cmake --build build-linux-cpu --parallel 4 --target inferssd-server inferssd-cpuprobe inferssd-ssdprobe test-sched-inplace test-ssd-model-adapter test-ssd-runtime-policy test-dsv41-engram test-kimi-prefill-cost test-moe-pack-copy-plan test-reasoning-budget test-ssd-prepared-graph test-ssd-precompute-memory test-ssd-cuda-reserve test-ssd-context-telemetry test-graph-overhead test-test-resources test-c0-store test-c0-config test-c0-parser-failures test-ssd-settings-telemetry test-ssd-runtime-options test-ssd-cpu-api test-ssd-source-index test-ssd-host-arbiter test-ssd-host-prefault
+        run: cmake --build build-linux-cpu --parallel 4 --target inferssd-server inferssd-cpuprobe inferssd-ssdprobe test-sched-inplace test-ssd-model-adapter test-ssd-runtime-policy test-dsv41-engram test-kimi-prefill-cost test-reasoning-budget test-ssd-prepared-graph test-ssd-precompute-memory test-ssd-cuda-reserve test-ssd-context-telemetry test-graph-overhead test-test-resources test-c0-store test-c0-config test-c0-parser-failures test-ssd-settings-telemetry test-ssd-runtime-options test-ssd-cpu-api test-ssd-source-index test-ssd-host-arbiter test-ssd-host-prefault
       - name: Synthetic tests
         shell: bash
         run: |
           set -o pipefail
-          ctest --test-dir build-linux-cpu --output-on-failure --no-tests=error -R '^(sched_inplace|ssd_model_adapter|ssd_runtime_policy|test-dsv41-engram|kimi_prefill_cost|moe_pack_copy_plan|test-reasoning-budget|ssd_prepared_graph|ssd_precompute_memory|ssd_cuda_reserve|ssd_context_telemetry|test-graph-overhead|test_resources|c0-store|c0-config|c0-parser-failures|ssd_settings_telemetry|ssd_runtime_options|ssd_cpu_api|ssd_source_index|ssd_host_arbiter|ssd_host_prefault)$' | tee cpu-tests.log
+          ctest --test-dir build-linux-cpu --output-on-failure --no-tests=error -R '^(sched_inplace|ssd_model_adapter|ssd_runtime_policy|test-dsv41-engram|kimi_prefill_cost|test-reasoning-budget|ssd_prepared_graph|ssd_precompute_memory|ssd_cuda_reserve|ssd_context_telemetry|test-graph-overhead|test_resources|c0-store|c0-config|c0-parser-failures|ssd_settings_telemetry|ssd_runtime_options|ssd_cpu_api|ssd_source_index|ssd_host_arbiter|ssd_host_prefault)$' | tee cpu-tests.log
           if grep -E '\bSKIP\b|\*\*\*Not Run|\*\*\*Skipped' cpu-tests.log; then exit 1; fi
       - name: CPU probe smoke run
         shell: bash
@@ -182,14 +182,14 @@ jobs:
           call "%VS%\VC\Auxiliary\Build\vcvars64.bat" > nul || exit /b 1
           set "PATH=%ProgramFiles%\LLVM\bin;%PATH%"
           cmake --preset windows-llvm -DGGML_NATIVE=OFF || exit /b 1
-          cmake --build build-windows-llvm --parallel 4 --target inferssd-server inferssd-cpuprobe inferssd-ssdprobe test-sched-inplace test-ssd-model-adapter test-ssd-runtime-policy test-dsv41-engram test-kimi-prefill-cost test-moe-pack-copy-plan test-ssd-prepared-graph test-ssd-cuda-reserve test-ssd-context-telemetry test-graph-overhead test-test-resources test-ssd-settings-telemetry test-ssd-cpu-api test-ssd-source-index test-ssd-host-budget test-ssd-platform-threads test-ssd-platform-memory test-ssd-platform-file test-ssd-read-ring test-kimi-cpu-sink test-kimi-cpu-prefill || exit /b 1
+          cmake --build build-windows-llvm --parallel 4 --target inferssd-server inferssd-cpuprobe inferssd-ssdprobe test-sched-inplace test-ssd-model-adapter test-ssd-runtime-policy test-dsv41-engram test-kimi-prefill-cost test-ssd-prepared-graph test-ssd-cuda-reserve test-ssd-context-telemetry test-graph-overhead test-test-resources test-ssd-settings-telemetry test-ssd-cpu-api test-ssd-source-index test-ssd-host-budget test-ssd-platform-threads test-ssd-platform-memory test-ssd-platform-file test-ssd-read-ring test-kimi-cpu-sink test-kimi-cpu-prefill || exit /b 1
       - name: SSD executor tests
         shell: bash
         run: |
           set -o pipefail
           # The synthetic and platform tests of the Linux job that Windows builds, the sink and grouped prefill tests
           # of the macOS job, and the Windows budget, file and read ring backends.
-          ctest --test-dir build-windows-llvm --output-on-failure --no-tests=error -R '^(sched_inplace|ssd_model_adapter|ssd_runtime_policy|test-dsv41-engram|kimi_prefill_cost|moe_pack_copy_plan|ssd_prepared_graph|ssd_cuda_reserve|ssd_context_telemetry|test-graph-overhead|test_resources|ssd_settings_telemetry|ssd_cpu_api|ssd_source_index|ssd_host_budget|ssd_platform_threads|ssd_platform_memory|ssd_platform_file|ssd_read_ring|kimi_cpu_sink|kimi_cpu_sink_threadpool|kimi_cpu_sink_threadpool_poll|kimi_cpu_sink_activation_t2_d1_ready1|kimi_cpu_sink_swiglu|kimi_cpu_sink_muse_q8_0|kimi_cpu_sink_muse_bf16|kimi_cpu_sink_registered|kimi_cpu_prefill|kimi_cpu_prefill_registered)$' | tee windows-tests.log
+          ctest --test-dir build-windows-llvm --output-on-failure --no-tests=error -R '^(sched_inplace|ssd_model_adapter|ssd_runtime_policy|test-dsv41-engram|kimi_prefill_cost|ssd_prepared_graph|ssd_cuda_reserve|ssd_context_telemetry|test-graph-overhead|test_resources|ssd_settings_telemetry|ssd_cpu_api|ssd_source_index|ssd_host_budget|ssd_platform_threads|ssd_platform_memory|ssd_platform_file|ssd_read_ring|kimi_cpu_sink|kimi_cpu_sink_threadpool|kimi_cpu_sink_threadpool_poll|kimi_cpu_sink_activation_t2_d1_ready1|kimi_cpu_sink_swiglu|kimi_cpu_sink_muse_q8_0|kimi_cpu_sink_muse_bf16|kimi_cpu_sink_registered|kimi_cpu_prefill|kimi_cpu_prefill_registered)$' | tee windows-tests.log
           if grep -E '\bSKIP\b|\*\*\*Not Run|\*\*\*Skipped' windows-tests.log; then exit 1; fi
           build-windows-llvm/bin/inferssd-cpuprobe --rows 64 --cols 256 --tokens 1,2 --min-seconds 0 --threads 1 \
             | python -c 'import json, sys; d = json.load(sys.stdin); assert d["schema"] == "inferssd-cpuprobe/2" and d["dram"] and d["compute"] and not d["skipped"], d'

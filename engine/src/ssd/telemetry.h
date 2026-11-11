@@ -97,19 +97,6 @@ public:
         } catch (...) { return fail(ssd::status::resource, "prefill observation failed"); }
     }
 
-    [[nodiscard]] ssd::result<void> prefill_copy(uint64_t bytes, uint64_t read_us,
-                                               uint32_t passes, uint64_t tokens) noexcept {
-        if (!good()) { return fail(ssd::status::io, "context telemetry previously failed"); }
-        if (!writer_) { return {}; }
-        try {
-            const auto published = writer_->event("ssd.prefill.copy",
-                "{\"bytes\":" + std::to_string(bytes) + ",\"read_us\":" + std::to_string(read_us) +
-                ",\"passes\":" + std::to_string(passes) + ",\"tokens\":" + std::to_string(tokens) + "}");
-            if (!published) { failed_.store(true, std::memory_order_relaxed); }
-            return published;
-        } catch (...) { return fail(ssd::status::resource, "prefill copy observation failed"); }
-    }
-
 private:
     [[nodiscard]] ssd::result<void> fail(ssd::status code, const char * error) noexcept {
         failed_.store(true, std::memory_order_relaxed);

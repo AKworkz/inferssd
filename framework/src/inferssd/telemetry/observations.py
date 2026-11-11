@@ -78,7 +78,6 @@ class NativeObservations:
             "ssd.place.layer",
             "ssd.prefill.graph",
             "ssd.prefill.layer",
-            "ssd.prefill.copy",
         ):
             return
         if not self.started:
@@ -90,29 +89,12 @@ class NativeObservations:
                     "ubatch": number(p, "configured_max", integer=True),
                     "cpu_s": 0.0,
                     "sink_bytes": 0.0,
-                    "graph_bytes": 0.0,
-                    "graph_read_us": 0.0,
-                    "graph_passes": 0,
-                    "graph_tokens": 0,
                 }
             )
         elif event.name == "ssd.prefill.layer":
             read_bytes = number(p, "read_bytes", integer=True)
             if self.graphs:
                 self.graphs[-1]["sink_bytes"] += read_bytes
-        elif event.name == "ssd.prefill.copy":
-            values = {
-                key: number(p, key, integer=True)
-                for key in ("bytes", "read_us", "passes", "tokens")
-            }
-            if self.graphs:
-                for target, source in (
-                    ("graph_bytes", "bytes"),
-                    ("graph_read_us", "read_us"),
-                    ("graph_passes", "passes"),
-                    ("graph_tokens", "tokens"),
-                ):
-                    self.graphs[-1][target] += values[source]
         else:
             if p.get("success") is not True or type(p.get("decode")) is not bool:
                 raise ValueError("failed or invalid native layer observation")

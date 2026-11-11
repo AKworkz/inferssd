@@ -12,7 +12,6 @@ Python resource. There are no environment mirrors or legacy-name aliases.
 | `cpu.decode_participants` | integer / compute participants | `0` | plan | all |  |
 | `prefetch.depth` | integer / predicted experts | `2` | plan | all |  |
 | `place.costs` | costs / named us and GB/s terms | `empty` | plan | all |  |
-| `prefill.cpu_max_tokens` | integer / tokens | `4294967295` | plan | all | CUDA |
 | `prefill.lookahead` | integer / boolean | `1` | plan | all |  |
 | `vram.budget` | budget / bytes | `auto` | plan | all |  |
 | `vram.max_slots` | integer / slots | `0` | plan | all | CUDA |

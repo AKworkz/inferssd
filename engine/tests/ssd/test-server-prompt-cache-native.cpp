@@ -113,10 +113,10 @@ int main(int argc, char ** argv) {
         model_ptr model(llama_model_load_from_file(argv[1], mp), llama_model_free); require(bool(model), "model load failed");
         const int vocab = llama_vocab_n_tokens(llama_model_get_vocab(model.get())); require(vocab > 6, "tiny vocabulary too small");
         const llama_ssd_override values[] = {{"expert.source", argv[2]},
-            {"prefetch.depth", "0"}, {"vram.budget", "0"}, {"prefill.cpu_max_tokens", "0"}};
+            {"prefetch.depth", "0"}, {"vram.budget", "0"}};
         char error[512] = {};
         using option_ptr = std::unique_ptr<llama_ssd_options, decltype(&llama_ssd_options_free)>;
-        option_ptr options(llama_ssd_options_create(nullptr, values, 4, argv[4], error, sizeof(error)), llama_ssd_options_free);
+        option_ptr options(llama_ssd_options_create(nullptr, values, 3, argv[4], error, sizeof(error)), llama_ssd_options_free);
         require(bool(options), error);
         auto cp = llama_context_default_params(); cp.ssd_options = options.get();
         cp.n_ctx = 128; cp.n_batch = 4; cp.n_ubatch = 4; cp.n_seq_max = 1;

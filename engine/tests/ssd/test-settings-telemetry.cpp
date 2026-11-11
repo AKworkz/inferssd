@@ -52,7 +52,7 @@ int main(int argc, char ** argv) {
         return 0;
     }
     using namespace ssd::settings;
-    assert(registry().size() == 14);
+    assert(registry().size() == 13);
     assert(parse("inferssd-settings 1\nmodel.engram_prefetch=1\nmodel.hc_fused=0\n", "model.ssd"));
     assert(!parse("inferssd-settings 1\nmodel.hc_fused=2\n", "model-invalid.ssd"));
     auto base = parse("", "");
@@ -107,7 +107,7 @@ int main(int argc, char ** argv) {
     assert(parse("inferssd-settings 1\ncpu.io_cpus=0-2\ncpu.decode_participants=1\nhost.budget_mib=8192\n", "mac.ssd", {},
                  "darwin"));
     for (const std::string platform : { "linux", "darwin", "windows" }) {
-        assert(parse("inferssd-settings 1\nvram.max_slots=1\nprefill.cpu_max_tokens=1\nvram.reserve_mib=64\n", "tier.ssd",
+        assert(parse("inferssd-settings 1\nvram.max_slots=1\nvram.reserve_mib=64\n", "tier.ssd",
                      {}, platform));
     }
     assert(!parse("inferssd-settings 1\nhost.budget_mib=1\n", "linux.ssd"));
@@ -120,7 +120,7 @@ int main(int argc, char ** argv) {
         assert(scopes.at("vram.max_slots").object.at("scope").text == "all");
         assert(scopes.at("vram.budget").object.at("scope").text == "all");
         // The CUDA tier's keys name their backend; the others have none.
-        for (const char * key : { "prefill.cpu_max_tokens", "vram.max_slots", "vram.reserve_mib" }) {
+        for (const char * key : { "vram.max_slots", "vram.reserve_mib" }) {
             assert(scopes.at(key).object.at("backend").text == "CUDA");
         }
         assert(!scopes.at("vram.budget").object.count("backend") && !scopes.at("cpu.io_cpus").object.count("backend"));

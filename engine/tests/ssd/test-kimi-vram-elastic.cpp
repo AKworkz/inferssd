@@ -5,9 +5,7 @@
 #include "vram-tier.cpp"
 #include "test-kimi-vram-format-fixture.h"
 
-#include <fcntl.h>
 #include <functional>
-#include <unistd.h>
 
 namespace {
 int assertions = 0;
@@ -280,36 +278,27 @@ int main() {
                         t.table->slots.size()==16 && t.upload_us_per_expert>0,
                         "unified memory did not reserve and grow its tier at load");
                 t.begin(22,0,false);
-                // A graph prefill's seed: an expert planned into an empty slot, its three roles offered from the pass's
-                // device copies as the scheduler offers them, published at the prefill's end with each role's bytes.
+                // A prefill's seed: an expert the pass routes, planned into an empty slot before its layer's prepare,
+                // its three roles copied from the payload the CPU computed it from, published when the decode phase
+                // completes the prefill.
                 {
                     kimi_vram_request key=r;key.expert=5;
-                    t.seed_plan_generation=t.prefill_count;t.seed_planned.insert(1);
-                    const int slot=t.table->reserve_cold_prefill(key);
-                    require(slot>=0,"no empty slot for a seed");
-                    t.seeds.push_back({slot,key,0});
-                    char * source=nullptr;cuda_check(cudaMalloc(reinterpret_cast<void **>(&source),3*8*mx));
-                    cudaEvent_t ready=nullptr;cuda_check(cudaEventCreateWithFlags(&ready,cudaEventDisableTiming));
-                    const int32_t counts[8]={0,0,0,0,0,3,0,0};
-                    std::vector<uint8_t> roles[3];
-                    for (int role = 0; role < 3; ++role) {
-                        roles[role].resize(8*mx);
-                        for (size_t i = 0; i < roles[role].size(); ++i) roles[role][i]=uint8_t(i*7+3+role*31);
-                        char * tensor=source+size_t(role)*8*mx;
-                        cuda_check(cudaMemcpy(tensor,roles[role].data(),8*mx,cudaMemcpyHostToDevice));
-                        cuda_check(cudaEventRecord(ready,0));
-                        char name[64];std::snprintf(name,sizeof(name),"blk.1.ffn_%s_exps.weight",role==0?"up":role==1?"gate":"down");
-                        void * done=nullptr;
-                        require(t.seed_offer(name,tensor,mx,8,counts,ready,&done)==1 && done,"a seed role was not copied");
-                    }
+                    t.plan_sink_seeds(&key,1,{3});
+                    require(t.seeds.size()==1 && t.sink_seed_slot.size()==1 && t.sink_seed_slot[0]>=0,
+                            "no empty slot for a seed");
+                    const int slot=t.sink_seed_slot[0];
+                    char * payload=nullptr;cuda_check(cudaMallocHost(reinterpret_cast<void **>(&payload),3*mx));
+                    for (size_t i = 0; i < 3*mx; ++i) payload[i]=char(uint8_t(i*7+3));
+                    const void * roles[3]={payload,payload+mx,payload+2*mx};
+                    t.seed_from_host(0,roles);
+                    t.wait_host_seed(0);
                     t.phase_complete(true);
                     require(t.table->slots[size_t(slot)].valid && t.table->slots[size_t(slot)].seed && t.seeds.empty(),
                             "the complete seed was not published");
-                    std::vector<uint8_t> got(3*mx);
+                    std::vector<char> got(3*mx);
                     cuda_check(cudaMemcpy(got.data(),t.slot_base(size_t(slot)),3*mx,cudaMemcpyDeviceToHost));
-                    for (int role = 0; role < 3; ++role)
-                        require(!std::memcmp(got.data()+size_t(role)*mx,roles[role].data()+5*mx,mx),"a seeded role holds other bytes");
-                    cuda_check(cudaEventDestroy(ready));cuda_check(cudaFree(source));
+                    require(!std::memcmp(got.data(),payload,3*mx),"a seeded role holds other bytes");
+                    cuda_check(cudaFreeHost(payload));
                 }
                 require(t.has_storage() && t.adopt_next_decode,"a prefill before the first decode dropped the reserved tier");
                 t.begin(22,1,true);
@@ -319,7 +308,7 @@ int main() {
         }
         // A layer's seeds: its share of the empty slots, those free over the layers not planned yet in this prefill
         // (what a layer leaves rolls forward), the prompt's most-routed experts first, an expert already resident
-        // skipped. Keys from the resolver (a fake one here: expert e's roles at e times their bytes of this file).
+        // skipped.
         if (unified) {
             const int32_t three[] = {1,2,3};
             const kimi_vram_expert_format f3 = {256,256,int32_t(GGML_TYPE_MXFP4),int32_t(GGML_TYPE_MXFP4),8,3,three};
@@ -328,26 +317,23 @@ int main() {
             inputs.set("tier.max_slots", "53");
             q.reserve(r,f3);
             require(q.has_storage() && q.table->slots.size()==16,"the quota test's tier has another size");
-            static int fd=-1;fd=open("/proc/self/exe",O_RDONLY);require(fd>=0,"no file for the fake resolver");
-            q.seed_resolve=[](const char *,int expert,size_t bytes,int64_t,int * d,uint64_t * offset,size_t * n){
-                *d=fd;*offset=uint64_t(expert)*bytes;*n=bytes;return true;};
-            kimi_vram_request resident={};
-            require(q.seed_key(3,0,resident),"no seed key from the resolver");
+            kimi_vram_request resident=r;resident.layer=3;resident.expert=0;
             const int held=q.table->reserve_cold_prefill(resident);
             require(held>=0,"no slot for the resident expert");
             q.table->publish_cold_prefill(size_t(held),resident);
-            const int32_t c1[8]={0,5,0,3,0,0,1,0},c2[8]={1,2,3,4,5,6,7,8},c3[8]={9,1,1,1,1,1,1,1};
-            const int32_t * counts[3]={c1,c2,c3};
-            for (int layer = 1; layer <= 3; ++layer) { q.seed_planned.insert(layer);q.seed_plan(layer,counts[layer-1]); }
+            const std::vector<int32_t> counts[3]={{0,5,0,3,0,0,1,0},{1,2,3,4,5,6,7,8},{9,1,1,1,1,1,1,1}};
+            for (int layer = 1; layer <= 3; ++layer) {
+                std::vector<kimi_vram_request> routed(8,r);
+                for (int e = 0; e < 8; ++e) { routed[size_t(e)].layer=layer;routed[size_t(e)].expert=e; }
+                q.plan_sink_seeds(routed.data(),8,counts[layer-1]);
+            }
             std::vector<int> planned[4];
             for (const auto & seed : q.seeds) planned[seed.key.layer].push_back(seed.key.expert);
             // 15 free: layer 1 a third (5) but routed 3; layer 2 half of the 12 left; layer 3 the 6 left, not expert 0
             require(planned[1]==std::vector<int>({1,3,6}) && planned[2]==std::vector<int>({7,6,5,4,3,2}) &&
                     planned[3]==std::vector<int>({1,2,3,4,5,6}) && q.table->free_slots(1)==0 && q.seeds_planned==15,
                     "the seed quota did not follow the free slots, the routing counts or residency");
-            require(q.seeds[3].key.role[0].offset==7*mx && q.seeds[3].key.role[2].bytes==mx,
-                    "a seed key does not carry the resolver's logical offset and the logical bytes");
-            q.cancel_seeds();close(fd);
+            q.cancel_seeds();
             require(q.table->free_slots(1)==15,"cancelled seeds kept their slots");
         }
     }

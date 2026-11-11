@@ -123,10 +123,6 @@ add_test(NAME moe_common_dynamic_tier COMMAND test-moe-common-dynamic-tier)
 set_property(TEST moe_common_dynamic_tier PROPERTY LABELS main)
 
 
-add_executable(test-moe-pack-copy-plan ssd/test-moe-pack-copy-plan.cpp)
-add_test(NAME moe_pack_copy_plan COMMAND test-moe-pack-copy-plan)
-set_property(TEST moe_pack_copy_plan PROPERTY LABELS main)
-
 add_executable(test-ssd-model-adapter ssd/test-model-adapter.cpp ../src/ssd/model-adapter.cpp)
 target_compile_features(test-ssd-model-adapter PRIVATE cxx_std_17)
 target_include_directories(test-ssd-model-adapter PRIVATE ../src ../include)
@@ -875,7 +871,7 @@ endif()
 
 # The default CI gate is model-free and requires neither GPU nor cgroup setup.
 # Keep this list explicit: other synthetic tests may still require Linux I/O facilities.
-foreach(unit_test moe_pack_copy_plan kimi_prefill_cost test-reasoning-budget
+foreach(unit_test kimi_prefill_cost test-reasoning-budget
                   test-server-runtime-routing test-dsv41-engram
                   kv_cache_iswa_state_at)
     if (TEST ${unit_test})

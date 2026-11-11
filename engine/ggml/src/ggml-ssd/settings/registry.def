@@ -7,7 +7,6 @@ SSD_SETTING("cpu.io_cpus", cpus, 0, 2147483647, "", "CPU ID", "plan", scope_all,
 SSD_SETTING("cpu.decode_participants", integer, 0, 255, "0", "compute participants", "plan", scope_all, "", "Decode compute participants; zero selects the measured/default policy")
 SSD_SETTING("prefetch.depth", integer, 0, 64, "2", "predicted experts", "plan", scope_all, "", "Next-layer predicted experts, not a layer count or Mac read window")
 SSD_SETTING("place.costs", costs, 0, 1000000, "", "named us and GB/s terms", "plan", scope_all, "", "Measured placement cost terms; omitted terms retain calibrated priors")
-SSD_SETTING("prefill.cpu_max_tokens", integer, 0, 4294967295, "4294967295", "tokens", "plan", scope_all, "CUDA", "Largest CPU prefill ubatch; transitional v0.1 setting")
 SSD_SETTING("prefill.lookahead", integer, 0, 1, "1", "boolean", "plan", scope_all, "", "Read the next layer's predicted SSD experts while the drive idles between grouped-prefill layers; changes I/O timing only")
 SSD_SETTING("vram.budget", budget, 0, 68719476736, "auto", "bytes", "plan", scope_all, "", "GPU expert byte budget or auto; 0 keeps experts on the CPU")
 SSD_SETTING("vram.max_slots", integer, 0, 4294967295, "0", "slots", "plan", scope_all, "CUDA", "Maximum expert slots; zero leaves the resource-derived bound")

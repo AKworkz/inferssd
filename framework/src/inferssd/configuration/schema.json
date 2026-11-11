@@ -132,20 +132,6 @@
             },
             "default": {}
         },
-        "prefill.cpu_max_tokens": {
-            "description": "Largest CPU prefill ubatch; transitional v0.1 setting",
-            "kind": "integer",
-            "unit": "tokens",
-            "producer": "plan",
-            "scope": "all",
-            "backend": "CUDA",
-            "cli": "--ssd-prefill-cpu-max-tokens",
-            "default_literal": "4294967295",
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 4294967295,
-            "default": 4294967295
-        },
         "prefill.lookahead": {
             "description": "Read the next layer's predicted SSD experts while the drive idles between grouped-prefill layers; changes I/O timing only",
             "kind": "integer",

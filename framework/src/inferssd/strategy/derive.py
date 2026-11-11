@@ -686,11 +686,9 @@ def derive(
                 "stress with the automatic VRAM tier",
             )
             notes.append(f"host.headroom_mib: {UNIFIED_HEADROOM_MIB}, the GPU shares host memory")
-        # prefill.cpu_max_tokens keeps its default: every pass takes the SSD sink. The sink reads
-        # each expert a pass routes to once, from the VRAM tier, the RAM cache or the drive,
-        # places it on the CPU or the GPU by place.costs, and seeds the VRAM tier for decode as
-        # the GPU graph does. The graph reads every expert it routes to from the drive, whatever
-        # the tier and the RAM cache hold, and computes them all on the GPU.
+        # Every pass takes the SSD sink. It reads each expert a pass routes to once, from the VRAM
+        # tier, the RAM cache or the drive, places it on the CPU or the GPU by place.costs, and
+        # seeds the VRAM tier for decode.
         notes.append(
             "prefill: the SSD sink for every pass; it reads only what the VRAM tier and the "
             "RAM cache do not hold"

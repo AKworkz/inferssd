@@ -138,7 +138,7 @@ def test_invalid_contract_refused_by_both(native_contract, tmp_path, body):
 @pytest.mark.parametrize("platform", ["linux", "darwin", "windows"])
 def test_the_cuda_tiers_keys_parse_on_every_platform_by_both(native_contract, tmp_path, platform):
     # Which engine has the tier decides; the platform does not (see the launch's backend check).
-    text = "inferssd-settings 1\nprefill.cpu_max_tokens=1\nvram.max_slots=1\nvram.reserve_mib=64\n"
+    text = "inferssd-settings 1\nvram.max_slots=1\nvram.reserve_mib=64\n"
     source = tmp_path / "tier.ssd"
     source.write_text(text)
     parse(text, str(source), platform=platform)

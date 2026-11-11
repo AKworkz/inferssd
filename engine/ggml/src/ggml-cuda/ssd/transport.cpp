@@ -20,7 +20,7 @@
 #include <vector>
 
 namespace {
-constexpr size_t alignment = 4096, stage_slots = 16, scheduler_refill = 16;
+constexpr size_t alignment = 4096;
 [[noreturn]] void fatal(const char * reason) noexcept {
     std::fprintf(stderr, "[ssd.transport] cannot drain owned work: %s\n", reason); std::abort();
 }
@@ -33,11 +33,10 @@ struct extent { int fd = -1; uint64_t offset = 0, file_size = 0; size_t bytes = 
 // finishes before the slot is read into again.
 struct pinned_stage {
     struct slot { char * host = nullptr; cudaEvent_t done = nullptr; bool copying = false; };
-    enum class taken { one, none, failed };
     std::unique_ptr<ssd::io::read_ring> ring;
     void * block = nullptr; // the pinned allocation the slots are cut from
     std::vector<slot> slots;
-    size_t slot_bytes = 0, next = 0;
+    size_t slot_bytes = 0;
     unsigned queued = 0;
     bool failed = false; // the pinned memory could not be had: not asked for again
 
@@ -88,7 +87,7 @@ struct pinned_stage {
         if (block && cudaFreeHost(block) != cudaSuccess) fatal("staging release");
         block = nullptr;
         slots.clear();
-        slot_bytes = next = 0;
+        slot_bytes = 0;
         if (allocated && host) (void)host->note_known_memory_change();
     }
     bool ready(size_t index) {
@@ -111,14 +110,13 @@ struct pinned_stage {
         queued = 0;
         return !count || bool(ring->submit(count));
     }
-    // a completion ready now or, with wait, the next to arrive; only wait with reads in flight
-    taken take(ssd::io::completion & out, bool wait) {
+    // the next completion to arrive, false when the ring fails; only with reads in flight
+    bool take(ssd::io::completion & out) {
         for (;;) {
             const auto popped = ring->pop(out);
-            if (!popped) return taken::failed;
-            if (popped.value) return taken::one;
-            if (!wait) return taken::none;
-            if (!ring->wait()) return taken::failed;
+            if (!popped) return false;
+            if (popped.value) return true;
+            if (!ring->wait()) return false;
         }
     }
     bool copy(size_t index, void * dst, size_t offset, size_t bytes, cudaStream_t stream) {
@@ -157,15 +155,10 @@ struct transport_owner {
     ssd::store::source_view source;
     ssd::host::context_client * host;
     int device;
-    std::mutex mutex, seed_mutex;
+    std::mutex mutex;
     std::atomic<bool> closed{false};
-    pinned_stage stage;
     dense_stage_state dense;
     std::unordered_map<int, uint64_t> source_sizes;
-    uint64_t reads = 0, bytes = 0;
-    ssd::gpu::seed_offer_fn seed = nullptr;
-    void * seed_data = nullptr;
-    cudaEvent_t ready = nullptr, pending = nullptr, last_seed_done = nullptr;
     transport_owner(const ssd::runtime_services & services, int ordinal) : source(*services.source), host(services.host), device(ordinal) { dense.owner = this; }
     bool resolve(const char * name, int expert, size_t bytes, int64_t experts, extent & out) {
         size_t logical = 0;
@@ -182,78 +175,6 @@ struct transport_owner {
         return out.offset <= out.file_size && bytes <= out.file_size - out.offset;
     }
 };
-struct copy_job { void * dst; extent source; };
-struct read_plan { size_t job; uint64_t offset; size_t read_sz, prefix, expect; };
-
-// The scheduler's fixed production profile: no coalescing or sorting; one first batch as deep as the stage, then
-// refills of the slots that completions free, the last freed first.
-bool copy_jobs(transport_owner & owner, const std::vector<copy_job> & jobs, cudaStream_t stream) {
-    if (jobs.empty()) return true;
-    std::vector<read_plan> plans; plans.reserve(jobs.size());
-    size_t maximum = 0;
-    for (size_t i = 0; i < jobs.size(); ++i) {
-        const auto & source = jobs[i].source;
-        const uint64_t offset = source.offset / alignment * alignment;
-        const size_t prefix = size_t(source.offset - offset);
-        if (source.bytes > UINT_MAX - prefix - alignment + 1) return false;
-        const size_t read = size_t(align_up_u64(prefix + source.bytes, alignment));
-        const size_t expected = size_t(std::min<uint64_t>(read, source.file_size - offset));
-        if (expected < prefix + source.bytes || read > INT_MAX) return false;
-        plans.push_back({i, offset, read, prefix, expected}); maximum = std::max(maximum, read);
-    }
-    auto & stage = owner.stage;
-    if (!stage.allocate(owner.host, maximum, stage_slots)) return false;
-    const size_t depth = stage.slots.size();
-    struct drain_guard {
-        pinned_stage & stage; cudaStream_t stream; bool success = false;
-        ~drain_guard() {
-            if (!stage.drain()) fatal("copy read queue");
-            if (!success && cudaStreamSynchronize(stream) != cudaSuccess) fatal("failed copy stream");
-        }
-    } drain{stage, stream};
-    std::vector<size_t> plan_of(depth, SIZE_MAX); // the plan each slot reads
-    std::vector<size_t> reusable; reusable.reserve(depth);
-    size_t next = 0, inflight = 0, completed = 0;
-    auto submit_one = [&](size_t slot) {
-        if (!stage.read(slot, jobs[plans[next].job].source.fd, plans[next].offset, plans[next].read_sz)) return false;
-        plan_of[slot] = next++; ++inflight;
-        return true;
-    };
-    auto complete = [&](const ssd::io::completion & completion) {
-        const size_t slot = size_t(completion.user_data);
-        if (slot >= depth || plan_of[slot] == SIZE_MAX) return false;
-        const auto & plan = plans[plan_of[slot]]; const auto & job = jobs[plan.job];
-        plan_of[slot] = SIZE_MAX;
-        if (completion.res < 0 || size_t(completion.res) != plan.expect ||
-                !stage.copy(slot, job.dst, plan.prefix, job.source.bytes, stream)) return false;
-        ++owner.reads; owner.bytes += job.source.bytes;
-        ++completed; --inflight; reusable.push_back(slot);
-        return true;
-    };
-    for (size_t i = 0, first = std::min(plans.size(), depth); i < first; ++i) {
-        if (!submit_one(stage.next++ % depth)) return false;
-    }
-    if (!stage.submit()) return false;
-    while (completed < plans.size()) {
-        ssd::io::completion completion;
-        if (stage.take(completion, true) != pinned_stage::taken::one || !complete(completion)) return false;
-        while (completed < plans.size() && inflight > 0) {
-            const auto ready = stage.take(completion, false);
-            if (ready == pinned_stage::taken::none) break;
-            if (ready == pinned_stage::taken::failed || !complete(completion)) return false;
-        }
-        size_t submitted = 0;
-        while (next < plans.size() && inflight < depth && !reusable.empty() && submitted < std::min(scheduler_refill, depth)) {
-            const size_t slot = reusable.back(); reusable.pop_back();
-            if (!submit_one(slot)) return false;
-            ++submitted;
-        }
-        if (submitted && !stage.submit()) return false;
-    }
-    drain.success = true;
-    return true;
-}
-
 static size_t dense_slot_bytes(size_t block_bytes) {
     const size_t a = alignment;
     return (size_t)align_up_u64((uint64_t)block_bytes + a, a);
@@ -277,7 +198,7 @@ static void dense_stage_abort(dense_stage_state &s) {
 // the ring gives none (dense_stage_abort)
 static bool dense_stage_reap_one(dense_stage_state &s) {
     ssd::io::completion c;
-    if (s.stage.take(c, true) != pinned_stage::taken::one) {
+    if (!s.stage.take(c)) {
         dense_stage_abort(s);
         return false;
     }
@@ -460,22 +381,14 @@ void quiesce(void * value) noexcept {
     if (owner.closed) return;
     owner.closed = true;
     if (cudaSetDevice(owner.device) != cudaSuccess) fatal("device selection");
-    owner.stage.release(owner.host);
     dense_stage_abort(owner.dense);
     owner.dense.stage.release(owner.host);
     for (auto & half : owner.dense.half) half = dense_stage_half();
-    std::lock_guard<std::mutex> seed_lock(owner.seed_mutex);
-    if (owner.last_seed_done && cudaEventSynchronize(owner.last_seed_done) != cudaSuccess) fatal("last seed copy");
-    if (owner.ready && cudaEventSynchronize(owner.ready) != cudaSuccess) fatal("seed source");
-    if (owner.ready && cudaEventDestroy(owner.ready) != cudaSuccess) fatal("seed event");
-    owner.pending = owner.ready = owner.last_seed_done = nullptr;
 }
 void destroy(void * value) noexcept {
     if (!value) return;
     quiesce(value);
-    auto * owner = static_cast<transport_owner *>(value);
-    if (owner->seed) fatal("tier still registered during owner destruction");
-    delete owner;
+    delete static_cast<transport_owner *>(value);
 }
 void * create(const ssd::runtime_services * services, int device, char * error, size_t size) noexcept {
     try {
@@ -489,50 +402,6 @@ void * create(const ssd::runtime_services * services, int device, char * error, 
         if (error && size) std::snprintf(error, size, "transport construction failed");
         return nullptr;
     }
-}
-bool copy_ranges(void * value, const char * name, const int32_t * first, const int32_t * last, size_t count,
-        int64_t experts, size_t expert_bytes, size_t padding, bool cache_bypass, void * destination, size_t capacity, void * stream_ptr,
-        uint64_t * copied, uint64_t * reads, uint64_t * bytes, uint64_t * lookups, uint64_t * hits) noexcept {
-    if (copied) *copied = 0;
-    if (reads) *reads = 0;
-    if (bytes) *bytes = 0;
-    if (lookups) *lookups = 0;
-    if (hits) *hits = 0;
-    (void)cache_bypass; // The retired process-global cache producer is never consulted.
-    if (!value || !name || !name[0] || !first || !last || !count || !expert_bytes || experts <= 0 || experts > INT32_MAX ||
-            !destination || !stream_ptr || uint64_t(experts) > SIZE_MAX / expert_bytes || size_t(experts) * expert_bytes > capacity) return false;
-    auto & owner = *static_cast<transport_owner *>(value);
-    try {
-        std::lock_guard<std::mutex> lock(owner.mutex);
-        if (owner.closed || cudaSetDevice(owner.device) != cudaSuccess) return false;
-        std::vector<copy_job> jobs;
-        int32_t previous = -1;
-        for (size_t range = 0; range < count; ++range) {
-            if (first[range] < 0 || last[range] < first[range] || last[range] >= experts || first[range] <= previous) return false;
-            previous = last[range];
-            for (int32_t expert = first[range]; expert <= last[range]; ++expert) {
-                extent source;
-                if (!owner.resolve(name, expert, expert_bytes, experts, source)) return false;
-                jobs.push_back({static_cast<char *>(destination) + size_t(expert) * expert_bytes, source});
-            }
-        }
-        const uint64_t before_reads = owner.reads, before_bytes = owner.bytes;
-        const auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
-        bool ok = copy_jobs(owner, jobs, stream);
-        if (ok && padding) {
-            for (size_t range = 0; range < count; ++range) {
-                if (last[range] >= experts - 1) continue;
-                const size_t offset = (size_t(last[range]) + 1) * expert_bytes;
-                if (offset > capacity || padding > capacity - offset ||
-                        cudaMemsetAsync(static_cast<char *>(destination) + offset, 0, padding, stream) != cudaSuccess) { ok = false; break; }
-            }
-        }
-        if (!ok && cudaStreamSynchronize(stream) != cudaSuccess) fatal("copy failure stream");
-        if (copied && ok) *copied = jobs.size();
-        if (reads) *reads = owner.reads - before_reads;
-        if (bytes) *bytes = owner.bytes - before_bytes;
-        return ok;
-    } catch (...) { quiesce(value); return false; }
 }
 bool dense_has(void * p, const char * name, size_t bytes, size_t * block) noexcept {
     if (!p) return false;
@@ -554,53 +423,9 @@ bool dense_copy(void * p, const char * name, void * dst, size_t bytes, void * st
     try { return dense_copy_impl(*static_cast<transport_owner *>(p), name, dst, bytes, stream, hit); }
     catch (...) { quiesce(p); return false; }
 }
-bool seed_register(void * p, ssd::gpu::seed_offer_fn callback, void * data) noexcept {
-    if (!p || !callback || !data) return false;
-    auto & owner = *static_cast<transport_owner *>(p);
-    std::lock_guard<std::mutex> lock(owner.seed_mutex);
-    if (owner.closed) return false;
-    if (owner.seed) return owner.seed == callback && owner.seed_data == data;
-    owner.seed = callback; owner.seed_data = data; return true;
-}
-bool seed_unregister(void * p, ssd::gpu::seed_offer_fn callback, void * data) noexcept {
-    if (!p) return false;
-    auto & owner = *static_cast<transport_owner *>(p);
-    std::lock_guard<std::mutex> lock(owner.seed_mutex);
-    if (owner.seed != callback || owner.seed_data != data) return false;
-    if (owner.last_seed_done && cudaEventSynchronize(owner.last_seed_done) != cudaSuccess) fatal("seed unregister");
-    owner.seed = nullptr; owner.seed_data = nullptr; owner.pending = owner.last_seed_done = nullptr; return true;
-}
-bool seed_offer(void * p, const char * name, const void * data, size_t bytes, int64_t experts,
-        const int32_t * counts, void * stream_ptr) noexcept {
-    if (!p || !name || !data || !bytes || experts <= 0 || !counts || !stream_ptr) return false;
-    auto & owner = *static_cast<transport_owner *>(p);
-    std::lock_guard<std::mutex> lock(owner.seed_mutex);
-    if (owner.closed) return false;
-    if (!owner.seed) return true;
-    if (cudaSetDevice(owner.device) != cudaSuccess) return false;
-    if (!owner.ready && cudaEventCreateWithFlags(&owner.ready, cudaEventDisableTiming) != cudaSuccess) return false;
-    if (cudaEventRecord(owner.ready, reinterpret_cast<cudaStream_t>(stream_ptr)) != cudaSuccess) return false;
-    void * done = nullptr;
-    const int result = owner.seed(owner.seed_data, name, data, bytes, experts, counts, owner.ready, &done);
-    if (result < 0) return false;
-    if (result > 0 && done) owner.pending = owner.last_seed_done = static_cast<cudaEvent_t>(done);
-    return true;
-}
-bool seed_fence(void * p, void * stream_ptr) noexcept {
-    if (!p || !stream_ptr) return false;
-    auto & owner = *static_cast<transport_owner *>(p);
-    std::lock_guard<std::mutex> lock(owner.seed_mutex);
-    if (owner.closed) return false;
-    if (owner.pending) {
-        if (cudaSetDevice(owner.device) != cudaSuccess || cudaStreamWaitEvent(reinterpret_cast<cudaStream_t>(stream_ptr), owner.pending, 0) != cudaSuccess) return false;
-        owner.pending = nullptr;
-    }
-    return true;
-}
 } // namespace
 extern "C" const ssd::gpu::transport_v1 * ggml_backend_cuda_ssd_transport_v1() {
     static const ssd::gpu::transport_v1 api{1, sizeof(ssd::gpu::transport_v1), sizeof(ssd::runtime_services),
-        create, quiesce, destroy, copy_ranges, dense_has, dense_prepare, dense_read_ahead, dense_copy,
-        seed_register, seed_unregister, seed_offer, seed_fence};
+        create, quiesce, destroy, dense_has, dense_prepare, dense_read_ahead, dense_copy};
     return &api;
 }

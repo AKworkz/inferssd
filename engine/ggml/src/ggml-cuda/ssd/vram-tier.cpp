@@ -3,9 +3,6 @@
 #include "vram-compute-api.h"
 #include "../../ggml-ssd/place/layer-plan.h"
 #include "ggml.h"
-#include "ggml-ssd/gpu/transport.h"
-#include "ggml-ssd/store/source.h"
-extern "C" const ssd::gpu::transport_v1 * ggml_backend_cuda_ssd_transport_v1();
 #include "backend-functions.h"
 #include "../../ggml-ssd/gpu-tier-settings.h"
 #include "../../ggml-ssd/testing/tier.h"
@@ -27,7 +24,6 @@ extern "C" const ssd::gpu::transport_v1 * ggml_backend_cuda_ssd_transport_v1();
 #include <mutex>
 #include <thread>
 #include <string>
-#include <map>
 #include <set>
 
 namespace {
@@ -63,10 +59,6 @@ struct tier {
     using reclaimer_callback=int (*)(void *,size_t,size_t *);
     using reclaimer_register_fn=bool (*)(int,reclaimer_callback,void *);
     using reclaimer_unregister_fn=bool (*)(int,reclaimer_callback,void *);
-    // ggml-cuda's prefill seed registry (ggml_cuda_moe_seed_register): the scheduler offers each routed expert
-    // tensor it copied to the device for a graph prefill pass, with the pass's routing counts.
-    using seed_callback=int (*)(void *,const char *,const void *,size_t,int64_t,const int32_t *,void *,void **);
-    using seed_register_fn=bool (*)(int,seed_callback,void *);
     uint64_t budget,epoch=0,token=0,capacity_bytes=0,safety_bytes;
     uint64_t gpu_hits=0,cpu_requests=0,uploads=0,upload_bytes=0,borrowed_uploads=0;
     double upload_us=0,upload_wait_us=0,compute_us=0;
@@ -193,26 +185,19 @@ struct tier {
     static constexpr size_t prefill_transient_slots=2; // the device slots a pass's transients are copied into
     // Storage made outside a decode (a cold prefill, the load) has no decode epoch: the next decode adopts it.
     bool adopt_next_decode=false;
-    // Seeds of the graph prefill (seed_offer): empty slots filled with the prompt's most-routed experts of each
-    // layer, copied device to device from the scheduler's copy on the tier's own stream, published when the prefill
-    // completes. A layer plans its share of the free slots (free / layers not yet planned) at its first offered role.
+    // Seeds of a prefill (kimi_vram_prefill_api v10): empty slots filled with the prompt's most-routed experts of each
+    // layer, published when the prefill completes. A layer plans its share of the free slots (free / layers not yet
+    // planned) before its first prepare (plan_sink_seeds).
     struct pending_seed { int slot; kimi_vram_request key; uint8_t roles; };
     std::vector<pending_seed> seeds;
     std::set<int> seed_planned;uint64_t seed_plan_generation=UINT64_MAX;
-    bool seed_registered=false;cudaStream_t seed_stream=nullptr;cudaEvent_t seed_done=nullptr;
-    std::map<int,ssd::platform::file_identity> seed_files; // the resolver's descriptors' identities, for the seeds' keys
-    // the expert-pack resolver (ggml-cuda's, found at registration): tensor name, expert, logical bytes, experts ->
-    // descriptor, logical offset, bytes
-    using resolve_fn=bool (*)(const char *,int,size_t,int64_t,int *,uint64_t *,size_t *);
-    resolve_fn seed_resolve=nullptr; // explicit fixture-only override
-    ssd::store::source_view seed_source{};
-    void * seed_owner=nullptr;
+    cudaStream_t seed_stream=nullptr; // the lane's seed copies
     uint64_t seeds_planned=0,seeds_published=0,seeds_cancelled=0,seeds_freed=0,seed_copies=0,seed_bytes=0;
-    double seed_offer_us=0,seed_wait_us=0;
+    double seed_wait_us=0;
     uint64_t prefill_count=0; // prefills begun: a seed plan is one prefill's
-    // The sink prefill's seeds (kimi_vram_prefill_api v10): the routes of the next prepare's union, then each of its
-    // requests' reserved seed slot (-1: none) for the layer. A seed the CPU computes is copied on its own stream, an
-    // event a request; one on the prefill lane is copied by the worker behind the bytes it already moves.
+    // The routes of the next prepare's union, then each of its requests' reserved seed slot (-1: none) for the layer.
+    // A seed the CPU computes is copied on its own stream, an event a request; one on the prefill lane is copied by
+    // the worker behind the bytes it already moves.
     std::vector<int32_t> sink_seed_routes;
     std::vector<int> sink_seed_slot;
     std::vector<cudaEvent_t> sink_seed_events,lane_seed_events;
@@ -238,16 +223,13 @@ struct tier {
     std::string failure;
 
     explicit tier(uint64_t b, const tier_options & options = {}, ssd::host::context_client * host = nullptr,
-            int configured_device = -1,
-            const ssd::store::source_view * source = nullptr, void * transport = nullptr) : configuration(options), host_client(host),
+            int configured_device = -1) : configuration(options), host_client(host),
         budget(b), safety_bytes(options.safety_mib << 20), async_upload(options.async_upload),
         memory_trace(options.memory_trace), keep_across_requests(options.keep_across_requests), timing(options.timing),
         elastic_requested(options.elastic), elastic_demand_reclaim(options.demand_reclaim || b == automatic_budget),
         elastic_safety_blocks(options.safety_blocks), elastic_safety_mib(options.margin_mib), elastic_max_slots(options.max_slots),
         fail_malloc_at(options.fail_malloc_at), fail_free_at(options.fail_free_at), deferred_upload(options.deferred_upload) {
         device = configured_device;
-        if (source) seed_source = *source;
-        seed_owner = transport;
         watermark = options.watermark;
         watermark_low_mib = options.low_mib;
         watermark_high_mib = options.high_mib;
@@ -262,7 +244,7 @@ struct tier {
     }
     ~tier(){
         try {
-            disarm_reclaimer();unregister_oom_reclaimer();unregister_seed();
+            disarm_reclaimer();unregister_oom_reclaimer();
             // A server can stop after the response while the last deferred
             // upload is complete but has not been collected. release() first
             // aborts those unpublished table reservations, then frees blocks;
@@ -283,9 +265,9 @@ struct tier {
             if(unified)std::fprintf(stderr,"[kimi_vram_host_reserve] reason=destroy floor=%zu demand=%zu host_reclaims=%llu host_reclaim_refusals=%llu live_reclaim_refusals=%llu\n",
                 host_floor,host_demand,(unsigned long long)host_reclaims,(unsigned long long)host_reclaim_refusals,(unsigned long long)live_reclaim_refusals);
             if(adaptive_admission)admission_log("final ");
-            if(seeds_planned)std::fprintf(stderr,"[kimi_vram_seed] reason=destroy planned=%llu published=%llu cancelled=%llu freed_unused=%llu copies=%llu bytes=%llu offer_us=%.0f wait_us=%.0f\n",
+            if(seeds_planned)std::fprintf(stderr,"[kimi_vram_seed] reason=destroy planned=%llu published=%llu cancelled=%llu freed_unused=%llu copies=%llu bytes=%llu wait_us=%.0f\n",
                 (unsigned long long)seeds_planned,(unsigned long long)seeds_published,(unsigned long long)seeds_cancelled,
-                (unsigned long long)seeds_freed,(unsigned long long)seed_copies,(unsigned long long)seed_bytes,seed_offer_us,seed_wait_us);
+                (unsigned long long)seeds_freed,(unsigned long long)seed_copies,(unsigned long long)seed_bytes,seed_wait_us);
             if(host_readable || host_jobs || host_refused || host_probe_taken){
                 kimi_vram_host_costs c={};costs2(c);
                 std::fprintf(stderr,"[kimi_vram_host] in_place=%d jobs=%llu batches=%llu copies=%llu reserved_copies=%llu refused=%llu copy_mb=%.1f copy_us=%.0f "
@@ -303,7 +285,6 @@ struct tier {
             if(prefill_transient_arena)cuda_check(free_dram(prefill_transient_arena,prefill_transient_bytes));
             if(upload_stream)cuda_check(cudaStreamDestroy(upload_stream));
             if(deferred_stream)cuda_check(cudaStreamDestroy(deferred_stream));
-            if(seed_done)cuda_check(cudaEventDestroy(seed_done));
             if(seed_stream)cuda_check(cudaStreamDestroy(seed_stream));
             if(seed_host_stream)cuda_check(cudaStreamDestroy(seed_host_stream));
             for(auto & e:sink_seed_events)if(e)cuda_check(cudaEventDestroy(e));
@@ -537,121 +518,9 @@ struct tier {
     void disarm_reclaimer(){
         std::lock_guard<std::mutex> lock(lifecycle_mutex);reclaimer_armed=false;
     }
-    static void drain_failed_seed_offer(tier * t) noexcept {
-        if(t->seed_stream && (cudaSetDevice(t->device)!=cudaSuccess || cudaStreamSynchronize(t->seed_stream)!=cudaSuccess)){
-            std::fprintf(stderr,"[ssd.tier] cannot drain failed seed offer\n");std::abort();
-        }
-    }
-    static int seed_offer_thunk(void * p,const char * name,const void * data,size_t expert_bytes,int64_t n,
-            const int32_t * counts,void * ready,void ** done) noexcept {
-        auto * t=static_cast<tier *>(p);
-        try{return t->seed_offer(name,static_cast<const char *>(data),expert_bytes,n,counts,static_cast<cudaEvent_t>(ready),done);}
-        catch(const std::exception & e){
-            drain_failed_seed_offer(t);
-            std::fprintf(stderr,"[kimi_vram_seed] event=offer status=fail error=%s\n",e.what());
-            if(done)*done=nullptr;
-            return -1;
-        }catch(...){drain_failed_seed_offer(t);if(done)*done=nullptr;return -1;}
-    }
-    void register_seed(){
-        if(seed_registered || device<0)return;
-        if(!seed_owner || !seed_source.resolve){
-            if(configuration.fixture)return;
-            throw std::runtime_error("missing context prefill seed owner or source");
-        }
-        const auto * transport=ggml_backend_cuda_ssd_transport_v1();
-        if(!transport->seed_register(seed_owner,seed_offer_thunk,this))
-            throw std::runtime_error("context prefill seed registration failed");
-        seed_registered=true;
-    }
-    void unregister_seed(){
-        if(!seed_registered)return;
-        const auto * transport=ggml_backend_cuda_ssd_transport_v1();
-        if(!transport->seed_unregister(seed_owner,seed_offer_thunk,this))
-            throw std::runtime_error("context prefill seed unregister failed");
-        seed_registered=false;
-    }
-    // A seed's key as the sink keys a decode request's payload (kimi_vram_source_identity): each role's file, its
-    // logical offset and its logical bytes, from the resolver the sink's sources come from.
-    bool seed_key(int layer,int expert,kimi_vram_request & r){
-        static const char * const names[3]={"up","gate","down"};
-        if(!seed_source.resolve && !(configuration.fixture && seed_resolve))return false;
-        const expert_format * x=format_of(layer);
-        if(!x)return false;
-        r={};r.layer=layer;r.expert=expert;
-        for(int i=0;i<3;++i){
-            char name[64];std::snprintf(name,sizeof(name),"blk.%d.ffn_%s_exps.weight",layer,names[i]);
-            int fd=-1;uint64_t offset=0;size_t bytes=0;
-            const bool resolved=seed_source.resolve?seed_source.resolve(seed_source.userdata,name,expert,x->role_bytes[i],n_experts,&fd,&offset,&bytes):
-                seed_resolve(name,expert,x->role_bytes[i],n_experts,&fd,&offset,&bytes);
-            if(!resolved || fd<0 || bytes!=x->role_bytes[i])return false;
-            auto it=seed_files.find(fd);
-            if(it==seed_files.end()){ssd::platform::file_identity file;if(!ssd::platform::identity(fd,file))return false;it=seed_files.emplace(fd,file).first;}
-            r.role[i]=kimi_vram_source_identity(it->second,offset,x->role_bytes[i]);
-        }
-        return true;
-    }
-    // This layer's share of the empty slots, the free ones over the layers not planned yet in this prefill (what an
-    // earlier layer left rolls forward), filled with the experts the pass routed most, those not resident already.
-    void seed_plan(int layer,const int32_t * counts){
-        const size_t left=table->pool_layers.size()+1>seed_planned.size()?table->pool_layers.size()+1-seed_planned.size():1;
-        const size_t quota=table->free_slots(layer)/left;
-        if(!quota)return;
-        std::vector<int> order;
-        for(int e=0;e<n_experts;++e)if(counts[e]>0)order.push_back(e);
-        std::stable_sort(order.begin(),order.end(),[&](int a,int b){return counts[a]>counts[b];});
-        size_t taken=0;
-        for(int e:order){
-            if(taken==quota)break;
-            kimi_vram_request r;
-            if(!seed_key(layer,e,r))continue;
-            const int slot=table->reserve_cold_prefill(r);
-            if(slot>=0){seeds.push_back({slot,r,0});++taken;}
-            else if(!table->free_slots(layer))break;
-        }
-        seeds_planned+=taken;
-    }
-    // ggml-cuda's prefill seed callback, on the scheduler's thread after it copied one routed expert tensor (`data`,
-    // `expert_bytes` an expert) of a graph prefill pass to the device and recorded `ready` behind the copy. The
-    // planned experts' role goes into their slots on the tier's stream; *done is recorded behind those copies, and
-    // the scheduler's stream waits for it before it can reuse the source.
-    int seed_offer(const char * name,const char * data,size_t expert_bytes,int64_t n,const int32_t * counts,
-            cudaEvent_t ready,void ** done){
-        if(done)*done=nullptr;
-        int layer=-1,consumed=0;char role_name[8]={};
-        if(!name || !data || !counts || !ready || !done ||
-                std::sscanf(name,"blk.%d.ffn_%7[a-z]_exps.weight%n",&layer,role_name,&consumed)!=2 || !consumed || name[consumed])return 0;
-        const int role=!std::strcmp(role_name,"up")?0:!std::strcmp(role_name,"gate")?1:!std::strcmp(role_name,"down")?2:-1;
-        std::lock_guard<std::mutex> lock(lifecycle_mutex);
-        const expert_format * x=format_of(layer); // the layer's own format: a seed's roles go where its slot keeps them
-        if(role<0 || poisoned || !format_mode || !table || !has_storage() || active || n!=n_experts ||
-                !x || expert_bytes!=x->role_bytes[role] || table->in_flight || table->lease_generation ||
-                std::find(table->pool_layers.begin(),table->pool_layers.end(),layer)==table->pool_layers.end())return 0;
-        const auto start=clock_type::now();
-        if(seed_plan_generation!=prefill_count){seed_plan_generation=prefill_count;seed_planned.clear();seed_files.clear();}
-        if(seed_planned.insert(layer).second)seed_plan(layer,counts);
-        size_t offset=0;for(int i=0;i<role;++i)offset+=x->role_bytes[i];
-        bool copied=false;
-        for(auto & s:seeds){
-            if(s.key.layer!=layer || ((s.roles>>role)&1))continue;
-            if(!copied){
-                cuda_check(cudaSetDevice(device));
-                if(!seed_stream)cuda_check(cudaStreamCreateWithFlags(&seed_stream,cudaStreamNonBlocking));
-                if(!seed_done)cuda_check(cudaEventCreateWithFlags(&seed_done,cudaEventDisableTiming));
-                cuda_check(cudaStreamWaitEvent(seed_stream,ready,0));
-                copied=true;
-            }
-            cuda_check(cudaMemcpyAsync(slot_base(size_t(s.slot))+offset,data+size_t(s.key.expert)*expert_bytes,x->role_bytes[role],
-                cudaMemcpyDeviceToDevice,seed_stream));
-            s.roles=uint8_t(s.roles|(1u<<role));++seed_copies;seed_bytes+=x->role_bytes[role];
-        }
-        if(copied){cuda_check(cudaEventRecord(seed_done,seed_stream));*done=seed_done;}
-        seed_offer_us+=micros(start);
-        return copied?1:0;
-    }
-    // A sink prefill's seeds for one layer (seed_routes before its prepare), planned as seed_plan plans a graph
-    // prefill's: the layer's share of the empty slots, the free ones over the layers not planned yet in this prefill,
-    // for the experts the pass routes most that no slot holds. Before the prepare leases its residents.
+    // A prefill's seeds for one layer (seed_routes before its prepare): the layer's share of the empty slots, the free
+    // ones over the layers not planned yet in this prefill (what an earlier layer left rolls forward), for the experts
+    // the pass routes most that no slot holds. Before the prepare leases its residents.
     void plan_sink_seeds(const kimi_vram_request * r,int count,const std::vector<int32_t> & routes){
         sink_seed_slot.assign(size_t(count),-1);
         sink_seed_pending.assign(size_t(count),0);
@@ -659,7 +528,7 @@ struct tier {
         std::lock_guard<std::mutex> lock(lifecycle_mutex);
         const int layer=r[0].layer;
         if(poisoned || !has_storage() || std::find(table->pool_layers.begin(),table->pool_layers.end(),layer)==table->pool_layers.end())return;
-        if(seed_plan_generation!=prefill_count){seed_plan_generation=prefill_count;seed_planned.clear();seed_files.clear();}
+        if(seed_plan_generation!=prefill_count){seed_plan_generation=prefill_count;seed_planned.clear();}
         if(!seed_planned.insert(layer).second)return; // a later pass of the prompt: its first one planned the layer
         const size_t left=table->pool_layers.size()+1>seed_planned.size()?table->pool_layers.size()+1-seed_planned.size():1;
         const size_t quota=table->free_slots(layer)/left;
@@ -739,9 +608,9 @@ struct tier {
             else{table->cancel_cold_prefill(size_t(s.slot),s.key);++cancelled;}
         }
         seeds_published+=published;seeds_cancelled+=cancelled;
-        std::fprintf(stderr,"[kimi_vram_seed] event=publish layers=%zu seeded=%zu cancelled=%zu slots=%zu copies=%llu bytes=%llu offer_us=%.0f wait_us=%.0f\n",
+        std::fprintf(stderr,"[kimi_vram_seed] event=publish layers=%zu seeded=%zu cancelled=%zu slots=%zu copies=%llu bytes=%llu wait_us=%.0f\n",
             seed_planned.size(),published,cancelled,table->slots.size(),(unsigned long long)seed_copies,(unsigned long long)seed_bytes,
-            seed_offer_us,seed_wait_us);
+            seed_wait_us);
         seeds.clear();
     }
     bool allocate_block(size_t count,const char * reason){
@@ -1798,7 +1667,7 @@ struct tier {
         if(elastic_active)allocate_base();
         else{const size_t bytes=count*stride;cuda_check(allocate_dram(&arena,bytes));capacity_bytes=bytes;}
         if(memory_trace)memory_sample("after_allocate",micros(allocate_start));
-        probe_upload();register_seed();
+        probe_upload();
         arena_epoch=epoch;table->next_token();adopt_next_decode=!active;
         // On unified memory the rest of the first decode step (the RAM cache committing its slots, graph
         // instantiation) comes out of the same DRAM: grow at the token boundary after it (grow_after_first_token,
@@ -2575,7 +2444,6 @@ void * create_configured_tier(const ssd::settings::snapshot * input, const ssd::
     try {
         if (!input) { throw std::runtime_error("missing typed GPU tier settings"); }
         if (!services || !services->host) { throw std::runtime_error("missing process host budget client"); }
-        if (!services->source || !services->source->resolve || !services->gpu_transport) { throw std::runtime_error("missing context GPU source or transport"); }
         if (services->gpu_device < 0) { throw std::runtime_error("invalid configured CUDA device"); }
         const auto settings = *input;
         const auto * budget = settings.vram_budget();
@@ -2606,7 +2474,7 @@ void * create_configured_tier(const ssd::settings::snapshot * input, const ssd::
             options.memory_trace = debug.ledger;
             options.timing = debug.profile;
         }
-        return new tier(bytes, options, services->host, services->gpu_device, services->source, services->gpu_transport);
+        return new tier(bytes, options, services->host, services->gpu_device);
     } catch (const std::exception & e) {
         if (error && size) { std::snprintf(error, size, "%s", e.what()); }
         return nullptr;
