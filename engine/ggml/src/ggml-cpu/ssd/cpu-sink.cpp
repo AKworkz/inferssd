@@ -1896,7 +1896,8 @@ struct kimi_cpu_sink {
     // decode token and a grouped-prefill pass: the CPU's time for a one-token expert (decode's experts and a one-token
     // pass's, their running mean) and the grouped path's line (the sink's prefill calibration); the tier's
     // vector-engine lines and copy rates (host API costs2: every call and copy it makes); the batched engine's lines
-    // (the prefill calibration); the drive's line over decode's last 64 layers with reads and the last pass's layers.
+    // (the prefill calibration); the drive's line over decode's last 64 layers with reads and the newest grouped-prefill
+    // layer with reads (ssd::place::prefill_reads).
     // route_bytes: what the pass's engine sends over the link for a GPU route (its lane: the batched engine's route
     // list, the hand engine's input row a route; a token's input row is in the batched engine's time a token). A
     // page-locked copy is priced only once the tier has measured one; a pageable one, and the rows, at the start

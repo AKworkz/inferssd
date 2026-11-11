@@ -108,6 +108,20 @@ static void calibration_contract() {
     f.gpu = {}; f.engine_overhead_us = 0; f.upload_us = 4; f.ssd_upload_us = 6; f.total_worker_us = 50; f.read_wait_us = 10;
     fit = observe_prefill_lines(s,cost,prior,f);
     check(fit.gpu_lane_us == 10 && fit.gpu_overhead_us == 0, "CPU-only sample cannot train GPU overhead from worker bookkeeping");
+
+    // The drive's line follows the newest layer with reads: two layers at 1 GB/s, then one at 10 GB/s and one without
+    // reads, price the next layer's reads at 10 GB/s.
+    prefill_learning d; d.window = 4; cost_lines none;
+    prefill_feedback r = {}; r.ntokens = 32;
+    for (const double us : {1e6, 1e6, 1e5, 0.0}) {
+        r.read_bytes = us > 0 ? 1000000000 : 0; r.read_us = us; (void) observe_prefill_lines(d,none,prior,r);
+    }
+    decode_learning idle;
+    lane_measurement measured = {2, 3, 4, 5, 1, 100, 200, 7, true};
+    lane_geometry lane = {4096, 2048, true, true};
+    const auto t = make_table(none, prior, idle, d, measured, lane, 32, 0);
+    check(d.samples.size() == 4 && near(t.drive_us_per_mb, 100) && t.drive_fixed_us == 0,
+        "the drive's line follows the newest grouped-prefill layer with reads");
 }
 int main() {
     learning_contract(); prefetch_contract(); placement_contract(); calibration_contract();
