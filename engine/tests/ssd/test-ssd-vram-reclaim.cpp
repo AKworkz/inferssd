@@ -145,6 +145,7 @@ int main() {
         const auto g = key(2, 1);
         int slot = -1, queued = 0;
         hold();
+        struct cleanup { ~cleanup() { open_gate(); } } cleanup_on_error; // a failed check must not leave the copy held
         t.begin(52, 1, true);
         lifecycle_prepare(t,&g, 1,&slot);
         require(t.elastic_active && t.blocks.size() == 1 && t.table->admissions[0] >= 0, "reclaim fixture has no admission");
@@ -159,7 +160,7 @@ int main() {
         const auto * residency = kimi_vram_residency_get_api();
         uint8_t held = 0;
         residency->held(&t, g.layer, &g.expert, 1, &held);
-        require(residency->version == 2 && held == 1, "a deferred upload in flight was not held");
+        require(residency->version == 3 && held == 1, "a deferred upload in flight was not held");
         auto reclaim = std::async(std::launch::async, [&] { return t.reclaim_one(4096, &freed); });
         require(!done_within(reclaim, 150), "the reclaim did not wait for the deferred copy");
         open_gate();

@@ -49,8 +49,6 @@ int main() {
     int slots[2] = {}, queued = 0, count = -1;
     kimi_vram_request collected[4] = {};
     int32_t aborted[4] = {};
-    kimi_vram_ready_lease lease = {};
-    int ready[2] = {};
     struct cleanup { ~cleanup() { open_gate(); } } cleanup_on_error;
     tier t(2 * stride, inputs.tier_policy()); // two slots, one global pool for every layer
     t.deferred_hook = upload_gate;
@@ -66,9 +64,6 @@ int main() {
     require(queued == 1 && copy_started(), "borrowed upload was not deferred to the upload thread");
     t.finish(out.data(), 256);
     require(t.table->slots[slot_a].uploading && !t.table->slots[slot_a].valid, "finish published or dropped an unfinished upload");
-    t.acquire_ready(31, &a, 1, &lease, ready);
-    require(!ready[0], "an unfinished upload counted as ready");
-    t.release_ready(lease);
     t.collect(-2, collected, aborted, 4, &count);
     require(count == 0, "collect published an upload still in flight");
 
@@ -90,9 +85,6 @@ int main() {
     std::vector<unsigned char> copied(stride);
     cuda_check(cudaMemcpy(copied.data(), t.slot_base(size_t(slot_a)), stride, cudaMemcpyDeviceToHost));
     require(!std::memcmp(copied.data(), payload.data(), stride), "deferred upload corrupted the borrowed payload");
-    t.acquire_ready(31, &a, 1, &lease, ready);
-    require(ready[0], "published upload is not ready");
-    t.release_ready(lease);
     t.begin(31, 2, true);
     lifecycle_prepare(t,&a, 1,slots);
     require(slots[0] == slot_a, "published upload did not serve a hit");

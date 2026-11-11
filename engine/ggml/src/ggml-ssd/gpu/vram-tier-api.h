@@ -64,26 +64,15 @@ struct kimi_vram_tier_api {
                   char * error, size_t error_size);
     int (*cancel)(void * context, char * error, size_t error_size);
 };
-// Optional extension, separate from transport ABI 2. acquire may only follow a
-// successful finish. It pins each returned ready copy while RAM decides whether
-// to drop its duplicate; pending uploads never count as ready. The caller owns
-// all metadata under the sink run mutex and must release its CPU/I/O/DMA leases
-// before committing a RAM drop. No begin/prepare may occur with a live lease.
-// held (version 2): which of `count` experts of `layer` the tier holds now (out[i] 1 or 0): a slot has its bytes,
+// Optional extension, separate from transport ABI 2.
+// held (version 3): which of `count` experts of `layer` the tier holds now (out[i] 1 or 0): a slot has its bytes,
 // or is reserved for a deferred upload of them that the layer's next prepare collects first, so that prepare would
 // pin it as a hit. A seed counts from its publication: a prefill's planned seeds when the decode phase completes the
-// prefill, Q2's cold-prefill admission right after its copy. No lease and any phase: the next-layer prefetch asks
-// before it reads an expert into RAM, and the answer may change at the next admission, eviction or resize.
-struct kimi_vram_ready_lease { uint64_t epoch, generation; };
+// prefill, Q2's cold-prefill admission right after its copy. Any phase: the next-layer prefetch asks before it reads
+// an expert into RAM, and the RAM cache before it takes a slot (its copy of an expert the tier holds goes first); the
+// answer may change at the next admission, eviction or resize.
 struct kimi_vram_residency_api {
-    uint32_t version, size;   // 2
-    int (*acquire)(void * context, uint64_t epoch, const struct kimi_vram_request * requests,
-                   int count, struct kimi_vram_ready_lease * lease, int * ready,
-                   char * error, size_t error_size);
-    int (*validate)(void * context, const struct kimi_vram_ready_lease * lease,
-                    char * error, size_t error_size);
-    int (*release)(void * context, const struct kimi_vram_ready_lease * lease,
-                   char * error, size_t error_size);
+    uint32_t version, size;   // 3
     void (*held)(void * context, int32_t layer, const int32_t * experts, int count, uint8_t * out);
 };
 // Optional explicit-format extension, separate from transport ABI 2. The ABI 2

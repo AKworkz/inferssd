@@ -397,14 +397,6 @@ public:
         for(int s:admissions)if(s>=0)slots[size_t(s)].locked=false;
         in_flight=false;
     }
-    uint64_t acquire_ready(const kimi_vram_request * input, size_t n, int * ready) {
-        if (in_flight || lease_generation || native_pinned() || n > 16 || (n && (!input || !ready)) || next_generation == UINT64_MAX)
-            throw std::runtime_error("invalid VRAM ready lease phase");
-        std::vector<int> found(n, -1);
-        const uint64_t generation = acquire_slots(input, n, found.data());
-        for (size_t j = 0; j < n; ++j) { ready[j] = found[j] >= 0; }
-        return generation;
-    }
     // Read-only grouped-prefill lease. Unlike prepare(), this accepts the full
     // distinct-expert union, does not update heat/admission state, and returns
     // physical slot IDs so a later worker can reuse each resident triplet.

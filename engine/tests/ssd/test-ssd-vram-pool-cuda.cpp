@@ -47,12 +47,12 @@ int main(){
     {std::unique_lock<std::mutex> lock(barrier_mutex);require(barrier_cv.wait_for(lock,std::chrono::seconds(5),[]{return entered;}),"global compute did not enter");}
     upload(3);
     require(!t.table->slots[a_slot].valid && t.table->slots[b_slot].valid,"pending overwrite published early or invalidated live hit");
-    kimi_vram_ready_lease lease={};int ready[4]={};rejected([&]{t.acquire_ready(17,requests,4,&lease,ready);});
     unblock();t.finish(out.data(),256);bytes_equal(a_slot,3);bytes_equal(b_slot,2);
-    t.acquire_ready(17,requests,4,&lease,ready);
-    require(!ready[0] && !ready[1] && ready[2] && ready[3],"cross-layer READY accepted overwritten payload");
-    t.release_ready(lease);t.format_api=real_compute;
+    const auto valid=[](const vram_slot_table::entry & e){return e.valid;};
+    require(t.table->find(requests[0],valid)<0 && t.table->find(requests[1],valid)<0 &&
+            t.table->find(requests[2],valid)>=0 && t.table->find(requests[3],valid)>=0,
+            "an overwritten payload is still held, or a cross-layer one is not");
+    t.format_api=real_compute;
     t.begin(0,0,false);require(!t.arena && !t.table,"prefill did not release global arena");
-    rejected([&]{t.validate_ready(lease);});
     std::printf("REAL_CUDA_GLOBAL_POOL_PASS assertions=%d\n",assertions);return 0;
 }catch(const std::exception & e){unblock();std::fprintf(stderr,"GLOBAL_POOL_CUDA_FAIL: %s\n",e.what());return 1;}}

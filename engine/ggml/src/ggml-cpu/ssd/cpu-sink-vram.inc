@@ -159,7 +159,7 @@ struct sink_vram {
         if (!prefill_only) {
             // what the tier holds: the next-layer prefetch asks, and the RAM cache, whose copy of such an expert is a backup
             residency = configuration.gpu.residency;
-            if (!residency || residency->version != 2 || residency->size != sizeof(*residency) || !residency->held) {
+            if (!residency || residency->version != 3 || residency->size != sizeof(*residency) || !residency->held) {
                 throw std::runtime_error("GPU residency ABI missing or incompatible; no fallback");
             }
         }

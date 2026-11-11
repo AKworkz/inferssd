@@ -69,23 +69,16 @@ int main() {
     // Compute is still held. admit must have returned with source ownership
     // held, without either publishing a hit or copying through the CPU thread.
     require(!proceed && t.pending_uploads.size()==1 && !t.table->slots[destination].valid,"borrowed upload was published early");
-    kimi_vram_ready_lease lease={};int ready[2]={};
-    rejected([&]{t.acquire_ready(17,requests,2,&lease,ready);});
     unblock();t.finish(out.data(),256);
     require(t.done && t.pending_uploads.empty() && t.table->slots[destination].valid,"finish did not publish completed upload");
     std::vector<unsigned char> copied(3*role);
     cuda_check(cudaMemcpy(copied.data(),t.arena+size_t(destination)*t.stride,copied.size(),cudaMemcpyDeviceToHost));
     for(int i=0;i<3;++i)require(!std::memcmp(copied.data()+i*role,payload.data(),role),"borrowed payload corrupted");
     std::fill(payload.begin(),payload.end(),0xff);
-    rejected([&]{t.acquire_ready(18,requests,2,&lease,ready);});
-    t.acquire_ready(17,requests,2,&lease,ready);require(ready[0] && ready[1],"ready confirmation missing");
-    rejected([&]{t.begin(18,1,true);});
-    const auto old=lease;auto stale=lease;++stale.generation;
-    rejected([&]{t.release_ready(stale);});t.validate_ready(lease);t.release_ready(lease);
-    rejected([&]{t.validate_ready(old);});
+    const auto valid=[](const vram_slot_table::entry & e){return e.valid;};
+    require(t.table->find(requests[0],valid)>=0 && t.table->find(requests[1],valid)>=0,
+            "the hit and the published upload are not both held");
     t.release();std::fill(payload.begin(),payload.end(),0);warm();
-    t.acquire_ready(17,requests,1,&lease,ready);require(lease.generation>old.generation,"arena recreation reused a confirmation");
-    rejected([&]{t.validate_ready(old);});t.release_ready(lease);
     {
         std::lock_guard<std::mutex> lock(barrier_mutex);entered=proceed=false;inject_error=true;
     }

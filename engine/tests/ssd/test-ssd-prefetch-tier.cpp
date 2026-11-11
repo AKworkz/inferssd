@@ -26,12 +26,6 @@ int tier_launch(void *, const void *, size_t, float, float, char *, size_t) { re
 int tier_admit(void *, const kimi_vram_request *, const void *, const void *, const void *, int, char *, size_t) { return 0; }
 int tier_finish(void *, float *, size_t, char *, size_t) { return 0; }
 int tier_cancel(void *, char *, size_t) { return 0; }
-int tier_no_lease(void *, uint64_t, const kimi_vram_request *, int, kimi_vram_ready_lease *, int *, char * e, size_t n) {
-    std::snprintf(e, n, "no ready leases in this test"); return 1;
-}
-int tier_no_lease_check(void *, const kimi_vram_ready_lease *, char * e, size_t n) {
-    std::snprintf(e, n, "no ready leases in this test"); return 1;
-}
 void tier_held(void *, int32_t layer, const int32_t * experts, int count, uint8_t * out) {
     for (int i = 0; i < count; ++i) { out[i] = tier_holds.count({ layer, experts[i] }) != 0; }
 }
@@ -50,8 +44,7 @@ int tier_place(void *, const int * cpus, int count, char *, size_t) {
 const ssd::gpu::provider_v1 * stand_in_provider() {
     static const kimi_vram_tier_api api = { 2, sizeof(kimi_vram_tier_api), tier_create, tier_destroy, tier_begin,
         tier_prepare, tier_launch, tier_admit, tier_finish, tier_cancel };
-    static const kimi_vram_residency_api residency = { 2, sizeof(kimi_vram_residency_api), tier_no_lease,
-        tier_no_lease_check, tier_no_lease_check, tier_held };
+    static const kimi_vram_residency_api residency = { 3, sizeof(kimi_vram_residency_api), tier_held };
     static const kimi_vram_format_api format = { 2, sizeof(kimi_vram_format_api), no_slots,
         [](void *, const void *, size_t, const kimi_vram_activation *, char *, size_t) { return 0; } };
     static const kimi_vram_prefill_api prefill = { 10, sizeof(kimi_vram_prefill_api), no_slots,

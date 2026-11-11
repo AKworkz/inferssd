@@ -69,7 +69,6 @@ struct tier {
     // Opt-in timing split (the profile debug channel): launch-to-worker handoff and the sink's wait in finish.
     bool timing=false;uint64_t launches=0;double handoff_us=0,finish_drain_us=0;clock_type::time_point launch_time{};
     uint64_t memory_samples=0,memory_free_min=UINT64_MAX,memory_free_max=0;
-    uint64_t ready_sequence=0,live_ready_generation=0;
     int device=-1,latent=0,hidden=0;
     // Unified memory (DGX Spark, Jetson): the tier's blocks are system memory. It keeps the host-memory ledger's
     // floor (set_host_floor) and the RAM cache's uncommitted slots (set_host_demand) of MemAvailable free and
@@ -472,8 +471,7 @@ struct tier {
     }
     // Slots in use by anything but a deferred upload: a layer, a residency lease or grouped prefill.
     bool busy(){
-        if((table && (table->in_flight || table->lease_generation || table->native_pinned())) || live_ready_generation ||
-                prefill_live)return true;
+        if((table && (table->in_flight || table->lease_generation || table->native_pinned())) || prefill_live)return true;
         std::lock_guard<std::mutex> lock(mutex);
         return !done || prefill_queued || !upload_jobs.empty() || !pending_uploads.empty();
     }
@@ -1104,7 +1102,7 @@ struct tier {
             cuda_check(cudaSetDevice(device));cuda_check(free_dram(prefill_transient_arena,prefill_transient_bytes));
             prefill_transient_arena=nullptr;prefill_transient_bytes=0;
         }
-        capacity_bytes=0;have_token=false;failure.clear();active=false;pending_uploads.clear();live_ready_generation=0;
+        capacity_bytes=0;have_token=false;failure.clear();active=false;pending_uploads.clear();
         adopt_next_decode=false;
         prefill_live=false;prefill_generation=0;prefill_queued=false;prefill_slots.clear();prefill_input.clear();
         {std::lock_guard<std::mutex> lock(mutex);prefill_launched=false;}
@@ -1117,7 +1115,6 @@ struct tier {
     void begin(uint64_t e,uint64_t t,bool decode){
         prefill_transient_phase=!decode;
         if(!decode)++prefill_count;
-        if(live_ready_generation)throw std::runtime_error("begin with live VRAM residency lease");
         if(!decode || !have_token || epoch!=e || token!=t)memory_token_report();
         // Optional retention through prefill. A failure, or a decode token of a
         // different model/context epoch than the arena's, still releases it all.
@@ -2320,7 +2317,7 @@ struct tier {
         if(!count || capacity<0 || (capacity && (!out || !aborted)) || wait_layer<KIMI_VRAM_COLLECT_IF_IDLE)throw std::runtime_error("invalid deferred VRAM collect");
         *count=0;
         if(!deferred_upload)throw std::runtime_error("deferred VRAM upload is off in the tier");
-        if((table && (table->in_flight || table->lease_generation)) || live_ready_generation){
+        if(table && (table->in_flight || table->lease_generation)){
             if(wait_layer==KIMI_VRAM_COLLECT_IF_IDLE)return;
             throw std::runtime_error("deferred VRAM collect inside a layer or a residency lease");
         }
@@ -2347,20 +2344,6 @@ struct tier {
         drain_deferred();
         std::lock_guard<std::mutex> lock(mutex);
         if(!failure.empty())throw std::runtime_error(failure);
-    }
-    void acquire_ready(uint64_t e,const kimi_vram_request * r,int count,kimi_vram_ready_lease * lease,int * ready){
-        if(!active || !have_token || e!=epoch || !table || !lease || live_ready_generation || ready_sequence==UINT64_MAX || count<0)
-            throw std::runtime_error("invalid VRAM residency epoch or phase");
-        table->acquire_ready(r,size_t(count),ready);
-        live_ready_generation=++ready_sequence;*lease={epoch,live_ready_generation};
-    }
-    void validate_ready(const kimi_vram_ready_lease & lease) const{
-        if(!table || lease.epoch!=epoch || !lease.generation || lease.generation!=live_ready_generation)
-            throw std::runtime_error("stale VRAM residency confirmation");
-        table->validate_ready(table->lease_generation);
-    }
-    void release_ready(const kimi_vram_ready_lease & lease){
-        validate_ready(lease);table->release_ready(table->lease_generation);live_ready_generation=0;
     }
     // The residency ABI's held(): under lifecycle_mutex, which every resize from another thread (host or OOM reclaim,
     // a prefill's seeds) takes.
@@ -2443,12 +2426,6 @@ int prefill_admit_cold(void * p,const kimi_vram_request *,const void *,const voi
     if(admitted)*admitted=0;
     return reject_implicit_format(p,e,n,"Q2 cold admission retired; use ordinary explicit-format prefill");
 }
-int residency_acquire(void * p,uint64_t epoch,const kimi_vram_request * r,int count,kimi_vram_ready_lease * lease,int * ready,char * e,size_t n){
-    auto * t=static_cast<tier *>(p);try{t->acquire_ready(epoch,r,count,lease,ready);return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
-int residency_validate(void * p,const kimi_vram_ready_lease * lease,char * e,size_t n){
-    auto * t=static_cast<tier *>(p);try{if(!lease)throw std::runtime_error("null VRAM lease");t->validate_ready(*lease);return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
-int residency_release(void * p,const kimi_vram_ready_lease * lease,char * e,size_t n){
-    auto * t=static_cast<tier *>(p);try{if(!lease)throw std::runtime_error("null VRAM lease");t->release_ready(*lease);return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
 void residency_held(void * p,int32_t layer,const int32_t * experts,int count,uint8_t * out){
     if(!out || count<=0)return;
     std::fill(out,out+count,uint8_t(0));if(p && experts)static_cast<tier *>(p)->held(layer,experts,count,out);}
@@ -2584,8 +2561,7 @@ extern "C" const kimi_vram_tier_api * kimi_vram_tier_get_api(){
     static const kimi_vram_tier_api api={2,sizeof(kimi_vram_tier_api),api_create,api_destroy,api_begin,api_prepare,api_launch,api_admit,api_finish,api_cancel};return &api;
 }
 extern "C" const kimi_vram_residency_api * kimi_vram_residency_get_api(){
-    static const kimi_vram_residency_api api={2,sizeof(kimi_vram_residency_api),residency_acquire,residency_validate,residency_release,
-        residency_held};return &api;
+    static const kimi_vram_residency_api api={3,sizeof(kimi_vram_residency_api),residency_held};return &api;
 }
 extern "C" const kimi_vram_deferred_api * kimi_vram_deferred_get_api(){
     static const kimi_vram_deferred_api api={3,sizeof(kimi_vram_deferred_api),deferred_admit,deferred_collect,deferred_wait};return &api;

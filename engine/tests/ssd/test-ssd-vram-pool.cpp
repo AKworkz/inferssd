@@ -64,12 +64,12 @@ int main() { try {
     publish(pool);rejected([&]{pool.clear();});
     pool.slots[pinned].native_refs=0;
     int ready[2]={};kimi_vram_request lookup[]={a,c};
-    const auto generation=pool.acquire_ready(lookup,2,ready);
-    require(ready[0] && ready[1],"global ready lookup lost a layer identity");
+    const auto generation=pool.acquire_slots(lookup,2,ready);
+    require(ready[0]>=0 && ready[1]>=0,"global lookup lost a layer identity");
     rejected([&]{pool.prepare(&b,1);});pool.release_ready(generation);
     lookup[0].layer=2;lookup[1].role[0].ctime_ns++;
-    const auto stale=pool.acquire_ready(lookup,2,ready);
-    require(!ready[0] && !ready[1],"global lookup accepted wrong layer or stale payload");
+    const auto stale=pool.acquire_slots(lookup,2,ready);
+    require(ready[0]<0 && ready[1]<0,"global lookup accepted wrong layer or stale payload");
     pool.release_ready(stale);
 
     // Global logical slots grow and shrink at block boundaries without
@@ -79,7 +79,7 @@ int main() { try {
     require(pool.slots.size()==6 && pool.layers[1].count==6 && pool.layers[2].count==6,
             "global grow did not publish every slot to every layer");
     require(pool.layers[1].counts[0]==retained_heat,"global grow reset selection heat");
-    const auto resize_lease=pool.acquire_ready(&c,1,ready);
+    const auto resize_lease=pool.acquire_slots(&c,1,ready);
     rejected([&]{pool.resize_global(2);});pool.release_ready(resize_lease);
     pool.slots[5].uploading=true;rejected([&]{pool.resize_global(5);});pool.slots[5].uploading=false;
     pool.resize_global(2);

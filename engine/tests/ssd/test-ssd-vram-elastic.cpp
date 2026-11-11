@@ -130,11 +130,10 @@ int main() {
             require(t.allocate_block(1,"test") && table.slots.size()==37,"the freed block did not come back");
         }
 
-        kimi_vram_ready_lease lease = {}; int ready = 0;
-        t.acquire_ready(17,&key,1,&lease,&ready);
+        int found = -1; const auto lease = t.table->acquire_slots(&key,1,&found);
         rejected([&]{t.prepare_prefill_reclaim();});
-        require(t.table->slots.size()==37,"exclusive lease changed capacity");
-        t.release_ready(lease);
+        require(t.table->slots.size()==37,"a live lease let the tier shrink");
+        t.table->release_ready(lease);
         t.prepare_prefill_reclaim();
         require(t.table->slots.size()==20 && t.blocks.size()==2 && t.reclaimer_armed,
                 "proactive shrink did not return to the base boundary");
