@@ -8,7 +8,9 @@
 #include <array>
 #include <cmath>
 #include <deque>
+#include <cstdint>
 #include <utility>
+#include <vector>
 
 namespace ssd { namespace place {
 
@@ -198,6 +200,27 @@ struct prefetch_plan { int layer, ranks; bool hinted, open_gate; };
 inline prefetch_plan plan_prefetch(int layer, int hint_layer, int hint_n, int topk, bool demand_reads) {
     const bool hinted = hint_n && hint_layer == layer + 1;
     return {layer + 1, hinted ? std::min(topk, hint_n) : 0, hinted, !demand_reads};
+}
+// How likely the next layer selects a novel expert of a hint rank: the share of the rank's novel experts it selected,
+// by the rule of succession (no evidence: one half).
+inline double prefetch_use_probability(uint64_t selected, uint64_t novel) {
+    return (double(selected) + 1.0) / (double(novel) + 2.0);
+}
+// What a speculative read of an expert is worth, in reads of it: p the chance the next layer uses the expert,
+// start_us when the read starts after the drive's idle window opens, read_us how long it takes, windows the idle
+// windows seen (length in us, weight). A window that ends after the read saves a read if the expert is used. One
+// that ends during it, a share r of the read left: the done part (1 - r) is saved if the expert is used, and the
+// rest takes r of a read's drive time from the demand reads if it is not, p (1 - r) - (1 - p) r = p - r. One that ends
+// before the read starts drops it, at no cost. No window seen yet: p.
+inline double prefetch_read_value(double p, double start_us, double read_us,
+        const std::vector<std::pair<double, double>> & windows) {
+    double value = 0, weight = 0;
+    for (const auto & w : windows) {
+        weight += w.second;
+        if (w.first >= start_us + read_us) { value += w.second * p; }
+        else if (w.first > start_us) { value += w.second * (p - (start_us + read_us - w.first) / read_us); }
+    }
+    return weight > 0 ? value / weight : p;
 }
 struct prefetch_rank { bool novel, skipped, request; };
 inline prefetch_rank plan_prefetch_rank(int32_t expert, bool held, bool cached, int rank, int topk) {

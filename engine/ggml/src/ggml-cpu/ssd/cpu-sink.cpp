@@ -567,12 +567,14 @@ struct kimi_cpu_sink {
         return true;
     }
 
-    // Next-layer expert prefetch (typed prefetch.depth). The graph applies the next
-    // layer's router to this layer's expert input and hands its experts over as a hint, best first; the first k
-    // that are neither cached nor held by the GPU tier now (its residency ABI) are read into RAM cache slots of the
-    // next layer once this layer's own reads are done, so the drive works through the gap before the next router
-    // runs. At any depth, 0 included, every rank of the hint is counted (prefetch_report): how often its expert was
-    // novel, how often the next layer selected a novel one, and how often a read one was used.
+    // Next-layer expert prefetch (typed prefetch.depth: the most hint ranks it weighs, 0 for none). The graph applies
+    // the next layer's router to this layer's expert input and hands its experts over as a hint, best first. Of its
+    // first prefetch.depth ranks, the experts neither cached nor held by the GPU tier now (its residency ABI) are read
+    // into RAM cache slots of the next layer once this layer's own reads are done, so the drive works through the gap
+    // before the next router runs: the likeliest first, each while its read pays (ssd::place::prefetch_read_value,
+    // from its rank's measured use, the reads ahead of it, the measured read time and the idle windows seen). At any
+    // depth, 0 included, every rank of the hint is counted (prefetch_report): how often its expert was novel, how
+    // often the next layer selected a novel one, and how often a read one was used.
     struct prefetch_job {
         int32_t layer = -1, expert = -1;
         int rank = -1;        // in the hint
@@ -585,6 +587,7 @@ struct kimi_cpu_sink {
         bool failed = false;
         bool activated = false; // published as a hit of a run that waits for the rest of its reads
         bool started = false;   // a read of one of its roles started (started_r)
+        sink_clock::time_point started_at; // when it did: its read time ends when its last role is read (read_time)
         // The only field a run's scheduler reads without the prefetch mutex: 0 while the reads may still complete,
         // 1 once all three roles are read, 2 once the job cannot complete (a read failed or a role was dropped).
         std::atomic<int> state{0};
@@ -615,6 +618,10 @@ struct kimi_cpu_sink {
         // Per rank of the hint: given, novel (neither held by the GPU tier nor in the RAM cache), novel and selected
         // by the next layer, read, and read and taken from the RAM cache by the next layer.
         uint64_t predicted_r[64] = {}, novel_r[64] = {}, novel_routed_r[64] = {}, issued_r[64] = {}, used_r[64] = {};
+        // Novel experts within the depth the value rule left unread (declined), per rank too.
+        uint64_t declined = 0, declined_r[64] = {};
+        // An expert's read time, from its first role's start to its last role's end (the readers take one at a time).
+        sink_duration_histogram read_time;
         int width = 0; // ranks of the widest hint
         // The reads that the current run selected (rank, expert), until its prepare says where it takes them from.
         std::pair<int, int32_t> selected_reads[64] = {};
@@ -1017,7 +1024,7 @@ struct kimi_cpu_sink {
             const auto item = from.front();
             from.pop_front();
             prefetch_job & job = *item.first;
-            if (!job.started) { job.started = true; ++prefetch.started_r[job.rank]; }
+            if (!job.started) { job.started = true; job.started_at = sink_clock::now(); ++prefetch.started_r[job.rank]; }
             self.job = &job; self.urgent = urgent; self.spill = self.spilled = false;
             const kimi_cpu_sink_source source = job.role[item.second];
             char * target = job.target[item.second];
@@ -1038,7 +1045,7 @@ struct kimi_cpu_sink {
             lock.lock();
             if (self.spill) { prefetch_end_spill(self, sink_clock::now()); }
             self.job = nullptr;
-            if (ok) { ++job.done; } else { job.failed = true; }
+            if (ok) { if (++job.done == 3) { prefetch.read_time.add(elapsed_us(job.started_at)); } } else { job.failed = true; }
             prefetch.reader_bytes += done;
             if (!--prefetch.running) { prefetch.reader_busy_us += elapsed_us(prefetch.busy_since); }
             --job.running;
@@ -1243,9 +1250,10 @@ struct kimi_cpu_sink {
             for (int i = 0; i < prefetch.width; ++i) { out.append("%s%llu", i ? "," : "", (unsigned long long) counts[i]); }
         };
         uint64_t reader_bytes = 0, spills = 0, started_r[64], spill_us_r[64];
-        double reader_busy_us = 0, spill_us = 0;
+        double reader_busy_us = 0, spill_us = 0, read_us_p50 = 0;
         {
             std::lock_guard<std::mutex> lock(prefetch.mutex);
+            read_us_p50 = prefetch.read_time.median_us();
             reader_bytes = prefetch.reader_bytes;
             reader_busy_us = prefetch.reader_busy_us;
             spill_us = prefetch.spill_us; spills = prefetch.spills;
@@ -1261,7 +1269,7 @@ struct kimi_cpu_sink {
         out.append("[kimi_cpu_sink_prefetch] reason=%s topk=%d layers=%llu predicted=%llu skip_vram=%llu skip_cached=%llu"
                 " vram_late=%llu skip_vram_lost=%llu unresolved=%llu no_slot=%llu issued=%llu ready=%llu cancelled=%llu failed=%llu carried=%llu"
                 " activated=%llu hits=%llu unused=%llu windows=%llu window_us_p50=%.0f window_us_mean=%.0f"
-                " reader_bytes=%llu reader_busy_us=%.0f spill_us=%.0f spills=%llu width=%d",
+                " reader_bytes=%llu reader_busy_us=%.0f spill_us=%.0f spills=%llu declined=%llu read_us_p50=%.0f width=%d",
                 reason, prefetch.topk, (unsigned long long) prefetch.layers, (unsigned long long) prefetch.predicted,
                 (unsigned long long) prefetch.skip_vram, (unsigned long long) prefetch.skip_cached,
                 (unsigned long long) prefetch.vram_late, (unsigned long long) prefetch.skip_vram_lost,
@@ -1273,10 +1281,11 @@ struct kimi_cpu_sink {
                 (unsigned long long) cache.prefetch_hits,
                 (unsigned long long) cache.prefetch_unused, (unsigned long long) prefetch.window.count,
                 prefetch.window.median_us(), prefetch.window.mean_us(), (unsigned long long) reader_bytes,
-                reader_busy_us, spill_us, (unsigned long long) spills, prefetch.width);
+                reader_busy_us, spill_us, (unsigned long long) spills, (unsigned long long) prefetch.declined,
+                read_us_p50, prefetch.width);
         ranks("predicted_r", prefetch.predicted_r); ranks("novel_r", prefetch.novel_r);
         ranks("novel_routed_r", prefetch.novel_routed_r); ranks("issued_r", prefetch.issued_r); ranks("used_r", prefetch.used_r);
-        ranks("started_r", started_r); ranks("spill_us_r", spill_us_r);
+        ranks("started_r", started_r); ranks("spill_us_r", spill_us_r); ranks("declined_r", prefetch.declined_r);
         out.append("\n");
         out.flush();
     }
@@ -1319,18 +1328,50 @@ struct kimi_cpu_sink {
         if (policy.open_gate) { prefetch_open_gate(); }
         const int k = policy.ranks;
         if (!k) { return; }
+        // The novel experts within the depth, likeliest first, and what the drive offered so far: the idle windows
+        // and an expert's read time. The readers take one expert at a time, so a window's j-th read starts j reads
+        // after it opens.
+        std::array<int, 64> order{};
+        std::array<double, 64> use{};
+        int candidates = 0;
+        for (int i = 0; i < k; ++i) {
+            ++prefetch.predicted;
+            if (!ranks[i].request) {
+                if (ranks[i].skipped) { ++prefetch.skip_vram; }
+                continue;
+            }
+            use[size_t(i)] = ssd::place::prefetch_use_probability(prefetch.novel_routed_r[i], prefetch.novel_r[i]);
+            order[size_t(candidates++)] = i;
+        }
+        if (!candidates) { return; }
+        std::stable_sort(order.begin(), order.begin() + candidates, [&](int a, int b) { return use[size_t(a)] > use[size_t(b)]; });
+        std::vector<std::pair<double, double>> windows;
+        double read_us = 0;
+        {
+            std::lock_guard<std::mutex> lock(prefetch.mutex);
+            read_us = prefetch.read_time.count ? prefetch.read_time.median_us() : 0;
+            for (size_t b = 0; b < prefetch.window.bins.size(); ++b) {
+                if (prefetch.window.bins[b]) { windows.emplace_back(std::exp2((double(b) + 0.5) / 32.0) - 1.0, double(prefetch.window.bins[b])); }
+            }
+        }
+        // the hint's experts this layer holds keep their slots: a read takes a less likely entry's
+        int32_t widest = -1;
+        for (int i = 0; i < nhint; ++i) { widest = std::max(widest, prefetch.hint[i]); }
+        std::vector<uint8_t> keep(size_t(widest + 1), 0);
+        for (int i = 0; i < nhint; ++i) { if (prefetch.hint[i] >= 0) { keep[size_t(prefetch.hint[i])] = 1; } }
         char names[3][GGML_MAX_NAME];
         std::snprintf(names[0], sizeof(names[0]), "blk.%d.ffn_up_exps.weight", layer + 1);
         std::snprintf(names[1], sizeof(names[1]), "blk.%d.ffn_gate_exps.weight", layer + 1);
         std::snprintf(names[2], sizeof(names[2]), "blk.%d.ffn_down_exps.weight", layer + 1);
         std::vector<std::unique_ptr<prefetch_job>> jobs;
-        jobs.reserve(size_t(k));
-        for (int i = 0; i < k; ++i) {
+        jobs.reserve(size_t(candidates));
+        for (int c = 0; c < candidates; ++c) {
+            const int i = order[size_t(c)];
             const int32_t expert = prefetch.hint[i];
-            ++prefetch.predicted;
-            if (!ranks[i].request) {
-                if (ranks[i].skipped) { ++prefetch.skip_vram; }
-                continue;
+            // no read time measured yet: read, which measures it
+            if (read_us > 0 && !(ssd::place::prefetch_read_value(use[size_t(i)], double(jobs.size()) * read_us, read_us, windows) > 0)) {
+                for (int d = c; d < candidates; ++d) { ++prefetch.declined; ++prefetch.declined_r[order[size_t(d)]]; }
+                break;
             }
             auto job = std::make_unique<prefetch_job>(); // before the slot is reserved
             job->layer = layer + 1; job->expert = expert; job->rank = i;
@@ -1340,7 +1381,7 @@ struct kimi_cpu_sink {
                     job->role[role].offset % 4096 == 0 && job->role[role].nbytes % 4096 == 0;
             }
             if (!resolved) { ++prefetch.unresolved; continue; }
-            job->entry = cache.prefetch_reserve(layer + 1, expert, job->role);
+            job->entry = cache.prefetch_reserve(layer + 1, expert, job->role, &keep);
             if (job->entry == -2) { ++prefetch.skip_cached; continue; }
             if (job->entry < 0) { ++prefetch.no_slot; continue; }
             job->generation = cache.generation;

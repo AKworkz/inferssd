@@ -186,7 +186,7 @@ def test_cli_precedence_and_snapshot_owned():
     )
     assert value.at("prefetch.depth").value == 6
     assert value.at("prefetch.depth").origin == "cli"
-    assert parse().at("prefetch.depth").value == 2
+    assert parse().at("prefetch.depth").value == 64
 
 
 def test_real_cpp_jsonl_consumed(native_contract, tmp_path):

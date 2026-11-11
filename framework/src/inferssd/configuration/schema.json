@@ -51,17 +51,17 @@
             "default": 0
         },
         "prefetch.depth": {
-            "description": "Next-layer predicted experts, not a layer count or Mac read window",
+            "description": "Next-layer predicted experts the prefetch weighs, best first (0: none); it reads those whose reads pay",
             "kind": "integer",
             "unit": "predicted experts",
             "producer": "plan",
             "scope": "all",
             "cli": "--ssd-prefetch-depth",
-            "default_literal": "2",
+            "default_literal": "64",
             "type": "integer",
             "minimum": 0,
             "maximum": 64,
-            "default": 2
+            "default": 64
         },
         "place.costs": {
             "description": "Measured placement cost terms; omitted terms retain calibrated priors",

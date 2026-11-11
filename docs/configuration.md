@@ -10,7 +10,7 @@ Python resource. There are no environment mirrors or legacy-name aliases.
 | `expert.source` | paths / path | `[]` | plan | all |  |
 | `cpu.io_cpus` | cpus / CPU ID | `empty` | plan | all |  |
 | `cpu.decode_participants` | integer / compute participants | `0` | plan | all |  |
-| `prefetch.depth` | integer / predicted experts | `2` | plan | all |  |
+| `prefetch.depth` | integer / predicted experts | `64` | plan | all |  |
 | `place.costs` | costs / named us and GB/s terms | `empty` | plan | all |  |
 | `prefill.lookahead` | integer / boolean | `1` | plan | all |  |
 | `vram.budget` | budget / bytes | `auto` | plan | all |  |
@@ -59,6 +59,19 @@ launch. The framework chooses 1024 MiB when other compute processes are on the G
 at launch, and 0 otherwise; a setting of yours replaces that choice. On a GPU that
 shares the host's memory, the reserve adds to the host memory floor below, and the
 tier gives memory back under pressure from any process.
+
+In decode, each layer's graph also predicts the next layer's experts, best first, and
+the experts of its first `prefetch.depth` ranks that neither the GPU tier nor the
+RAM cache holds are read into that layer's RAM cache slots while the drive would
+otherwise wait for the next router. It reads them likeliest first, each while its
+read pays: a read the drive finishes in the gap saves a read if the expert is used;
+one the gap ends during saves the part it has read if the expert is used and takes
+the rest of its drive time from the next layer's reads if not, so it pays when the
+expert's chance of use is above the share of its read left at the gap's end; one
+the gap ends before it starts is dropped. The chance of use is how often the next
+layer selected that rank's predictions so far, the gaps and an expert's read time
+are measured as decode runs. A read takes the slot of a less likely entry, never
+one of another predicted expert. `0` turns the prefetch off.
 
 `prefill.lookahead = 1` keeps the drive reading through the gap between two layers
 of a prompt pass, while the GPU computes the next layer's attention and routing.

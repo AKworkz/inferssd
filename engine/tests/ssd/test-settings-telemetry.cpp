@@ -57,7 +57,7 @@ int main(int argc, char ** argv) {
     assert(!parse("inferssd-settings 1\nmodel.hc_fused=2\n", "model-invalid.ssd"));
     auto base = parse("", "");
     assert(base);
-    assert(*base.value.integer("prefetch.depth") == 2);
+    assert(*base.value.integer("prefetch.depth") == 64);
     assert(base.value.integer("expert.source") == nullptr);
     assert(base.value.find("unknown") == nullptr);
     const std::string text =
@@ -79,7 +79,7 @@ int main(int argc, char ** argv) {
     assert(parsed.value.find("cpu.decode_participants")->origin == "cli");
     auto copy = parsed.value;
     parsed    = parse("", "");
-    assert(*copy.integer("prefetch.depth") == 4 && *parsed.value.integer("prefetch.depth") == 2);
+    assert(*copy.integer("prefetch.depth") == 4 && *parsed.value.integer("prefetch.depth") == 64);
     for (const std::string bad :
          { "cpu.threads = 4", "cpu.compute_cpus = 0-1", "prefetch.depth = \"4\"", "prefetch.depth = 18446744073709551616",
            "cpu.io_cpus = 1,1", "cpu.io_cpus = 2-0", "cpu.io_cpus = 1-99999999", "cpu.decode_participants = 256", "unknown = 0",

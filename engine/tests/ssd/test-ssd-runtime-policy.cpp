@@ -50,6 +50,16 @@ static void prefetch_contract() {
     rank = plan_prefetch_rank(7, false, false, 3, 2);
     check(rank.novel && !rank.request && !rank.skipped, "ranks past depth remain counted without requests");
     check(!plan_prefetch_rank(-1, false, false, 0, 2).request, "invalid expert never reaches resolver");
+    // A read pays its use probability where the window outlasts it, p - r where the window ends with a share r of it
+    // left, nothing where it ends first; no window seen: p. The rule of succession gives one half without evidence.
+    const std::vector<std::pair<double, double>> long_windows = {{5000, 1}}, short_windows = {{500, 3}, {5000, 1}};
+    check(near(prefetch_read_value(.6, 0, 1000, long_windows), .6), "a read the window covers is worth its use");
+    check(near(prefetch_read_value(.6, 0, 1000, {{500, 1}}), .1), "a read the window ends halfway through is worth p - 1/2");
+    check(near(prefetch_read_value(.6, 1000, 1000, {{500, 1}}), 0), "a read the window ends before is dropped at no cost");
+    check(near(prefetch_read_value(.4, 0, 1000, short_windows), (3 * -.1 + .4) / 4), "the windows are weighed by how often they occur");
+    check(near(prefetch_read_value(.7, 0, 1000, {}), .7), "no window seen: the read is worth its use");
+    check(near(prefetch_use_probability(0, 0), .5) && near(prefetch_use_probability(9, 10), 10.0 / 12),
+          "use probability by the rule of succession");
 }
 
 static void placement_contract() {
