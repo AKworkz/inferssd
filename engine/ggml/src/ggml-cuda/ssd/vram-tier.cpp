@@ -127,7 +127,7 @@ struct tier {
     // stopped moving (observe_settle): settle_free is the free memory the last prefill layer boundary of this phase saw.
     bool growth_deferred=false,settled=false;size_t settle_free=SIZE_MAX;
     size_t base_slots=0,max_slots=0,elastic_safety_blocks=0,elastic_safety_mib=0,elastic_max_slots=0;
-    uint64_t phase_generation=0,grow_events=0,proactive_blocks=0,reactive_blocks=0,base_blocks_reclaimed=0;
+    uint64_t phase_generation=0,grow_events=0,proactive_blocks=0,reactive_blocks=0,base_blocks_reclaimed=0,compaction_moves=0;
     uint64_t phase_reactive_start=0,phase_base_reclaimed_start=0,phase_reclaim_requests=0;
     size_t phase_slots_before=0,phase_free_before=0;
     uint64_t malloc_calls=0,free_calls=0,fail_malloc_at=0,fail_free_at=0;
@@ -428,7 +428,7 @@ struct tier {
             std::fprintf(stderr,"[kimi_vram_reserve] reason=%s reserve_mib=%zu held_mib=%zu reachable_mib=%zu card_free_mib=%zu\n",
                 reason,watermark_low_mib,held>>20,reachable>>20,card>>20);
         }
-        std::fprintf(stderr,"[kimi_vram_tier] reason=%s budget_bytes=%llu capacity_bytes=%llu slots=%zu hits=%llu cpu_requests=%llu uploads=%llu upload_bytes=%llu upload_us=%.3f compute_us=%.3f device_scratch=%zu host_scratch=%zu borrowed_uploads=%llu upload_wait_us=%.3f cold_prefill_admissions=%llu cold_prefill_admission_bytes=%llu cold_prefill_admission_us=%.3f min_count=%.3f async_upload=%d global_pool=%d half_life=%.3f deferred_upload=%d elastic=%d demand_reclaim=%d blocks=%zu base_slots=%zu safety_blocks=%zu safety_mib=%zu proactive_blocks=%llu reactive_blocks=%llu base_blocks_reclaimed=%llu poisoned=%d\n",
+        std::fprintf(stderr,"[kimi_vram_tier] reason=%s budget_bytes=%llu capacity_bytes=%llu slots=%zu hits=%llu cpu_requests=%llu uploads=%llu upload_bytes=%llu upload_us=%.3f compute_us=%.3f device_scratch=%zu host_scratch=%zu borrowed_uploads=%llu upload_wait_us=%.3f cold_prefill_admissions=%llu cold_prefill_admission_bytes=%llu cold_prefill_admission_us=%.3f min_count=%.3f async_upload=%d global_pool=%d half_life=%.3f deferred_upload=%d elastic=%d demand_reclaim=%d blocks=%zu base_slots=%zu safety_blocks=%zu safety_mib=%zu proactive_blocks=%llu reactive_blocks=%llu base_blocks_reclaimed=%llu compaction_moves=%llu poisoned=%d\n",
             reason,(unsigned long long)budget,(unsigned long long)capacity_bytes,table?table->slots.size():0,
             (unsigned long long)gpu_hits,(unsigned long long)cpu_requests,(unsigned long long)uploads,
             (unsigned long long)upload_bytes,upload_us,compute_us,engine_scratch(true),
@@ -436,7 +436,7 @@ struct tier {
             (unsigned long long)cold_prefill_admissions,(unsigned long long)cold_prefill_admission_bytes,cold_prefill_admission_us,
             table?table->minimum_count:0,int(async_upload),table?int(table->global_pool):0,table?table->half_life:2,int(deferred_upload),int(elastic_active),int(elastic_demand_reclaim),blocks.size(),base_slots,elastic_safety_blocks,elastic_safety_mib,
             (unsigned long long)proactive_blocks,(unsigned long long)reactive_blocks,
-            (unsigned long long)base_blocks_reclaimed,int(poisoned));
+            (unsigned long long)base_blocks_reclaimed,(unsigned long long)compaction_moves,int(poisoned));
     }
     // The decode engines' scratch, device or host.
     size_t engine_scratch(bool device_side) const{
@@ -675,10 +675,27 @@ struct tier {
         else if (now < engine_held) { q.release(device, engine_held - now); }
         engine_held = now;
     }
+    // Before a block goes: its most valuable entries move into the slots of the least valuable ones below it, empty
+    // ones first (vram_slot_table::compaction), so that a shrink gives up the coldest entries the tier holds rather
+    // than whatever the block holds (after a decode, its latest admissions). Whole slots, copied in device memory (a
+    // memcpy on unified memory) while no layer runs. Returns the moves.
+    size_t compact_into(size_t keep){
+        if(!table || !keep)return 0;
+        const auto moves=table->compaction(keep);
+        if(moves.empty())return 0;
+        cuda_check(cudaSetDevice(device));
+        for(const auto & m:moves){
+            cuda_check(cudaMemcpy(slot_base(m.second),slot_base(m.first),stride,cudaMemcpyDefault));
+            table->move_entry(m.first,m.second);
+        }
+        compaction_moves+=moves.size();
+        return moves.size();
+    }
     bool free_last_block(const char * reason,bool reactive){
         if(blocks.empty())return false;
         const auto block=blocks.back();
         cancel_seeds(block.first_slot);
+        const size_t moved=std::strcmp(reason,"release")?compact_into(block.first_slot):0;
         ++free_calls;
         if(fail_free_at && free_calls==fail_free_at){poisoned=true;throw std::runtime_error("injected elastic cudaFree failure");}
         cuda_check(cudaSetDevice(device));const cudaError_t rc=free_dram(block.data,block.slot_count*stride);
@@ -687,9 +704,9 @@ struct tier {
         slot_locations.resize(block.first_slot);blocks.pop_back();capacity_bytes-=block.slot_count*stride;publish_storage();
         if(reactive){++reactive_blocks;if(block.first_slot<base_slots)++base_blocks_reclaimed;}
         else if(!std::strcmp(reason,"prefill"))++proactive_blocks;
-        std::fprintf(stderr,"[kimi_vram_elastic] event=shrink status=pass reason=%s generation=%llu class=%s freed_slots=%zu freed_bytes=%zu slots=%zu blocks=%zu\n",
+        std::fprintf(stderr,"[kimi_vram_elastic] event=shrink status=pass reason=%s generation=%llu class=%s freed_slots=%zu freed_bytes=%zu moved=%zu slots=%zu blocks=%zu\n",
             reason,(unsigned long long)phase_generation,block.first_slot>=base_slots?"elastic":"base",block.slot_count,
-            block.slot_count*stride,slot_locations.size(),blocks.size());
+            block.slot_count*stride,moved,slot_locations.size(),blocks.size());
         return true;
     }
     // free_last_block while deferred uploads may still be in flight: waits for their copies, then aborts the

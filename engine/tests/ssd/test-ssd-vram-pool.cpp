@@ -254,5 +254,37 @@ int main() { try {
         vram_slot_table none(1,{1},true,0,true,16);price(none,0,0,1000);
         none.next_token();none.prepare(&a,1);require(none.admissions[0]<0,"a tier that saves nothing on a candidate admitted");publish(none);
     }
+    // A shrink gives up the least valuable entries (compaction): the most valuable of the leaving slots' entries move
+    // into empty slots below the boundary first, then onto entries worth less; live slots neither move nor take a move.
+    {
+        vram_slot_table t(4,{1},true,0,true,16);
+        const kimi_vram_request four[]={request(1,1),request(1,2),request(1,3),request(1,4)};
+        t.next_token();t.prepare(four,4);publish(t);
+        const int head_cold=t.slots[0].key.expert,head_warm=t.slots[1].key.expert;
+        const int tail_hot=t.slots[2].key.expert,tail_cold=t.slots[3].key.expert;
+        auto & counts=t.layers[1].counts;
+        counts[size_t(head_cold)]=1;counts[size_t(head_warm)]=3;counts[size_t(tail_hot)]=5;counts[size_t(tail_cold)]=.5;
+        const auto moves=t.compaction(2);
+        require(moves.size()==1 && moves[0].first==2 && moves[0].second==0,
+                "compaction did not put the hottest leaving entry on the coldest kept one, and stop there");
+        const auto evicted=t.evictions;
+        t.move_entry(2,0);t.resize_global(2);
+        require(t.holds(1,tail_hot) && t.holds(1,head_warm) && !t.holds(1,head_cold) && !t.holds(1,tail_cold) &&
+                t.evictions==evicted+1,"a shrink did not give up the coldest entries");
+        require(t.find(request(1,tail_hot),[](const vram_slot_table::entry & e){return e.valid;})==0,
+                "the moved entry is not found in its new slot");
+        holds_match(t,"held differs after a compaction");
+        vram_slot_table u(4,{1},true,0,true,16);
+        u.next_token();u.prepare(four,4);publish(u);
+        u.change(u.slots[1],[](vram_slot_table::entry & x){x={};});
+        const auto into_empty=u.compaction(2);
+        require(into_empty.size()==1 && into_empty[0].second==1,"a leaving entry did not take the empty slot below first");
+        u.slots[2].uploading=true;u.slots[3].uploading=true;
+        require(u.compaction(2).empty(),"a slot being uploaded moved");
+        u.slots[2].uploading=u.slots[3].uploading=false;u.slots[1].locked=true;u.slots[0].native_refs=1;
+        require(u.compaction(2).empty(),"a live slot took a move");
+        u.slots[1].locked=false;u.slots[0].native_refs=0;
+        rejected([&]{u.move_entry(1,0);});
+    }
     std::printf("VRAM_GLOBAL_POOL_PASS assertions=%d\n",checks);return 0;
 } catch(const std::exception & e) { std::fprintf(stderr,"VRAM_GLOBAL_POOL_FAIL: %s\n",e.what());return 1; } }

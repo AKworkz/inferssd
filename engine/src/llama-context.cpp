@@ -2986,6 +2986,15 @@ bool llama_context::ssd_preload() {
     if (!cpu_sink_runtime || !(cpu_sink_runtime->vram_budget || cpu_sink_runtime->cache_budget)) {
         return true;
     }
+    // The load ends as a request's prefill does: in the decode phase, the graph reserved for one token. The caches
+    // then fill the memory a request leaves them between its prefills, and each prefill takes back what its own
+    // graph needs (it reserves the graph for its prompt; the GPU tier gives blocks back on demand). Left with the
+    // graph the context was made with (the configured ubatch, 8192 tokens: 4.5 GB on an RTX 5090), the tier grew
+    // into what was left of the card and kept the 2.3 GB a 4,104-token prompt's graph does not use free all
+    // through the first prefill.
+    if (!moe_prefill_phase_workspace(false, 0, 0)) {
+        LLAMA_LOG_WARN("%s: the decode graph could not be reserved before the preload\n", __func__);
+    }
     synchronize();
     std::string error;
     if (!cpu_sink_runtime->preload(routed_experts(), error)) {

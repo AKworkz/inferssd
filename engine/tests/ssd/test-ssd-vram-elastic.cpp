@@ -110,6 +110,25 @@ int main() {
         unsigned char copied[3] = {};
         for (int i = 0; i < 3; ++i) cuda_check(cudaMemcpy(copied+i,t.slot_base(values[i]),1,cudaMemcpyDeviceToHost));
         require(!std::memcmp(values,copied,sizeof(values)),"cross-block device payload mapping failed");
+        // A block given back keeps the tier's most valuable entry: a selected expert in the last block's slot moves,
+        // bytes and all, into an empty slot below it before the block goes (compact_into).
+        {
+            auto & table=*t.table;const size_t last=table.slots.size()-1;
+            table.change(table.slots[last],[&](vram_slot_table::entry & x){x={};x.key=key;x.keyed=true;x.valid=true;});
+            table.layers[size_t(key.layer)].counts[size_t(key.expert)]=5;
+            cuda_check(cudaMemset(t.slot_base(last),0xab,stride));
+            require(t.free_last_block("test",false) && t.compaction_moves==1 && table.holds(key.layer,key.expert),
+                    "a block given back took its selected expert with it");
+            const int moved=table.find(key,[](const vram_slot_table::entry & e){return e.valid;});
+            require(moved>=0 && size_t(moved)<last,"the moved expert is not held below the freed block");
+            std::vector<unsigned char> bytes(stride);
+            cuda_check(cudaMemcpy(bytes.data(),t.slot_base(size_t(moved)),stride,cudaMemcpyDefault));
+            require(std::all_of(bytes.begin(),bytes.end(),[](unsigned char b){return b==0xab;}),
+                    "the moved expert's bytes did not move with it");
+            table.change(table.slots[size_t(moved)],[](vram_slot_table::entry & x){x={};});
+            table.layers[size_t(key.layer)].counts[size_t(key.expert)]=0;
+            require(t.allocate_block(1,"test") && table.slots.size()==37,"the freed block did not come back");
+        }
 
         kimi_vram_ready_lease lease = {}; int ready = 0;
         t.acquire_ready(17,&key,1,&lease,&ready);

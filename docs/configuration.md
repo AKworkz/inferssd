@@ -88,7 +88,12 @@ later: a prompt's seeds and decode's admissions take its slot as they take an
 empty one, and a prompt pass's read-ahead takes it unless the pass is likely to
 use it. On a discrete GPU the tier is made at load and first grows into the card,
 once the load's pass has shown that the device memory other work holds has
-settled.
+settled. The load then leaves the graph reserved for decode's single token, as a
+request's prefill does, so the tier grows into the memory a prompt's graph does
+not need; each prompt's prefill reserves its own graph and takes back what that
+needs from the tier. Whenever the tier gives memory back, it keeps its most
+valuable experts: the ones in the block it frees move into the slots of the
+least used ones first.
 
 The host memory ledger has two terms on every platform, and they size the expert
 caches. The envelope is a finite limit on this process's memory less a 512 MiB

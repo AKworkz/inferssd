@@ -119,6 +119,45 @@ public:
             layers[id].count = capacity;
         }
     }
+    // A shrink to `keep` slots gives up the least valuable entries, not whatever the slots past `keep` hold: the moves
+    // (a slot past keep, a slot below it) that bring the most valuable of those entries into empty slots first, then
+    // into the slots of entries worth less. An entry is worth its selection count (score): one a decode request has
+    // not used since a prefill seeded or the load filled it holds none. Live slots (locked, uploading, natively
+    // referenced) neither move nor take a move. The caller copies each move's bytes, then records it (move_entry).
+    std::vector<std::pair<size_t,size_t>> compaction(size_t keep) const {
+        std::vector<std::pair<size_t,size_t>> moves;
+        if (keep >= slots.size()) return moves;
+        const auto live = [](const entry & e) { return e.locked || e.uploading || e.native_refs; };
+        std::vector<std::pair<double,size_t>> from, to;
+        for (size_t i = keep; i < slots.size(); ++i) {
+            if (slots[i].valid && !live(slots[i])) from.push_back({score(slots[i]), i});
+        }
+        for (size_t i = 0; i < keep; ++i) {
+            if (!live(slots[i])) to.push_back({slots[i].valid ? score(slots[i]) : -1.0, i});
+        }
+        std::sort(from.begin(), from.end(), [&](const auto & a, const auto & b) {
+            return a.first > b.first || (a.first == b.first && slots[a.second].touched > slots[b.second].touched); });
+        std::sort(to.begin(), to.end(), [&](const auto & a, const auto & b) {
+            return a.first < b.first || (a.first == b.first && slots[a.second].touched < slots[b.second].touched); });
+        for (size_t k = 0; k < from.size() && k < to.size() && to[k].first < from[k].first; ++k) {
+            moves.push_back({from[k].second, to[k].second});
+        }
+        return moves;
+    }
+    // A move compaction planned, its bytes copied: slot `to` holds what `from` held (the entry it replaces is
+    // evicted), and `from` is empty.
+    void move_entry(size_t from, size_t to) {
+        if (from >= slots.size() || to >= slots.size() || from == to || in_flight || lease_generation) {
+            throw std::runtime_error("invalid VRAM slot move");
+        }
+        const entry moved = slots[from];
+        if (!moved.valid || moved.locked || moved.uploading || moved.native_refs ||
+                slots[to].locked || slots[to].uploading || slots[to].native_refs) {
+            throw std::runtime_error("VRAM slot move of a live slot");
+        }
+        change(slots[to], [&](entry & x) { evictions += x.valid; x = moved; });
+        change(slots[from], [](entry & x) { x = {}; });
+    }
     static bool same_source(const kimi_vram_source & a,const kimi_vram_source & b) {
         return a.device==b.device && a.inode==b.inode && a.inode_hi==b.inode_hi && a.size==b.size && a.offset==b.offset &&
             a.bytes==b.bytes && a.mtime_s==b.mtime_s && a.mtime_ns==b.mtime_ns &&
