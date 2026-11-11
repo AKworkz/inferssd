@@ -316,13 +316,13 @@ llama_context::llama_context(
                 cpu_sink_runtime = std::make_unique<llama_kimi_cpu_sink_runtime>(model.hparams.n_layer,
                     kimi_cpu_sink_context_epoch.fetch_add(1, std::memory_order_relaxed),
                     int64_t(model.hparams.n_expert), routed_layers, ssd_runtime->settings, ssd_runtime->services, ssd_runtime->sources);
-                if (*ssd_runtime->settings.integer("prefetch.depth") > 0) {
-                    for (uint32_t il = 0; il < model.hparams.n_layer; ++il) {
-                        const auto & layer = model.layers[il];
-                        for (const ggml_tensor * experts : {layer.ffn_up_exps, layer.ffn_gate_exps, layer.ffn_down_exps}) {
-                            if (experts) {
-                                cpu_sink_runtime->expert_shapes[ggml_get_name(experts)] = {experts->nb[2], experts->ne[2]};
-                            }
+                // every routed layer's expert shapes: what resolves a layer other than the running one's experts (the
+                // next layer's decode prefetch and prefill read-ahead, the load's preload)
+                for (uint32_t il = 0; il < model.hparams.n_layer; ++il) {
+                    const auto & layer = model.layers[il];
+                    for (const ggml_tensor * experts : {layer.ffn_up_exps, layer.ffn_gate_exps, layer.ffn_down_exps}) {
+                        if (experts) {
+                            cpu_sink_runtime->expert_shapes[ggml_get_name(experts)] = {experts->nb[2], experts->ne[2]};
                         }
                     }
                 }
