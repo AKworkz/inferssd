@@ -121,6 +121,9 @@ struct tier {
     std::mutex lifecycle_mutex;
     bool elastic_requested=false,elastic_active=false,elastic_demand_reclaim=false,reclaimer_registered=false,reclaimer_armed=false,poisoned=false;
     bool decode_growth_done=false;
+    // A discrete GPU's tier made at load starts from one block and grows once the device memory nothing counts has
+    // stopped moving (observe_settle): settle_free is the free memory the last prefill layer boundary of this phase saw.
+    bool growth_deferred=false,settled=false;size_t settle_free=SIZE_MAX;
     size_t base_slots=0,max_slots=0,elastic_safety_blocks=0,elastic_safety_mib=0,elastic_max_slots=0;
     uint64_t phase_generation=0,grow_events=0,proactive_blocks=0,reactive_blocks=0,base_blocks_reclaimed=0;
     uint64_t phase_reactive_start=0,phase_base_reclaimed_start=0,phase_reclaim_requests=0;
@@ -797,6 +800,9 @@ struct tier {
     void grow_decode_locked(clock_type::time_point start=clock_type::now()){
         if(!elastic_active || poisoned || !table)return;
         if(busy() || !deferred_settled())throw std::runtime_error("elastic VRAM decode grow is not quiescent");
+        // a tier made at load takes the card from here: what it offers now, after the allocations nothing counts, is
+        // what the reserve is kept against
+        if(growth_deferred){ggml_memory_query::instance().anchor(device);growth_deferred=false;}
         size_t free_bytes=0,total=0;cuda_check(cudaSetDevice(device));mem_info(&free_bytes,&total);
         const uint64_t safety=uint64_t(elastic_safety_blocks)*uint64_t(elastic_block_slots)*uint64_t(stride)+
             uint64_t(elastic_safety_mib)*uint64_t(1U<<20);
@@ -884,21 +890,70 @@ struct tier {
                 bytes,slots,size_t(0),size_t(0),cudaGetErrorString(rc));
         }
     }
-    // Unified memory: the storage at load (kimi_vram_elastic_api reserve), grown into mem_info as the first decode
-    // token would grow it, so that the page population leaves the request path. Only the first prefill's graph and
-    // workspace are taken back and regrown at the token boundary after its first decode step, as for every later
-    // request. A discrete GPU allocates after the first prefill's library allocations (initialize_format).
+    // The storage at load (kimi_vram_elastic_api reserve), so that the first request's prefill has a tier to seed.
+    // Unified memory grows it into mem_info there, as the first decode token would grow it, and the page population
+    // leaves the request path; only the first prefill's graph and workspace are taken back and regrown at the token
+    // boundary after its first decode step, as for every later request. A discrete card cannot give way to the device
+    // memory nothing counts (kernels load on first use, libraries create their handles, and such an allocation that
+    // fails is fatal), and most of it comes in the first passes: so its tier starts from one block, and grows into the
+    // card at the first phase boundary after a prefill pass showed that memory had stopped moving (observe_settle),
+    // or at the first decode token at the latest. Only an automatic elastic tier starts from one block: a byte budget
+    // is its base, taken at the first decode token as before.
     void reserve(const kimi_vram_request & r,const kimi_vram_expert_format & f){
         if(table || has_storage())return;
         const auto & q=ggml_memory_query::instance();
         int current=device;
         if(current<0)cuda_check(cudaGetDevice(&current));else cuda_check(cudaSetDevice(current));
-        if(!q.unified || !q.unified(current))return;
+        const bool on_unified=q.unified && q.unified(current);
+        if(!on_unified && !(budget==automatic_budget && elastic_requested && configuration.global && keep_across_requests))return;
         const auto start=clock_type::now();
+        growth_deferred=!on_unified;
         initialize_format(&r,f,true);
-        if(!elastic_active)return;
+        if(!elastic_active){growth_deferred=false;return;}
+        if(growth_deferred)return;
         std::lock_guard<std::mutex> lock(lifecycle_mutex);
         grow_decode_locked(start);
+    }
+    // At load, after the load's passes (kimi_vram_elastic_api preload_slots): a tier made at load whose memory settled
+    // in them grows into the card first, as the first request's begin would have grown it; then the slots no entry
+    // holds, which preload may fill.
+    size_t preload_slots(){
+        std::lock_guard<std::mutex> lock(lifecycle_mutex);
+        if(!table || !has_storage() || poisoned || active || prefill_live)return 0;
+        if(elastic_active && growth_deferred && settled)grow_decode_locked();
+        return table->empty_slots();
+    }
+    // At load (kimi_vram_elastic_api preload): one expert no request has named into an empty slot, its three roles
+    // copied from host memory (data, as the layer's format lays them out), the entry preloaded (vram-slot-table.h).
+    // False when no slot is empty or the tier holds the expert already.
+    bool preload(const kimi_vram_request & r,const void * const * data){
+        std::lock_guard<std::mutex> lock(lifecycle_mutex);
+        if(!table || !has_storage() || poisoned || active || prefill_live)return false;
+        const expert_format * x=format_of(r.layer);
+        if(!x)return false;
+        for(int role=0;role<3;++role)if(!data[role] || r.role[role].bytes!=x->role_bytes[role])
+            throw std::runtime_error("preloaded expert has another layout than its layer's format");
+        const int slot=table->reserve_preload(r);
+        if(slot<0)return false;
+        try{
+            cuda_check(cudaSetDevice(device));
+            size_t offset=0;
+            for(int role=0;role<3;++role){
+                cuda_check(cudaMemcpy(slot_base(size_t(slot))+offset,data[role],x->role_bytes[role],cudaMemcpyDefault));
+                offset+=x->role_bytes[role];
+            }
+        }catch(...){table->cancel_upload(size_t(slot),r);throw;}
+        table->publish_cold_prefill(size_t(slot),r);
+        return true;
+    }
+    // A prefill layer boundary of a tier made at load on a discrete GPU, before the layer takes anything: free memory
+    // found where the boundary before it in this phase left it shows that the pass's kernels and library handles hold
+    // their memory. On an RTX 5090 with DeepSeek V4.1 they took 110 MiB in the first two layers of the load's first
+    // pass and 38 MiB in those of the first long prompt, and nothing in any later layer.
+    void observe_settle(){
+        size_t free_bytes=0,total=0;cuda_check(cudaSetDevice(device));mem_info(&free_bytes,&total);
+        settled=settled || free_bytes==settle_free;
+        settle_free=free_bytes;
     }
     // A prefill pass of ntokens tokens, announced before each layer's reads start: the batched engine's buffers for
     // this pass, elastic tier blocks given back for them first. A pass of the vector engine (one token) needs none.
@@ -1026,6 +1081,7 @@ struct tier {
             if(table)table->abort();
             while(!blocks.empty())free_last_block("release",false);
             table.reset();elastic_active=false;decode_growth_done=false;base_slots=max_slots=0;slot_locations.clear();
+            growth_deferred=settled=false;settle_free=SIZE_MAX;
         }
         if(arena){cuda_check(cudaSetDevice(device));cuda_check(free_dram(arena,capacity_bytes));arena=nullptr;}
         if(prefill_transient_arena){
@@ -1054,6 +1110,9 @@ struct tier {
             if(failure.empty()){
                 have_token=false;active=false;
                 free_host_scratch(); // the next decode allocates it again when a batch wants it
+                // a tier made at load takes the card once a prefill pass showed the memory nothing counts settled
+                if(elastic_active && growth_deferred && settled){std::lock_guard<std::mutex> lock(lifecycle_mutex);grow_decode_locked();}
+                settle_free=SIZE_MAX; // this phase's passes compare among themselves
                 if(elastic_active)prepare_prefill_reclaim();
                 if(group){
                     make_room_for_prefill_transient(prefill_transient_slots);
@@ -1672,7 +1731,7 @@ struct tier {
         // On unified memory the rest of the first decode step (the RAM cache committing its slots, graph
         // instantiation) comes out of the same DRAM: grow at the token boundary after it (grow_after_first_token,
         // which counts this step when a decode step allocated the tier).
-        if(elastic_active && !unified){std::lock_guard<std::mutex> lock(lifecycle_mutex);grow_decode_locked();}
+        if(elastic_active && !unified && !growth_deferred){std::lock_guard<std::mutex> lock(lifecycle_mutex);grow_decode_locked();}
         else if(elastic_active && active)phase_decode_tokens=1;
         report("allocated");
     }
@@ -2023,9 +2082,10 @@ struct tier {
         if(prefill_live || prefill_queued || active || have_token)
             throw std::runtime_error("grouped prefill outside a retained prefill phase");
         if(!keep_across_requests || !count)return;
+        if(growth_deferred)observe_settle();
         if(unified)reclaim_host(0,"floor");
-        // A cold prefill reserves its engine and transient scratch here; its decode arena is deferred until the first
-        // decode token.
+        // A prefill without a tier yet (none made at load) reserves its engine and transient scratch here; its decode
+        // arena is deferred until the first decode token.
         if(!has_storage() || !table || !format_mode)initialize_format(r,*f,false);
         else adopt(r[0],*f);
         for(int j=0;j<count;++j){
@@ -2044,6 +2104,8 @@ struct tier {
             cpu_requests+=size_t(count);
             return;
         }
+        // what the pass routes of the experts preloaded for this layer is the pass's now: its seeds plan around them
+        {std::lock_guard<std::mutex> lock(lifecycle_mutex);table->adopt_preloaded(r,size_t(count));}
         plan_sink_seeds(r,count,seed_routes);
         prefill_generation=table->acquire_slots(r,size_t(count),prefill_slots.data());
         std::copy(prefill_slots.begin(),prefill_slots.end(),slots);
@@ -2326,6 +2388,13 @@ int elastic_phase_complete(void * p,int decode,char * e,size_t n){auto * t=stati
 int elastic_reserve_accumulate(void * p,int tokens,char * e,size_t n){auto * t=static_cast<tier *>(p);try{t->reserve_prefill_engine(tokens);return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
 int elastic_reserve(void * p,const kimi_vram_request * r,const kimi_vram_expert_format * f,char * e,size_t n){
     auto * t=static_cast<tier *>(p);try{if(!r || !f)throw std::runtime_error("null VRAM reserve geometry");t->reserve(*r,*f);return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
+int elastic_preload_slots(void * p,int * slots,char * e,size_t n){
+    auto * t=static_cast<tier *>(p);try{if(!slots)throw std::runtime_error("null VRAM preload count");
+        *slots=int(std::min<size_t>(t->preload_slots(),size_t(INT32_MAX)));return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
+int elastic_preload(void * p,const kimi_vram_request * r,const void * up,const void * gate,const void * down,int * copied,
+        char * e,size_t n){
+    auto * t=static_cast<tier *>(p);try{if(!r || !copied)throw std::runtime_error("null VRAM preload");
+        const void * data[3]={up,gate,down};*copied=t->preload(*r,data)?1:0;return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
 int format_prepare(void * p,const kimi_vram_request * r,int count,const kimi_vram_expert_format * f,int * slots,char * e,size_t n){
     auto * t=static_cast<tier *>(p);try{t->prepare_format(r,count,f,slots);return 0;}catch(const std::exception & x){return fail(t,e,n,x);}}
 int format_launch(void * p,const void * q,size_t bytes,const kimi_vram_activation * a,char * e,size_t n){
@@ -2500,7 +2569,8 @@ extern "C" const kimi_vram_deferred_api * kimi_vram_deferred_get_api(){
     static const kimi_vram_deferred_api api={3,sizeof(kimi_vram_deferred_api),deferred_admit,deferred_collect,deferred_wait};return &api;
 }
 extern "C" const kimi_vram_elastic_api * kimi_vram_elastic_get_api(){
-    static const kimi_vram_elastic_api api={4,sizeof(kimi_vram_elastic_api),elastic_phase_complete,elastic_reserve_accumulate,elastic_reserve};return &api;
+    static const kimi_vram_elastic_api api={5,sizeof(kimi_vram_elastic_api),elastic_phase_complete,elastic_reserve_accumulate,elastic_reserve,
+        elastic_preload_slots,elastic_preload};return &api;
 }
 extern "C" const kimi_vram_format_api * kimi_vram_format_get_api(){
     static const kimi_vram_format_api api={2,sizeof(kimi_vram_format_api),format_prepare,format_launch};return &api;

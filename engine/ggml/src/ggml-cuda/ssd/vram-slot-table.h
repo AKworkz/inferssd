@@ -26,6 +26,11 @@ public:
         bool seed = false;
         // keyed: the key names an expert (an admission or a seed set it, and no reset since); see find
         bool keyed = false;
+        // preloaded: filled at load (reserve_preload), with an expert no request had named, and not used since. A
+        // lookup finds it like any entry; every allocation takes it as if it were empty (available), except a
+        // prefill's for a layer its pass has not reached. Its first use makes it what that use makes of an empty
+        // slot: a prefill's, a seed of its prompt (adopt_preloaded); decode's, an entry admitted at that request.
+        bool preloaded = false;
     };
     struct layer {
         size_t begin = 0, count = 0;
@@ -67,7 +72,7 @@ public:
     double expected_hits(double count) const { return expected[earned_step(count)]; }
     void refresh_expected() {
         auto hits = earned_hits, weight = earned_weight;
-        for (const auto & e : slots) { if (e.valid && !e.seed) { const int s = earned_step(e.admit_count); hits[s] += e.hits_since_admit; weight[s] += 1; } }
+        for (const auto & e : slots) { if (e.valid && !e.seed && !e.preloaded) { const int s = earned_step(e.admit_count); hits[s] += e.hits_since_admit; weight[s] += 1; } }
         double floor = 0;
         for (int s = 0; s < earned_steps; ++s) { // more selections never earn fewer hits
             expected[s] = floor = std::max(floor, (hits[s] + 4 * (s + 0.5) / 4) / (weight[s] + 4));
@@ -256,7 +261,7 @@ public:
             if(i<0)continue;
             auto & e=slots[size_t(i)];
             e.locked=true;e.touched=++clock;hits[j]=i;
-            if(e.seed){e.seed=false;e.admit_count=count_decay?mature(l.counts[requests[j].expert]):1;e.hits_since_admit=0;}
+            if(e.seed || e.preloaded){e.seed=e.preloaded=false;e.admit_count=count_decay?mature(l.counts[requests[j].expert]):1;e.hits_since_admit=0;}
             else ++e.hits_since_admit;
         }
         std::vector<size_t> order;
@@ -271,19 +276,20 @@ public:
             int victim=-1;
             for(size_t i=l.begin;i<l.begin+l.count;++i) {
                 const auto & e=slots[i];if(e.locked || e.native_refs || e.uploading)continue;
-                if(!e.valid){victim=int(i);break;}
+                if(!e.valid || e.preloaded){victim=int(i);break;}
                 if(victim<0 || score(e)<score(slots[victim]) ||
                    (score(e)==score(slots[victim]) && e.touched<slots[victim].touched))victim=int(i);
             }
             if(victim<0)continue;
             auto & e=slots[victim];
-            if(e.valid && count_decay && count<score(e))continue;
-            if(count_decay && admission_hits>=0 && expected_hits(mature(count))-(e.valid?expected_hits(mature(score(e))):0)<admission_hits)continue;
-            if(e.valid && !e.seed){
+            const bool occupied=e.valid && !e.preloaded;
+            if(occupied && count_decay && count<score(e))continue;
+            if(count_decay && admission_hits>=0 && expected_hits(mature(count))-(occupied?expected_hits(mature(score(e))):0)<admission_hits)continue;
+            if(occupied && !e.seed){
                 for(int s=0;s<earned_steps;++s){earned_hits[s]*=0.999;earned_weight[s]*=0.999;}
                 const int s=earned_step(e.admit_count);earned_hits[s]+=e.hits_since_admit;earned_weight[s]+=1;++earned_samples;
             }
-            change(e,[&](entry & x){evictions+=x.valid;x.valid=false;x.seed=false;x.locked=true;x.key=requests[j];x.keyed=true;x.touched=++clock;});
+            change(e,[&](entry & x){evictions+=x.valid;x.valid=false;x.seed=x.preloaded=false;x.locked=true;x.key=requests[j];x.keyed=true;x.touched=++clock;});
             admissions[j]=victim;
             e.admit_count=count_decay?mature(count):1;e.hits_since_admit=0;
         }
@@ -308,31 +314,43 @@ public:
         if(!e.uploading || e.valid || !same(e.key,key))throw std::runtime_error("deferred VRAM publication lost its reservation");
         change(e,[](entry & x){x.uploading=false;x.valid=true;});++admitted;
     }
-    // Cold prefill may fill only physically empty slots. It deliberately does
-    // not call prepare(), increment counts, or evict an existing decode entry.
+    // A slot an allocation for `layer` may take: an empty one, or one preloaded with an expert no request has used,
+    // of a layer up to `layer`. A prefill reaches the layers in order, and a pass has used what it will of a layer it
+    // has reached (adopt_preloaded), so this leaves the experts of the layers ahead of it in their slots.
+    static bool available(const entry & e,int layer) {
+        return !e.locked && !e.native_refs && !e.uploading && (!e.valid || (e.preloaded && e.key.layer<=layer));
+    }
+    // A prefill's use of the preloaded entries of the experts its pass routes in a layer (the next prepare's union,
+    // before its seeds are planned): each becomes a seed of its prompt, as if the prefill had copied it into an empty
+    // slot. The others of the layer stay preloaded, and so available to its seeds.
+    void adopt_preloaded(const kimi_vram_request * input,size_t n) {
+        for(size_t j=0;j<n;++j) {
+            const int i=find(input[j],[](const entry & e){return e.valid && e.preloaded;});
+            if(i>=0)change(slots[size_t(i)],[](entry & x){x.preloaded=false;x.seed=true;x.admit_count=0;x.hits_since_admit=0;});
+        }
+    }
+    // Cold prefill fills only available slots. It deliberately does not call
+    // prepare(), increment counts, or evict an existing decode entry.
     // A seeded entry therefore has score zero until decode actually requests
     // it, making unused prompt heat the first victim of later decode misses.
     int reserve_cold_prefill(const kimi_vram_request & request) {
-        if(in_flight || lease_generation || native_pinned() || request.layer<first_layer ||
-                size_t(request.layer)>=layers.size() || request.expert<0 || request.expert>=experts) {
-            throw std::runtime_error("invalid cold-prefill VRAM reservation phase");
-        }
-        if(find(request,[](const entry & e){return e.valid || e.uploading;})>=0)return -1;
-        const auto & l=layers[request.layer];
-        for(size_t i=l.begin;i<l.begin+l.count;++i) {
-            auto & e=slots[i];
-            if(e.valid || e.locked || e.native_refs || e.uploading)continue;
-            change(e,[&](entry & x){x.key=request;x.keyed=true;x.touched=++clock;x.uploading=true;x.seed=true;x.admit_count=0;x.hits_since_admit=0;});
-            return int(i);
-        }
-        return -1;
+        return reserve_unrequested(request,request.layer,true);
     }
-    // Empty slots a prefill may seed in layer `id` (all of them in a global pool).
+    // At load: an empty slot for an expert no request has named yet, its copy to follow (publish_cold_prefill).
+    int reserve_preload(const kimi_vram_request & request) {
+        return reserve_unrequested(request,first_layer-1,false);
+    }
+    // Slots no entry holds (all of them in a global pool's layer ranges): what a preload may fill.
+    size_t empty_slots() const {
+        return size_t(std::count_if(slots.begin(),slots.end(),[](const entry & e){
+            return !e.valid && !e.locked && !e.native_refs && !e.uploading;}));
+    }
+    // Slots a prefill may seed in layer `id` (all of them in a global pool).
     size_t free_slots(int id) const {
         if(id<first_layer || size_t(id)>=layers.size())return 0;
         const auto & l=layers[id];
-        return size_t(std::count_if(slots.begin()+l.begin,slots.begin()+l.begin+l.count,[](const entry & e){
-            return !e.valid && !e.locked && !e.native_refs && !e.uploading;}));
+        return size_t(std::count_if(slots.begin()+l.begin,slots.begin()+l.begin+l.count,[&](const entry & e){
+            return available(e,id);}));
     }
     // Seeds the decode after their prefill never selected: prompt heat of a request that is over. Freed before the
     // next prefill seeds, so that its own prompt plans with them. Returns how many.
@@ -349,6 +367,23 @@ public:
         if(!e.uploading || e.valid || !same(e.key,request))
             throw std::runtime_error("cold-prefill VRAM publication lost its reservation");
         change(e,[](entry & x){x.uploading=false;x.valid=true;});++admitted;
+    }
+    // A reservation of a slot no request asked for: a seed (seed) or a preload. `layer`: the latest layer whose
+    // preloaded entries it may take (available); below first_layer, only an empty slot.
+    int reserve_unrequested(const kimi_vram_request & request,int layer,bool seed) {
+        if(in_flight || lease_generation || native_pinned() || request.layer<first_layer ||
+                size_t(request.layer)>=layers.size() || request.expert<0 || request.expert>=experts) {
+            throw std::runtime_error("invalid unrequested VRAM reservation phase");
+        }
+        if(find(request,[](const entry & e){return e.valid || e.uploading;})>=0)return -1;
+        const auto & l=layers[request.layer];
+        for(size_t i=l.begin;i<l.begin+l.count;++i) {
+            auto & e=slots[i];
+            if(!available(e,layer))continue;
+            change(e,[&](entry & x){evictions+=x.valid;x={};x.key=request;x.keyed=true;x.touched=++clock;x.uploading=true;x.seed=seed;x.preloaded=!seed;});
+            return int(i);
+        }
+        return -1;
     }
     // Drops a reservation whose copy did not complete: a seed's, or a deferred upload's in a block given back.
     void cancel_upload(size_t slot,const kimi_vram_request & request) {

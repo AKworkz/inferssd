@@ -305,7 +305,7 @@ struct kimi_vram_deferred_api {
 // reserve; phase_complete(true) runs only after the decode graph is reserved
 // and grows best-effort into currently free device memory.
 struct kimi_vram_elastic_api {
-    uint32_t version, size;   // 4 (kimi_vram_expert_format with per-layer types)
+    uint32_t version, size;   // 5 (preload)
     int (*phase_complete)(void * context, int decode, char * error, size_t error_size);
     // Reserve the actual grouped-prefill accumulator before starting streamed I/O.
     int (*reserve_accumulate)(void * context, int tokens, char * error, size_t error_size);
@@ -315,6 +315,14 @@ struct kimi_vram_elastic_api {
     // The request gives the role bytes (one expert of a routed layer), format the geometry.
     int (*reserve)(void * context, const struct kimi_vram_request * request,
                    const struct kimi_vram_expert_format * format, char * error, size_t error_size);
+    // At load, after the load's passes, before any request: preload_slots grows a tier made at load into the card if
+    // its memory has settled, then gives in *slots how many slots no entry holds. preload copies one expert no
+    // request has named (request: its key and role bytes) from host memory into one of them, preloaded: any lookup
+    // finds it, and every allocation may take its slot as if it were empty until a request uses it. *copied is 0 when
+    // no slot is empty or the tier holds the expert already.
+    int (*preload_slots)(void * context, int * slots, char * error, size_t error_size);
+    int (*preload)(void * context, const struct kimi_vram_request * request, const void * up, const void * gate,
+                   const void * down, int * copied, char * error, size_t error_size);
 };
 // Optional decode extension: the GPU computes experts that sit in host memory (a RAM cache slot or a ring
 // buffer). How depends on the device, and costs2 says which:

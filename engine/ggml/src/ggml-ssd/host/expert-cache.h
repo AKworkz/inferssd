@@ -1134,10 +1134,22 @@ struct expert_cache {
     // Next-layer prefetch, of a decode run or of a grouped prefill (its read-ahead, where the prefill reads the retained
     // entries): take a resident, idle slot of the layer (a free one first, else the coldest) for an expert that is not
     // cached. The slot is inflight, invisible to lookups and allocation, until prefetch_done publishes it (or
-    // prefetch_activate publishes it early as a hit that its run waits for).
+    // prefetch_activate publishes it early as a hit that its run waits for). keep: per expert of the layer, 1 for one
+    // whose entry the caller's pass is about to use, which is no victim (null: none).
     // Returns -2 when the expert is already cached or on its way, -1 when there is no slot.
-    int prefetch_reserve(int32_t layer_id, int32_t expert, const kimi_cpu_sink_source * roles) {
+    int prefetch_reserve(int32_t layer_id, int32_t expert, const kimi_cpu_sink_source * roles,
+            const std::vector<uint8_t> * keep = nullptr) {
         if (!(active || prefill_read) || paused || !stats.budget_bytes || !arena || !stride) { return -1; }
+        return reserve_slot(layer_id, expert, roles, keep, false);
+    }
+    // At load (the sink's preload), before any request: an empty slot of the layer for an expert no request has named,
+    // its read to follow as a prefetch's (prefetch_done publishes it). -1 when the layer has no empty slot.
+    int preload_reserve(int32_t layer_id, int32_t expert, const kimi_cpu_sink_source * roles) {
+        if (active || paused || !stats.budget_bytes || !arena || !stride) { return -1; }
+        return reserve_slot(layer_id, expert, roles, nullptr, true);
+    }
+    int reserve_slot(int32_t layer_id, int32_t expert, const kimi_cpu_sink_source * roles,
+            const std::vector<uint8_t> * keep, bool empty_only) {
         const auto found = std::find_if(layers.begin(), layers.end(), [&](const layer & l) { return l.id == layer_id; });
         if (found == layers.end() || !found->count) { return -1; }
         const size_t layer_index = size_t(found - layers.begin());
@@ -1151,6 +1163,9 @@ struct expert_cache {
             if ((e.valid || e.reserved || e.inflight) && e.layer_index == layer_index && e.id == expert &&
                     e.source[0] == keys[0] && e.source[1] == keys[1] && e.source[2] == keys[2]) { return -2; }
             if (!e.resident || e.reserved || e.inflight || e.leases || e.protected_now || e.lent) { continue; }
+            if (e.valid && (empty_only || (keep && e.id >= 0 && size_t(e.id) < keep->size() && (*keep)[size_t(e.id)]))) {
+                continue;
+            }
             if (victim < 0 || (entries[size_t(victim)].valid && (!e.valid || colder(i, size_t(victim))))) { victim = int(i); }
         }
         for (const size_t i : lent) {

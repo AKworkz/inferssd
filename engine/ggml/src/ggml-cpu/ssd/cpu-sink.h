@@ -122,6 +122,13 @@ GGML_BACKEND_API bool kimi_cpu_sink_vram_reserve_accumulator(
 // experts_used: the model's routed experts a token.
 GGML_BACKEND_API bool kimi_cpu_sink_vram_reserve(struct kimi_cpu_sink * sink, const struct ggml_tensor * const * experts,
         int n_layers, int experts_used, char * error, size_t error_size);
+// At load, after the load's passes, before any request: the expert caches filled from the drive. No request has named
+// an expert, so each layer's experts are taken in their order: the GPU tier's empty slots, shared alike among the
+// layers, take each layer's first experts, then the RAM cache's empty slots the next ones. What no request uses is as
+// good as an empty slot to whatever allocates later. A tier made at load on a discrete GPU first grows into the card
+// if its memory has settled in the load's passes. experts: up, gate and down of n routed layers.
+GGML_BACKEND_API bool kimi_cpu_sink_preload(struct kimi_cpu_sink * sink, const struct ggml_tensor * const * experts,
+        int n_layers, char * error, size_t error_size);
 GGML_BACKEND_API void kimi_cpu_sink_cache_get_stats(
         struct kimi_cpu_sink * sink, struct kimi_cpu_sink_cache_stats * stats);
 // Room in host memory for other memory about to be allocated, decided by the host-memory ledger

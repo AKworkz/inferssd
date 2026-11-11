@@ -147,6 +147,44 @@ int main() { try {
         require(u.free_unused_seeds()==1 && !u.slots[size_t(b)].valid && u.slots[size_t(a)].valid,
                 "only the seed decode never selected is freed");
     }
+    // Preloads (filled at load, no request having named their experts): held like any entry. A prefill's pass makes
+    // the ones it routes in a layer seeds of its prompt (adopt_preloaded); its seeds take the others of the layers it
+    // has reached as if empty, never those of a layer ahead of it. A decode miss takes one as if empty, at the price
+    // of an empty slot; decode's first selection of one makes it an entry admitted at that selection's count.
+    {
+        vram_slot_table t(4,{1,2},true,0,true,16);
+        const auto p1=request(1,1),p2=request(1,2),p3=request(2,3),p4=request(2,4);
+        for (const auto & r : {p1,p2,p3,p4}) {
+            const int s=t.reserve_preload(r);require(s>=0,"no empty slot for a preload");t.publish_cold_prefill(size_t(s),r);
+        }
+        require(t.empty_slots()==0 && t.holds(1,1) && t.holds(2,4) && t.slots[0].preloaded && !t.slots[0].seed,
+                "preloads are not held, preloaded entries");
+        require(t.reserve_preload(request(1,5))<0,"a preload took a preloaded slot");
+        holds_match(t,"held differs from the slots after preloads");
+        t.adopt_preloaded(&p1,1);
+        const auto valid=[](const vram_slot_table::entry & e){return e.valid;};
+        const int s1=t.find(p1,valid);
+        require(s1>=0 && t.slots[size_t(s1)].seed && !t.slots[size_t(s1)].preloaded,"a routed preload did not become a seed");
+        require(t.free_slots(1)==1 && t.free_slots(2)==3,"the slots a seed may take do not follow the pass's layers");
+        const auto r9=request(1,9);
+        const int s9=t.reserve_cold_prefill(r9);
+        require(s9>=0 && !t.holds(1,2) && t.holds(2,3) && t.holds(2,4) && t.reserve_cold_prefill(request(1,10))<0,
+                "a seed took a slot of a layer ahead of its pass, or not the unused preload of its own");
+        t.publish_cold_prefill(size_t(s9),r9);
+        t.admission_hits=1;t.refresh_expected();
+        t.next_token();
+        const auto r6=request(2,6);t.prepare(&r6,1);
+        require(t.admissions[0]>=0 && t.slots[size_t(t.admissions[0])].key.expert==6 && (t.holds(2,3)!=t.holds(2,4)),
+                "a decode miss did not take a preloaded slot as if empty");
+        publish(t);
+        const auto left=t.holds(2,3)?p3:p4;
+        t.next_token();t.prepare(&left,1);
+        require(t.hits[0]>=0 && !t.slots[size_t(t.hits[0])].preloaded && !t.slots[size_t(t.hits[0])].seed &&
+                t.slots[size_t(t.hits[0])].admit_count==t.mature(t.layers[2].counts[size_t(left.expert)]),
+                "decode's first selection of a preload did not make it an entry admitted at that selection");
+        publish(t);
+        holds_match(t,"held differs from the slots after preloads were used");
+    }
     // What the tier holds, for the next-layer prefetch: admissions once published, not their victims; deferred
     // uploads from their reservation, until a block given back drops them; seeds from their publication, not while
     // copied or once cancelled or freed unused; a shrink of the global pool; native cancel; abort.

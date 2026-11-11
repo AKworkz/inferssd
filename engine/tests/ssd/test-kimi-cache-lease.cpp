@@ -3,6 +3,7 @@
 #include "ggml-ssd/host/expert-cache.h"
 #include "test-resources.h"
 #include <stdexcept>
+#include <vector>
 using sink_cache = ssd::host::expert_cache;
 using sink_request = ssd::host::expert_request;
 int main() {
@@ -31,5 +32,32 @@ int main() {
     require(cache.drop_duplicate(1,r) == 1 && !e.valid && e.resident);
     require(cache.stats.valid_bytes == 0 && cache.stats.committed_bytes == cache.stride);
     require(cache.drop_duplicate(1,r) == 0);
+    {
+        // A read-ahead slot comes from an entry its pass is not likely to use (keep), the older one first otherwise;
+        // a load-time preload takes only an empty slot, and none while decode runs.
+        sink_cache c(configuration); sink_cache::layer l; l.id = 1; l.count = 2;
+        c.layers.push_back(l); c.entries.resize(2); c.stride = 12288; c.stats.budget_bytes = 1; c.prefill_read = true;
+        for (int role = 0; role < 3; ++role) { c.role_bytes[role] = 4096; }
+        std::vector<char> arena(2 * c.stride); c.arena = arena.data();
+        for (int i = 0; i < 2; ++i) {
+            auto & x = c.entries[size_t(i)]; x.id = 5 + i; x.valid = x.resident = x.enabled = true; x.last_touch = uint64_t(i + 1);
+        }
+        c.stats.valid_bytes = 2 * c.stride;
+        sink_request n; n.id = 9;
+        for (int role = 0; role < 3; ++role) { n.role[role] = {fd,uint64_t(8 + role)*4096,4096}; }
+        std::vector<uint8_t> keep(16, 0); keep[5] = 1;
+        require(c.prefetch_reserve(1, 9, n.role) == 0);
+        c.prefetch_done(0, c.generation, false);
+        c.entries[0].id = 5; c.entries[0].valid = true; c.stats.valid_bytes += c.stride;
+        require(c.prefetch_reserve(1, 9, n.role, &keep) == 1 && c.entries[0].valid && c.entries[1].inflight);
+        c.prefetch_done(1, c.generation, true, false);
+        require(c.entries[1].valid && c.entries[1].id == 9 && !c.entries[1].prefetched);
+        require(c.preload_reserve(1, 11, n.role) == -1);
+        c.entries[0].valid = false; c.stats.valid_bytes -= c.stride;
+        c.active = true; require(c.preload_reserve(1, 11, n.role) == -1); c.active = false;
+        require(c.preload_reserve(1, 11, n.role) == 0 && c.entries[0].inflight);
+        c.prefetch_done(0, c.generation, false);
+        c.arena = nullptr; // the test's own buffer
+    }
     ssd::platform::close_fd(fd); test_resources::remove_file(path); std::printf("CACHE_LEASE_PASS assertions=%d payload_allocated=0\n",checks); return 0;
 } catch (const std::exception & e) { std::fprintf(stderr,"CACHE_LEASE_FAIL: %s\n",e.what()); return 1; } }

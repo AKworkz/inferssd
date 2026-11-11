@@ -127,10 +127,9 @@ struct llama_kimi_cpu_sink_runtime {
     static bool resolve_source(void * userdata, const char * tensor_name, int32_t expert,
             kimi_cpu_sink_source * source) {
         auto & runtime = *static_cast<llama_kimi_cpu_sink_runtime *>(userdata);
-        if (!runtime.active_node || !runtime.source.resolve || !source) {
+        if (!runtime.source.resolve || !source) {
             return false;
         }
-        const auto & node = *runtime.active_node;
         auto range = [&](size_t logical_nbytes, int64_t experts) {
             *source = {};
             if (!runtime.source.resolve(runtime.source.userdata, tensor_name, expert, logical_nbytes, experts,
@@ -142,9 +141,12 @@ struct llama_kimi_cpu_sink_runtime {
             source->nbytes = (source->data_offset + logical_nbytes + 4095) / 4096 * 4096;
             return true;
         };
-        for (const ggml_tensor * tensor : { &node.up, &node.gate, &node.down }) {
-            if (std::strcmp(tensor_name, tensor->name) == 0) {
-                return range(tensor->nb[2], tensor->ne[2]);
+        // the running node's tensors first; any routed layer's otherwise (the next layer's prefetch, the load's preload)
+        if (const auto * node = runtime.active_node) {
+            for (const ggml_tensor * tensor : { &node->up, &node->gate, &node->down }) {
+                if (std::strcmp(tensor_name, tensor->name) == 0) {
+                    return range(tensor->nb[2], tensor->ne[2]);
+                }
             }
         }
         const auto shape = runtime.expert_shapes.find(tensor_name);
@@ -319,6 +321,18 @@ struct llama_kimi_cpu_sink_runtime {
         if (reserve && !reserve(sink, experts.data(), int(experts.size() / 3), experts_used, error, sizeof(error))) {
             std::fprintf(stderr, "[kimi_vram_elastic] event=reserve status=fail error=%s\n", error);
         }
+    }
+
+    // At load, after the load's passes and before any request: the expert caches filled from the drive by the sink
+    // (kimi_cpu_sink_preload). Nothing to do before the sink exists (no reserve made it). experts: up, gate and down
+    // of every routed layer.
+    bool preload(const std::vector<const ggml_tensor *> & experts, std::string & error) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!sink || !cpu_api || experts.size() < 3) { return true; }
+        char message[512] = {};
+        if (cpu_api->preload(sink, experts.data(), int(experts.size() / 3), message, sizeof(message))) { return true; }
+        error = message;
+        return false;
     }
 
     // Room for `host_bytes` of host memory and `device_bytes` of GPU memory the caller is about to allocate, from

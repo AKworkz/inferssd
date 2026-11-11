@@ -1800,13 +1800,158 @@ struct kimi_cpu_sink {
         if (cache.layers.empty() || !cache.keep_across_requests || !cache.gives_room_back() || cache.arena) { return; }
         const ggml_tensor * tensors[] = { up, gate, down };
         size_t bytes[3];
-        for (int role = 0; role < 3; ++role) {
-            bytes[role] = (ggml_row_size(tensors[role]->type, tensors[role]->ne[0]) * tensors[role]->ne[1] + 8190) / 4096 * 4096;
-        }
+        role_read_bytes(tensors, bytes);
         if (cache.stats.budget_bytes == sink_cache::auto_budget) { reserve_ring(bytes, true); }
         double us = 0;
         // load time: nothing else runs, so every CPU pages the arena in
         cache.reserve_at_load(bytes, up, size_t(std::max(1, experts_used)), sink_process_cpus(), us);
+    }
+    // At load, after the load's passes, before any request (kimi_cpu_sink_preload): the expert caches filled from the
+    // drive, which nothing else uses then. No request has named an expert yet, so every expert of a layer is as likely
+    // as any other: the GPU tier takes each routed layer's first experts, its empty slots shared alike among the
+    // layers, and the RAM cache the experts after them, as many as each layer's empty slots. What no request uses is as
+    // good as an empty slot to whatever allocates later (the tier's preloaded entries; the RAM cache's entries, which
+    // decode evicts first and a pass's read-ahead takes unless the pass is likely to use them). The tier's experts are
+    // read through the ring's slots, the RAM cache's into their own. experts: up, gate and down of n routed layers.
+    struct preload_read {
+        int32_t layer = -1;
+        sink_request expert = {};
+        char * target[3] = {};
+        int entry = -1;       // the RAM cache slot it lands in; -1: a ring slot, for the tier
+        unsigned ready = 0;   // roles read
+        bool failed = false;
+    };
+    void preload(const ggml_tensor * const * experts, int n) {
+        const auto start = sink_clock::now();
+        std::vector<std::pair<int32_t, int>> routed; // (layer, experts)
+        for (int i = 0; i < n; ++i) {
+            const int layer = ssd::host::routed_layer(experts[3 * i]);
+            if (layer >= 0) { routed.emplace_back(layer, int(experts[3 * i]->ne[2])); }
+        }
+        if (routed.empty() || slots.empty()) { return; }
+        size_t largest = 0;
+        for (int i = 1; i < n; ++i) {
+            if (expert_read_bytes(experts + 3 * i) > expert_read_bytes(experts + 3 * largest)) { largest = size_t(i); }
+        }
+        size_t bytes[3];
+        role_read_bytes(experts + 3 * largest, bytes);
+        reserve_ring(bytes, true);
+        sink_ring reads;
+        const unsigned depth = unsigned(3 * slots.size()); // the depth the layers' own reads reach
+        sink_io_value(reads.init(depth, false));
+        uint64_t tier_experts = 0, ram_experts = 0, failed = 0, read_bytes = 0;
+        const size_t tier_slots = vram.preload_slots();
+        std::vector<int> first_ram(routed.size(), 0);
+        int widest = 0;
+        for (size_t l = 0; l < routed.size(); ++l) {
+            const int share = int(tier_slots / routed.size() + (l < tier_slots % routed.size()));
+            first_ram[l] = std::min(share, routed[l].second);
+            widest = std::max(widest, first_ram[l]);
+        }
+        // the layers' k-th experts after their (k-1)-th: the tier's slots go in that order, and a request that needs
+        // device memory back takes the last blocks first, the same few experts of every layer
+        std::vector<preload_read> batch;
+        auto upload = [&] {
+            read_bytes += preload_all(reads, depth, batch);
+            for (auto & r : batch) {
+                if (r.failed) { ++failed; continue; }
+                const void * data[3];
+                for (int role = 0; role < 3; ++role) { data[role] = r.target[role] + r.expert.role[role].data_offset; }
+                tier_experts += vram.preload(r.layer, r.expert, data);
+            }
+            batch.clear();
+        };
+        for (int e = 0; e < widest; ++e) {
+            for (size_t l = 0; l < routed.size(); ++l) {
+                if (e >= first_ram[l]) { continue; }
+                preload_read r;
+                if (!preload_resolve(routed[l].first, e, r)) { ++failed; continue; }
+                for (int role = 0; role < 3; ++role) { r.target[role] = static_cast<char *>(slots[batch.size()].role[role].data); }
+                batch.push_back(r);
+                if (batch.size() == slots.size()) { upload(); }
+            }
+        }
+        upload();
+        if (cache.arena) {
+            std::vector<preload_read> batch;
+            for (size_t l = 0; l < routed.size(); ++l) {
+                for (int e = first_ram[l]; e < routed[l].second; ++e) {
+                    preload_read r;
+                    if (!preload_resolve(routed[l].first, e, r)) { ++failed; continue; }
+                    r.entry = cache.preload_reserve(r.layer, e, r.expert.role);
+                    if (r.entry == -1) { break; } // the layer has no empty slot left
+                    if (r.entry < 0) { continue; }
+                    for (int role = 0; role < 3; ++role) { r.target[role] = cache.data(r.entry, role); }
+                    batch.push_back(r);
+                }
+            }
+            // the reserved slots go back empty if the reads cannot finish
+            try { read_bytes += preload_all(reads, depth, batch); }
+            catch (...) { for (const auto & r : batch) { cache.prefetch_done(r.entry, cache.generation, false, false); } throw; }
+            for (const auto & r : batch) {
+                cache.prefetch_done(r.entry, cache.generation, !r.failed, false);
+                if (r.failed) { ++failed; } else { ++ram_experts; }
+            }
+        }
+        std::fprintf(stderr, "[kimi_cpu_sink_preload] layers=%zu tier_slots=%zu tier_experts=%llu ram_experts=%llu failed=%llu "
+            "read_bytes=%llu us=%.0f\n", routed.size(), tier_slots, (unsigned long long) tier_experts,
+            (unsigned long long) ram_experts, (unsigned long long) failed, (unsigned long long) read_bytes, elapsed_us(start));
+    }
+    // An expert's three roles from the expert source, as the read-ahead resolves them: direct reads need whole pages.
+    bool preload_resolve(int32_t layer, int32_t expert, preload_read & r) {
+        static const char * const roles[3] = { "up", "gate", "down" };
+        r.layer = layer;
+        r.expert.id = expert;
+        for (int role = 0; role < 3; ++role) {
+            char name[GGML_MAX_NAME];
+            std::snprintf(name, sizeof(name), "blk.%d.ffn_%s_exps.weight", layer, roles[role]);
+            auto & source = r.expert.role[role];
+            if (!resolve(name, expert, &source) || source.offset % 4096 || !source.nbytes || source.nbytes % 4096 ||
+                    source.nbytes > size_t(std::numeric_limits<int>::max())) { return false; }
+        }
+        return true;
+    }
+    // Reads every role of `batch` into its targets, `depth` reads in flight at most; a failed or short read fails its
+    // expert. Returns the bytes read.
+    uint64_t preload_all(sink_ring & ring_, unsigned depth, std::vector<preload_read> & batch) {
+        const size_t total = 3 * batch.size();
+        size_t next = 0, done = 0;
+        unsigned inflight = 0;
+        uint64_t bytes = 0;
+        while (done < total) {
+            unsigned queued = 0;
+            for (; next < total && inflight + queued < depth; ++next, ++queued) {
+                const auto & r = batch[next / 3];
+                const auto & source = r.expert.role[next % 3];
+                sink_io_value(ring_.queue({ source.fd_direct, source.offset, source.nbytes }, r.target[next % 3], next, false));
+            }
+            if (queued) { sink_io_value(ring_.submit(queued)); inflight += queued; }
+            sink_completion cqe;
+            bool popped = sink_io_value(ring_.pop(cqe));
+            if (!popped) { sink_io_value(ring_.wait()); popped = sink_io_value(ring_.pop(cqe)); }
+            while (popped) {
+                if (cqe.user_data >= total || !inflight) { throw std::runtime_error("invalid CPU sink preload CQE"); }
+                --inflight; ++done;
+                auto & r = batch[size_t(cqe.user_data / 3)];
+                const auto & range = r.expert.role[cqe.user_data % 3];
+                const size_t required = range.payload_nbytes ? range.data_offset + range.payload_nbytes : range.nbytes;
+                if (cqe.res < 0 || size_t(cqe.res) < required || size_t(cqe.res) > range.nbytes) { r.failed = true; }
+                else { r.ready |= 1u << (cqe.user_data % 3); bytes += uint64_t(cqe.res); }
+                popped = sink_io_value(ring_.pop(cqe));
+            }
+        }
+        return bytes;
+    }
+    static size_t expert_read_bytes(const ggml_tensor * const * roles) {
+        size_t bytes[3];
+        role_read_bytes(roles, bytes);
+        return bytes[0] + bytes[1] + bytes[2];
+    }
+    // A role's read of one expert: its rows, with the page prefix a read may need, in whole pages.
+    static void role_read_bytes(const ggml_tensor * const * roles, size_t * bytes) {
+        for (int role = 0; role < 3; ++role) {
+            bytes[role] = (ggml_row_size(roles[role]->type, roles[role]->ne[0]) * roles[role]->ne[1] + 8190) / 4096 * 4096;
+        }
     }
     // The ledger's floor moves with the file reserve on unified memory; the GPU tier keeps it free.
     void refresh_floor(const char * reason) {
@@ -2777,13 +2922,20 @@ struct kimi_cpu_sink {
     }
     // Every other entry that holds the run mutex and may use the ring or the cache (a phase begin, a decode run, a
     // reserve, a reset): the read-ahead stops, what it read is published, and the pass ends.
+    // io_mutex held: the pass's windows estimate the next pass's until it has its own (lookahead_plan_next); the next
+    // call starts a pass.
+    void lookahead_end_pass() {
+        if (!lookahead.pass_windows_us.empty()) { lookahead.last_pass_median_us = lookahead_median(lookahead.pass_windows_us); }
+        lookahead.pass_windows_us.clear();
+        lookahead.pass_layer = -1;
+    }
     void lookahead_quiesce() {
         {
             std::unique_lock<std::mutex> lock(io_mutex);
             lookahead_stop(lock);
             lookahead.hint_layer = lookahead.planned_layer = -1;
             lookahead.window_open = false;
-            lookahead.pass_layer = -1;
+            lookahead_end_pass(); // what runs next (a decode, the load's preload) ends the pass
         }
         lookahead_finish(-1, nullptr);
         lookahead.landed_entries.clear();
@@ -2818,10 +2970,7 @@ struct kimi_cpu_sink {
             r.planned = lookahead.layer == layer ? lookahead.plan.size() : 0;
             r.issued = lookahead.issued; r.landed = lookahead.landed; r.failed = lookahead.failed;
             lookahead.issued = lookahead.landed = lookahead.failed = 0;
-            if (layer < 0 || layer != lookahead.pass_layer + 1) {
-                if (!lookahead.pass_windows_us.empty()) { lookahead.last_pass_median_us = lookahead_median(lookahead.pass_windows_us); }
-                lookahead.pass_windows_us.clear();
-            }
+            if (layer < 0 || layer != lookahead.pass_layer + 1) { lookahead_end_pass(); }
             if (window_us >= 0) { lookahead.pass_windows_us.push_back(window_us); }
             lookahead.pass_layer = layer;
         }
@@ -2859,7 +3008,8 @@ struct kimi_cpu_sink {
     // experts with P >= 1/2 that the GPU tier does not hold and the RAM cache's prefill read would not serve, most
     // likely first, at most N = ceil(window x drive rate / expert bytes), the experts the drive reads in the idle window
     // this pass is estimated to have, and as many as the layer's RAM cache slots take (prefetch_reserve, as the decode
-    // prefetch takes one: a free slot first, else the layer's coldest). The estimate: the windows' median over the pass
+    // prefetch takes one: a free slot first, else the layer's coldest of the entries whose experts have P < 1/2). The
+    // estimate: the windows' median over the pass
     // so far, else the last pass's. No plan without a prediction of the next layer or a measured rate, before any
     // window, without a drive line, or for the last routed layer (the next one resolves no expert).
     void lookahead_plan_next(int32_t layer, const ggml_tensor * up, int ntokens, int nslots) {
@@ -2912,8 +3062,12 @@ struct kimi_cpu_sink {
         // A read still in flight when the next call starts delays its own reads by about the read's time, which is
         // what a used read saves: reading an expert ahead pays when P >= 1/2.
         std::vector<int32_t> likely;
+        // the next layer's entries of experts this pass is likely to use (P >= 1/2) keep their slots: a read-ahead slot
+        // comes only from an entry less likely than any expert it reads (one from load or from an earlier request)
+        std::vector<uint8_t> keep(size_t(experts), 0);
         for (int e = 0; e < experts; ++e) {
-            if (held[size_t(e)] || cache.prefill_holds(next, e) || !(log_unused[size_t(e)] <= std::log(0.5))) { continue; }
+            keep[size_t(e)] = log_unused[size_t(e)] <= std::log(0.5);
+            if (held[size_t(e)] || cache.prefill_holds(next, e) || !keep[size_t(e)]) { continue; }
             likely.push_back(e);
         }
         std::stable_sort(likely.begin(), likely.end(),
@@ -2939,7 +3093,7 @@ struct kimi_cpu_sink {
                     source.nbytes && source.nbytes % 4096 == 0 && source.nbytes <= size_t(std::numeric_limits<int>::max());
             }
             if (!resolved) { ++unresolved; continue; }
-            read.entry = cache.prefetch_reserve(next, read.expert, read.role);
+            read.entry = cache.prefetch_reserve(next, read.expert, read.role, &keep);
             if (read.entry == -2) { continue; }            // cached, or on its way
             if (read.entry < 0) {                           // the layer has no idle slot left: one a finished layer lends
                 read.entry = cache.prefetch_borrow(next, read.expert, read.role, layer);
@@ -4230,6 +4384,19 @@ extern "C" bool kimi_cpu_sink_vram_reserve(struct kimi_cpu_sink * sink, const st
         sink->reserve_tier(experts, n_layers, experts_used);
         return true;
     }
+    catch (const std::exception & e) { sink_error(error, error_size, e.what()); return false; }
+}
+
+extern "C" bool kimi_cpu_sink_preload(struct kimi_cpu_sink * sink, const struct ggml_tensor * const * experts,
+        int n_layers, char * error, size_t error_size) {
+    sink_error(error, error_size, "");
+    if (!sink || !experts || n_layers < 1 ||
+            std::any_of(experts, experts + 3 * n_layers, [](const ggml_tensor * t) { return !t; })) {
+        sink_error(error, error_size, "null CPU sink or expert tensor"); return false;
+    }
+    std::lock_guard<sink_run_mutex> serial(sink->run_mutex); sink->prefetch_drain();
+    sink->lookahead_quiesce(); // the ring's slots stage the tier's experts
+    try { sink->preload(experts, n_layers); return true; }
     catch (const std::exception & e) { sink_error(error, error_size, e.what()); return false; }
 }
 

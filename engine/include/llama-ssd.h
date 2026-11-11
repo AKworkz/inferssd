@@ -31,6 +31,12 @@ LLAMA_API size_t llama_ssd_schema_json(char * output, size_t output_size);
 LLAMA_API bool llama_ssd_prefill_phase(struct llama_context * ctx, bool active,
     uint32_t prompt_tokens, uint32_t prefill_tokens);
 
+// Once the load's passes are done and before any request: the expert caches filled from the drive (the GPU tier's
+// empty slots and the RAM cache's), each routed layer's experts taken in their order, since no request has named one.
+// What no request uses is as good as an empty slot to what allocates later. A context without SSD experts returns
+// true and does nothing; false reports a failure, after which the caches fill as requests run.
+LLAMA_API bool llama_ssd_preload(struct llama_context * ctx);
+
 // Keep this reservation alive until allocation and first touch finish. NULL
 // means refusal. A context without the Linux SSD executor returns a valid no-op
 // handle. Finish exactly once before destroying the context; false cancels an

@@ -454,14 +454,8 @@ llama_context::llama_context(
         // cache's elsewhere when it can give room back; the sink decides): its page population then leaves every
         // request's path. Every routed layer, for each layer's expert format (a model may quantize layers differently).
         if (cpu_sink_runtime && (cpu_sink_runtime->vram_budget || cpu_sink_runtime->cache_budget) && backend_cpu) {
-            std::vector<const ggml_tensor *> experts;
-            for (const auto & layer : model.layers) {
-                if (layer.ffn_up_exps && layer.ffn_gate_exps && layer.ffn_down_exps) {
-                    experts.insert(experts.end(), { layer.ffn_up_exps, layer.ffn_gate_exps, layer.ffn_down_exps });
-                }
-            }
             cpu_sink_runtime->reserve_tier(ggml_backend_dev_backend_reg(ggml_backend_get_device(backend_cpu)),
-                experts, int(model.hparams.n_expert_used));
+                routed_experts(), int(model.hparams.n_expert_used));
         }
 
         if (!cparams.flash_attn) {
@@ -2977,6 +2971,30 @@ std::string llama_dense_stream_meter::end(const ggml_backend_sched_kimi_copy_sta
     return line;
 }
 
+// up, gate and down of every routed layer, in layer order
+std::vector<const ggml_tensor *> llama_context::routed_experts() const {
+    std::vector<const ggml_tensor *> experts;
+    for (const auto & layer : model.layers) {
+        if (layer.ffn_up_exps && layer.ffn_gate_exps && layer.ffn_down_exps) {
+            experts.insert(experts.end(), { layer.ffn_up_exps, layer.ffn_gate_exps, layer.ffn_down_exps });
+        }
+    }
+    return experts;
+}
+
+bool llama_context::ssd_preload() {
+    if (!cpu_sink_runtime || !(cpu_sink_runtime->vram_budget || cpu_sink_runtime->cache_budget)) {
+        return true;
+    }
+    synchronize();
+    std::string error;
+    if (!cpu_sink_runtime->preload(routed_experts(), error)) {
+        LLAMA_LOG_WARN("%s: SSD expert preload failed: %s\n", __func__, error.c_str());
+        return false;
+    }
+    return true;
+}
+
 uint32_t llama_prefill_ubatch_search(uint32_t target, uint32_t granularity, const std::function<bool(uint32_t)> & reserve) {
     if (reserve(target)) {
         return target;
@@ -4049,6 +4067,13 @@ bool llama_ssd_prefill_phase(llama_context * ctx, bool active,
     try { return ctx && ctx->moe_prefill_phase_workspace(active, prompt_tokens, prefill_tokens); }
     catch (const std::exception & failure) { LLAMA_LOG_ERROR("SSD phase transition failed: %s\n", failure.what()); }
     catch (...) { LLAMA_LOG_ERROR("SSD phase transition failed\n"); }
+    return false;
+}
+
+bool llama_ssd_preload(llama_context * ctx) {
+    try { return ctx && ctx->ssd_preload(); }
+    catch (const std::exception & failure) { LLAMA_LOG_ERROR("SSD expert preload failed: %s\n", failure.what()); }
+    catch (...) { LLAMA_LOG_ERROR("SSD expert preload failed\n"); }
     return false;
 }
 

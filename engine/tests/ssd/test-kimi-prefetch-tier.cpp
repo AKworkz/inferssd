@@ -66,9 +66,12 @@ const ssd::gpu::provider_v1 * stand_in_provider() {
         [](void *, const int32_t *, int, char *, size_t) { return 0; },
         [](void *, int32_t, const void *, const void *, const void *, char *, size_t) { return 0; },
         [](void *, int32_t, char *, size_t) { return 0; } };
-    static const kimi_vram_elastic_api elastic = { 4, sizeof(kimi_vram_elastic_api),
+    static const kimi_vram_elastic_api elastic = { 5, sizeof(kimi_vram_elastic_api),
         [](void *, int, char *, size_t) { return 0; }, [](void *, int, char *, size_t) { return 0; },
-        [](void *, const kimi_vram_request *, const kimi_vram_expert_format *, char *, size_t) { return 0; } };
+        [](void *, const kimi_vram_request *, const kimi_vram_expert_format *, char *, size_t) { return 0; },
+        [](void *, int * slots, char *, size_t) { *slots = 0; return 0; },
+        [](void *, const kimi_vram_request *, const void *, const void *, const void *, int * copied, char *, size_t) {
+            *copied = 0; return 0; } };
     static const kimi_vram_deferred_api deferred = { 3, sizeof(kimi_vram_deferred_api),
         [](void *, const kimi_vram_request *, const void *, const void *, const void *, int * queued, char * e, size_t n) {
             *queued = 0; return refuse(nullptr, e, n); },

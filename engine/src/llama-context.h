@@ -71,6 +71,10 @@ struct llama_context {
     // Request-scoped scheduler/cache exchange used by the default-off K3
     // grouped-prefill capacity ladder.
     bool moe_prefill_phase_workspace(bool active, uint32_t requested_tokens, uint32_t prefill_tokens);
+    // at load, after the load's passes: the expert caches filled from the drive (llama_ssd_preload)
+    bool ssd_preload();
+    // up, gate and down of every routed layer, in layer order
+    std::vector<const ggml_tensor *> routed_experts() const;
 
     // room in host memory for an allocation outside the RAM expert cache (llama_host_reserve)
     bool host_reserve(size_t bytes);

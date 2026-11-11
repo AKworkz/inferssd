@@ -151,8 +151,9 @@ struct sink_vram {
         }
         if (configuration.gpu.elastic) {
             elastic = configuration.gpu.elastic;
-            if (!elastic || elastic->version != 4 || elastic->size != sizeof(*elastic) ||
-                    !elastic->phase_complete || !elastic->reserve_accumulate || !elastic->reserve) {
+            if (!elastic || elastic->version != 5 || elastic->size != sizeof(*elastic) ||
+                    !elastic->phase_complete || !elastic->reserve_accumulate || !elastic->reserve ||
+                    !elastic->preload_slots || !elastic->preload) {
                 throw std::runtime_error("GPU tier elastic lifecycle ABI mismatch");
             }
         }
@@ -291,6 +292,29 @@ struct sink_vram {
         const kimi_vram_expert_format f = layers.format(up, down, int32_t(up->ne[0]), int32_t(up->ne[1]));
         char error[512] = {};
         check(elastic->reserve(context, &r, &f, error, sizeof(error)), error);
+    }
+    // At load, after the load's passes (kimi_cpu_sink_preload): the slots no entry holds, a tier made at load having
+    // grown into the card first if its memory settled; 0 without a tier.
+    size_t preload_slots() {
+        if (!context || !elastic) { return 0; }
+        int slots = 0;
+        char error[512] = {};
+        check(elastic->preload_slots(context, &slots, error, sizeof(error)), error);
+        return size_t(std::max(0, slots));
+    }
+    // One expert into an empty slot from its roles in host memory, keyed as decode keys it (sink_cache::key):
+    // false when no slot is empty or the tier holds it already.
+    bool preload(int32_t layer, const sink_request & expert, const void * const * data) {
+        kimi_vram_request r = {};
+        r.layer = layer; r.expert = expert.id; r.weight = 1.0f;
+        for (int role = 0; role < 3; ++role) {
+            const auto k = sink_cache::key(expert.role[role]);
+            r.role[role] = { k.device, k.inode, k.size, k.offset, k.bytes, k.mtime_s, k.mtime_ns, k.ctime_s, k.ctime_ns, k.inode_hi };
+        }
+        int copied = 0;
+        char error[512] = {};
+        check(elastic->preload(context, &r, data[0], data[1], data[2], &copied, error, sizeof(error)), error);
+        return copied != 0;
     }
     void phase_complete(bool decode) {
         if (decode) { prefill_open = false; } // the tier leaves prefill: scratch released, arena grown

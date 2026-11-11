@@ -24,6 +24,11 @@ inline bool server_moe_workspace_transition(
     return false;
 }
 
+// At load, once the load's passes are done (llama_ssd_preload). A failure leaves the caches to fill as requests run.
+inline void server_ssd_preload(llama_context * ctx) {
+    if (!llama_ssd_preload(ctx)) { SRV_WRN("%s", "SSD expert preload failed; the caches fill as requests run\n"); }
+}
+
 inline bool server_moe_phase_report(
         llama_context * ctx,
         const char * label,
