@@ -4,7 +4,7 @@
 // scheduling speed.
 #include "gpu-services.h"
 #include "vram-tier.cpp"
-#include "test-kimi-vram-format-fixture.h"
+#include "test-ssd-vram-format-fixture.h"
 #include <functional>
 
 namespace {

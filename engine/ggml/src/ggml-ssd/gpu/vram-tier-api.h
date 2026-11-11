@@ -342,7 +342,7 @@ struct kimi_vram_elastic_api {
 // ranges. Both return 0 and do nothing where the device reads host memory in place. Either may run on any thread;
 // a registration holds the driver for about a millisecond per 19 MB and delays other threads' CUDA calls meanwhile.
 // The measured lines are those of every copy and every vector-engine call the tier makes, decode's and grouped
-// prefill's alike: the caller prices both from them (kimi-prefill-cost.h, kimi_place_table).
+// prefill's alike: the caller prices both from them (ggml-ssd/place/layer-plan.h, kimi_place_table).
 struct kimi_vram_host_job { int32_t row; float weight; const void * role[3]; };
 // The measured lines of the host path (microseconds; 0 until measured).
 struct kimi_vram_host_costs {

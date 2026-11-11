@@ -6,9 +6,9 @@
 // reduction without requiring the full model. The CUDA path intentionally uses
 // Q8_1 activations and is checked numerically, not bitwise.
 #define main original_sink_test_main
-#include "test-kimi-cpu-sink.cpp"
+#include "test-ssd-cpu-sink.cpp"
 #undef main
-#include "kimi-host-jobs-test.inc"
+#include "host-jobs-test.inc"
 #include <cuda_runtime.h>
 
 namespace {

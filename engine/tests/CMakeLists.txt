@@ -144,25 +144,25 @@ target_include_directories(test-ssd-runtime-policy PRIVATE ../ggml/src)
 add_test(NAME ssd_runtime_policy COMMAND test-ssd-runtime-policy)
 set_property(TEST ssd_runtime_policy PROPERTY LABELS main)
 
-add_executable(test-kimi-prefill-cost ssd/test-kimi-prefill-cost.cpp)
-target_compile_features(test-kimi-prefill-cost PRIVATE cxx_std_17)
-target_include_directories(test-kimi-prefill-cost PRIVATE ../ggml/src/ggml-cpu)
-add_test(NAME kimi_prefill_cost COMMAND test-kimi-prefill-cost)
-set_property(TEST kimi_prefill_cost PROPERTY LABELS main)
+add_executable(test-ssd-prefill-cost ssd/test-ssd-prefill-cost.cpp)
+target_compile_features(test-ssd-prefill-cost PRIVATE cxx_std_17)
+target_include_directories(test-ssd-prefill-cost PRIVATE ../ggml/src/ggml-cpu)
+add_test(NAME ssd_prefill_cost COMMAND test-ssd-prefill-cost)
+set_property(TEST ssd_prefill_cost PROPERTY LABELS main)
 
-add_executable(test-kimi-host-gather ssd/test-kimi-host-gather.cpp)
-target_compile_features(test-kimi-host-gather PRIVATE cxx_std_17)
-target_include_directories(test-kimi-host-gather PRIVATE ../src ../ggml/src)
-target_link_libraries(test-kimi-host-gather PRIVATE ggml-base ggml-ssd-platform)
-add_test(NAME kimi_host_gather COMMAND test-kimi-host-gather)
-set_property(TEST kimi_host_gather PROPERTY LABELS main)
+add_executable(test-ssd-host-gather ssd/test-ssd-host-gather.cpp)
+target_compile_features(test-ssd-host-gather PRIVATE cxx_std_17)
+target_include_directories(test-ssd-host-gather PRIVATE ../src ../ggml/src)
+target_link_libraries(test-ssd-host-gather PRIVATE ggml-base ggml-ssd-platform)
+add_test(NAME ssd_host_gather COMMAND test-ssd-host-gather)
+set_property(TEST ssd_host_gather PROPERTY LABELS main)
 
-add_executable(test-kimi-host-lock ssd/test-kimi-host-lock.cpp)
-target_compile_features(test-kimi-host-lock PRIVATE cxx_std_17)
-target_include_directories(test-kimi-host-lock PRIVATE ../ggml/src/ggml-cpu)
-target_link_libraries(test-kimi-host-lock PRIVATE Threads::Threads)
-add_test(NAME kimi_host_lock COMMAND test-kimi-host-lock)
-set_property(TEST kimi_host_lock PROPERTY LABELS main)
+add_executable(test-ssd-host-lock ssd/test-ssd-host-lock.cpp)
+target_compile_features(test-ssd-host-lock PRIVATE cxx_std_17)
+target_include_directories(test-ssd-host-lock PRIVATE ../ggml/src/ggml-cpu)
+target_link_libraries(test-ssd-host-lock PRIVATE Threads::Threads)
+add_test(NAME ssd_host_lock COMMAND test-ssd-host-lock)
+set_property(TEST ssd_host_lock PROPERTY LABELS main)
 
 add_executable(test-graph-lane ssd/test-graph-lane.cpp)
 target_compile_features(test-graph-lane PRIVATE cxx_std_17)
@@ -291,22 +291,22 @@ endif()
 
 # The RAM cache's lease metadata against real file identities, on every OS.
 if (TARGET ggml-ssd-host)
-    add_executable(test-kimi-cache-lease ssd/test-kimi-cache-lease.cpp)
-    target_compile_features(test-kimi-cache-lease PRIVATE cxx_std_17)
-    target_include_directories(test-kimi-cache-lease PRIVATE ../ggml/src)
-    target_link_libraries(test-kimi-cache-lease PRIVATE ggml-ssd-host ggml-base Threads::Threads)
-    add_test(NAME test-kimi-cache-lease COMMAND test-kimi-cache-lease)
+    add_executable(test-ssd-cache-lease ssd/test-ssd-cache-lease.cpp)
+    target_compile_features(test-ssd-cache-lease PRIVATE cxx_std_17)
+    target_include_directories(test-ssd-cache-lease PRIVATE ../ggml/src)
+    target_link_libraries(test-ssd-cache-lease PRIVATE ggml-ssd-host ggml-base Threads::Threads)
+    add_test(NAME test-ssd-cache-lease COMMAND test-ssd-cache-lease)
 endif()
 
 # Linux only: the fixed-route oracle (GNU C) and the CUDA VRAM tier fixtures.
 if (TARGET ggml-cpu AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_executable(test-ssd-cpu-fixed-route ssd/test-cpu-fixed-route.cpp ssd/oracle/kimi-routed-math.c)
+    add_executable(test-ssd-cpu-fixed-route ssd/test-cpu-fixed-route.cpp ssd/oracle/routed-math.c)
     target_compile_features(test-ssd-cpu-fixed-route PRIVATE cxx_std_17 c_std_11)
     target_compile_definitions(test-ssd-cpu-fixed-route PRIVATE _GNU_SOURCE)
     target_include_directories(test-ssd-cpu-fixed-route PRIVATE ../ggml/src ../ggml/src/ggml-cpu)
     target_link_libraries(test-ssd-cpu-fixed-route PRIVATE ggml-cpu ggml-base Threads::Threads)
     add_test(NAME ssd_cpu_fixed_route COMMAND test-ssd-cpu-fixed-route)
-    foreach(lease_target test-kimi-vram-ready test-kimi-vram-native test-kimi-vram-pool)
+    foreach(lease_target test-ssd-vram-ready test-ssd-vram-native test-ssd-vram-pool)
         add_executable(${lease_target} ssd/${lease_target}.cpp)
         target_compile_features(${lease_target} PRIVATE cxx_std_17)
         target_include_directories(${lease_target} PRIVATE ../ggml/src ../ggml/src/ggml-cpu ../ggml/src/ggml-cuda/ssd)
@@ -316,9 +316,9 @@ if (TARGET ggml-cpu AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if (TARGET kimi-vram-tier)
         # GPU tests require explicit ownership of a lane and normally linked
         # backend objects; do not acquire a shared GPU automatically in ctest.
-        foreach(tier_test test-kimi-vram-async test-kimi-vram-deferred test-kimi-vram-exclusive
-                test-kimi-vram-format-compat test-kimi-vram-pool-cuda
-                test-kimi-vram-elastic test-kimi-vram-reclaim test-kimi-vram-mixed)
+        foreach(tier_test test-ssd-vram-async test-ssd-vram-deferred test-ssd-vram-exclusive
+                test-ssd-vram-format-compat test-ssd-vram-pool-cuda
+                test-ssd-vram-elastic test-ssd-vram-reclaim test-ssd-vram-mixed)
             add_executable(${tier_test} ssd/${tier_test}.cpp)
             target_compile_features(${tier_test} PRIVATE cxx_std_17)
             target_compile_options(${tier_test} PRIVATE -fno-fast-math -ffp-contract=off)
@@ -326,33 +326,33 @@ if (TARGET ggml-cpu AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
             target_link_libraries(${tier_test} PRIVATE ggml-ssd-host ggml-cpu ggml-base ggml-cuda CUDA::cudart Threads::Threads ${CMAKE_DL_LIBS})
             add_dependencies(${tier_test} kimi-vram-tier)
         endforeach()
-        add_executable(test-kimi-prefill-scratch ssd/test-kimi-prefill-scratch.cpp)
-        target_compile_features(test-kimi-prefill-scratch PRIVATE cxx_std_17)
-        target_compile_options(test-kimi-prefill-scratch PRIVATE -fno-fast-math -ffp-contract=off)
-        target_include_directories(test-kimi-prefill-scratch PRIVATE ../ggml/src ../ggml/src/ggml-cpu ../vendor)
-        target_link_libraries(test-kimi-prefill-scratch PRIVATE ggml-ssd-host ggml-cpu ggml-base ggml-cuda CUDA::cudart Threads::Threads ${CMAKE_DL_LIBS})
-        add_dependencies(test-kimi-prefill-scratch kimi-vram-tier)
-        add_executable(test-kimi-vram-generic ssd/test-kimi-vram-generic.cpp)
-        target_compile_features(test-kimi-vram-generic PRIVATE cxx_std_17)
-        target_include_directories(test-kimi-vram-generic PRIVATE ../ggml/src ../ggml/src/ggml-cpu
+        add_executable(test-ssd-prefill-scratch ssd/test-ssd-prefill-scratch.cpp)
+        target_compile_features(test-ssd-prefill-scratch PRIVATE cxx_std_17)
+        target_compile_options(test-ssd-prefill-scratch PRIVATE -fno-fast-math -ffp-contract=off)
+        target_include_directories(test-ssd-prefill-scratch PRIVATE ../ggml/src ../ggml/src/ggml-cpu ../vendor)
+        target_link_libraries(test-ssd-prefill-scratch PRIVATE ggml-ssd-host ggml-cpu ggml-base ggml-cuda CUDA::cudart Threads::Threads ${CMAKE_DL_LIBS})
+        add_dependencies(test-ssd-prefill-scratch kimi-vram-tier)
+        add_executable(test-ssd-vram-generic ssd/test-ssd-vram-generic.cpp)
+        target_compile_features(test-ssd-vram-generic PRIVATE cxx_std_17)
+        target_include_directories(test-ssd-vram-generic PRIVATE ../ggml/src ../ggml/src/ggml-cpu
             ../ggml/src/ggml-cuda/ssd ../vendor)
-        target_link_libraries(test-kimi-vram-generic PRIVATE ggml-ssd-host ggml-cpu ggml-base ggml-cuda
+        target_link_libraries(test-ssd-vram-generic PRIVATE ggml-ssd-host ggml-cpu ggml-base ggml-cuda
             CUDA::cudart Threads::Threads ${CMAKE_DL_LIBS})
-        add_dependencies(test-kimi-vram-generic kimi-vram-tier)
+        add_dependencies(test-ssd-vram-generic kimi-vram-tier)
         # The CUDA backend's grouped-expert products against ggml's CPU MUL_MAT (owned GPU; not in ctest).
-        add_executable(test-kimi-vram-mm ssd/test-kimi-vram-mm.cpp)
-        target_compile_features(test-kimi-vram-mm PRIVATE cxx_std_17)
-        target_link_libraries(test-kimi-vram-mm PRIVATE ggml-cpu ggml-base ggml-cuda CUDA::cudart)
+        add_executable(test-ssd-vram-mm ssd/test-ssd-vram-mm.cpp)
+        target_compile_features(test-ssd-vram-mm PRIVATE cxx_std_17)
+        target_link_libraries(test-ssd-vram-mm PRIVATE ggml-cpu ggml-base ggml-cuda CUDA::cudart)
         # The tier's grouped prefill engine against the CPU lane, and its timing mode (owned GPU; not in ctest).
-        add_executable(test-kimi-vram-group ssd/test-kimi-vram-group.cpp)
-        target_compile_features(test-kimi-vram-group PRIVATE cxx_std_17)
-        target_include_directories(test-kimi-vram-group PRIVATE ../ggml/src ../ggml/src/ggml-cpu
+        add_executable(test-ssd-vram-group ssd/test-ssd-vram-group.cpp)
+        target_compile_features(test-ssd-vram-group PRIVATE cxx_std_17)
+        target_include_directories(test-ssd-vram-group PRIVATE ../ggml/src ../ggml/src/ggml-cpu
             ../ggml/src/ggml-cuda/ssd ../vendor)
-        target_link_libraries(test-kimi-vram-group PRIVATE ggml-ssd-host ggml-cpu ggml-base ggml-cuda CUDA::cudart Threads::Threads ${CMAKE_DL_LIBS})
-        add_dependencies(test-kimi-vram-group kimi-vram-tier)
+        target_link_libraries(test-ssd-vram-group PRIVATE ggml-ssd-host ggml-cpu ggml-base ggml-cuda CUDA::cudart Threads::Threads ${CMAKE_DL_LIBS})
+        add_dependencies(test-ssd-vram-group kimi-vram-tier)
         # The error fixture explicitly injects callbacks around the real linked component.
-        target_link_libraries(test-kimi-vram-elastic PRIVATE ggml-cuda)
-        target_link_libraries(test-kimi-vram-reclaim PRIVATE ggml-cuda)
+        target_link_libraries(test-ssd-vram-elastic PRIVATE ggml-cuda)
+        target_link_libraries(test-ssd-vram-reclaim PRIVATE ggml-cuda)
     endif()
     if (TARGET kimi-vram-tier AND LLAMA_SSD_STORE)
         add_executable(test-ssd-dense-stream ssd/test-dense-stream.cpp)
@@ -373,57 +373,57 @@ if (TARGET ggml-cpu)
     target_link_libraries(test-test-resources PRIVATE ggml-ssd-host)
     add_test(NAME test_resources COMMAND test-test-resources)
     set_tests_properties(test_resources PROPERTIES LABELS unit SKIP_RETURN_CODE 77)
-    add_executable(test-kimi-cpu-sink ssd/test-kimi-cpu-sink.cpp)
-    target_include_directories(test-kimi-cpu-sink PRIVATE ../ggml/src ../ggml/src/ggml-cpu ../vendor)
-    target_link_libraries(test-kimi-cpu-sink PRIVATE ggml-ssd-host ggml-ssd-settings ggml-cpu ggml-base Threads::Threads)
-    add_test(NAME kimi_cpu_sink COMMAND test-kimi-cpu-sink)
-    add_test(NAME dsv41_q2_cpu_sink_decode COMMAND test-kimi-cpu-sink
+    add_executable(test-ssd-cpu-sink ssd/test-ssd-cpu-sink.cpp)
+    target_include_directories(test-ssd-cpu-sink PRIVATE ../ggml/src ../ggml/src/ggml-cpu ../vendor)
+    target_link_libraries(test-ssd-cpu-sink PRIVATE ggml-ssd-host ggml-ssd-settings ggml-cpu ggml-base Threads::Threads)
+    add_test(NAME ssd_cpu_sink COMMAND test-ssd-cpu-sink)
+    add_test(NAME dsv41_q2_cpu_sink_decode COMMAND test-ssd-cpu-sink
         --q2-activation-test --threads 9 --ring-experts 8)
 
-    add_test(NAME kimi_cpu_sink_schedule_invalid COMMAND test-kimi-cpu-sink --schedule-invalid)
+    add_test(NAME ssd_cpu_sink_schedule_invalid COMMAND test-ssd-cpu-sink --schedule-invalid)
     # Sink nodes in ggml graphs on a ggml threadpool of 1, 2, 3 and all CPUs: the production schedule, and a
     # polling one.
-    add_test(NAME kimi_cpu_sink_threadpool COMMAND test-kimi-cpu-sink --threadpool-tests --ring-experts 8
+    add_test(NAME ssd_cpu_sink_threadpool COMMAND test-ssd-cpu-sink --threadpool-tests --ring-experts 8
         --fixture ready_first=1 --fixture early_up_gate=1 --fixture role_major=1
         --fixture nonblocking_down_sched=1 --fixture dynamic_rows=1 --fixture dynamic_chunk_rows=64)
-    add_test(NAME kimi_cpu_sink_threadpool_poll COMMAND test-kimi-cpu-sink --threadpool-tests --ring-experts 1
+    add_test(NAME ssd_cpu_sink_threadpool_poll COMMAND test-ssd-cpu-sink --threadpool-tests --ring-experts 1
         --fixture poll_us=100)
-    set_tests_properties(kimi_cpu_sink_threadpool kimi_cpu_sink_threadpool_poll PROPERTIES TIMEOUT 180)
+    set_tests_properties(ssd_cpu_sink_threadpool ssd_cpu_sink_threadpool_poll PROPERTIES TIMEOUT 180)
     # SwiGLU experts (qwen4exp's geometry; a BF16 shape with a scalar tail) in decode and grouped prefill on a
     # ggml threadpool, against build_moe_ffn's graph with ggml_swiglu_split: the production schedule and the
     # ordinary one.
-    add_test(NAME kimi_cpu_sink_swiglu COMMAND test-kimi-cpu-sink --swiglu-tests --ring-experts 8
+    add_test(NAME ssd_cpu_sink_swiglu COMMAND test-ssd-cpu-sink --swiglu-tests --ring-experts 8
         --fixture ready_first=1 --fixture early_up_gate=1 --fixture role_major=1
         --fixture nonblocking_down_sched=1 --fixture dynamic_rows=1 --fixture dynamic_chunk_rows=64)
-    add_test(NAME kimi_cpu_sink_swiglu_ordinary COMMAND test-kimi-cpu-sink --swiglu-tests --ring-experts 1
+    add_test(NAME ssd_cpu_sink_swiglu_ordinary COMMAND test-ssd-cpu-sink --swiglu-tests --ring-experts 1
         --fixture ready_first=0)
-    set_tests_properties(kimi_cpu_sink_swiglu kimi_cpu_sink_swiglu_ordinary PROPERTIES TIMEOUT 300)
+    set_tests_properties(ssd_cpu_sink_swiglu ssd_cpu_sink_swiglu_ordinary PROPERTIES TIMEOUT 300)
     # The grouped prefill's cross-layer read-ahead: layer 2's experts read into the pool during layer 1's call, used
     # bit for bit as reads; injected read failures; a decode run between layers; destruction while it reads. The
     # production schedule with several participants, and one participant with one expert in flight.
-    add_test(NAME kimi_cpu_sink_lookahead COMMAND test-kimi-cpu-sink --lookahead-tests --threads 4 --ring-experts 8
+    add_test(NAME ssd_cpu_sink_lookahead COMMAND test-ssd-cpu-sink --lookahead-tests --threads 4 --ring-experts 8
         --fixture ready_first=1 --fixture early_up_gate=1 --fixture role_major=1
         --fixture nonblocking_down_sched=1 --fixture dynamic_rows=1 --fixture dynamic_chunk_rows=64)
-    add_test(NAME kimi_cpu_sink_lookahead_d1 COMMAND test-kimi-cpu-sink --lookahead-tests --threads 2 --ring-experts 1
+    add_test(NAME ssd_cpu_sink_lookahead_d1 COMMAND test-ssd-cpu-sink --lookahead-tests --threads 2 --ring-experts 1
         --fixture ready_first=0)
-    set_tests_properties(kimi_cpu_sink_lookahead kimi_cpu_sink_lookahead_d1 PROPERTIES TIMEOUT 180)
+    set_tests_properties(ssd_cpu_sink_lookahead ssd_cpu_sink_lookahead_d1 PROPERTIES TIMEOUT 180)
     # Muse Spark's experts with their post norm (Q8_0; BF16, also from native payload ranges and the RAM cache) in
     # decode and grouped prefill, against the MoE graph Muse builds, bit for bit.
-    add_test(NAME kimi_cpu_sink_muse_q8_0 COMMAND test-kimi-cpu-sink --muse-q8-test --threads 2)
-    add_test(NAME kimi_cpu_sink_muse_bf16 COMMAND test-kimi-cpu-sink --muse-bf16-test --threads 2)
-    set_tests_properties(kimi_cpu_sink_muse_q8_0 kimi_cpu_sink_muse_bf16 PROPERTIES TIMEOUT 180)
-    # A decode microbenchmark, not a CTest: test-kimi-sink-bench --help.
-    add_executable(test-kimi-sink-bench ssd/test-kimi-sink-bench.cpp)
-    target_include_directories(test-kimi-sink-bench PRIVATE ../ggml/src ../ggml/src/ggml-cpu)
-    target_link_libraries(test-kimi-sink-bench PRIVATE ggml-ssd-host ggml-cpu ggml-base Threads::Threads)
+    add_test(NAME ssd_cpu_sink_muse_q8_0 COMMAND test-ssd-cpu-sink --muse-q8-test --threads 2)
+    add_test(NAME ssd_cpu_sink_muse_bf16 COMMAND test-ssd-cpu-sink --muse-bf16-test --threads 2)
+    set_tests_properties(ssd_cpu_sink_muse_q8_0 ssd_cpu_sink_muse_bf16 PROPERTIES TIMEOUT 180)
+    # A decode microbenchmark, not a CTest: test-ssd-sink-bench --help.
+    add_executable(test-ssd-sink-bench ssd/test-ssd-sink-bench.cpp)
+    target_include_directories(test-ssd-sink-bench PRIVATE ../ggml/src ../ggml/src/ggml-cpu)
+    target_link_libraries(test-ssd-sink-bench PRIVATE ggml-ssd-host ggml-cpu ggml-base Threads::Threads)
     # Trait-selected kernels (MXFP4/Q8_0, Q8_0 down, Q3_K) and the SiTU and
     # SWIGLU_CLAMP activations against a MUL_MAT_ID graph; the RAM cache cases
     # require a finite cgroup memory limit like the other cache tests.
     foreach(activation_threads 2 16)
         foreach(activation_depth 1 8)
             foreach(activation_ready 0 1)
-                set(activation_test kimi_cpu_sink_activation_t${activation_threads}_d${activation_depth}_ready${activation_ready})
-                add_test(NAME ${activation_test} COMMAND test-kimi-cpu-sink --activation-tests
+                set(activation_test ssd_cpu_sink_activation_t${activation_threads}_d${activation_depth}_ready${activation_ready})
+                add_test(NAME ${activation_test} COMMAND test-ssd-cpu-sink --activation-tests
                     --threads ${activation_threads} --ring-experts ${activation_depth}
                     --fixture ready_first=${activation_ready} --fixture read_fixed=${activation_ready} --fixture profile=0)
                 set_tests_properties(${activation_test} PROPERTIES TIMEOUT 180)
@@ -433,13 +433,13 @@ if (TARGET ggml-cpu)
     foreach(early_threads 2 16)
         foreach(early_depth 1 8)
             foreach(early_ready 0 1)
-                set(early_test kimi_cpu_sink_early_t${early_threads}_d${early_depth}_ready${early_ready})
-                add_test(NAME ${early_test} COMMAND test-kimi-cpu-sink --early-up-gate-tests
+                set(early_test ssd_cpu_sink_early_t${early_threads}_d${early_depth}_ready${early_ready})
+                add_test(NAME ${early_test} COMMAND test-ssd-cpu-sink --early-up-gate-tests
                     --threads ${early_threads} --ring-experts ${early_depth}
                     --fixture cache_policy=lru --fixture cache_allocation=uniform --fixture ready_first=${early_ready} --fixture read_fixed=${early_ready} --fixture profile=0)
                 set_tests_properties(${early_test} PROPERTIES TIMEOUT 180)
-                set(poll_test kimi_cpu_sink_poll_t${early_threads}_d${early_depth}_ready${early_ready})
-                add_test(NAME ${poll_test} COMMAND test-kimi-cpu-sink --poll-tests
+                set(poll_test ssd_cpu_sink_poll_t${early_threads}_d${early_depth}_ready${early_ready})
+                add_test(NAME ${poll_test} COMMAND test-ssd-cpu-sink --poll-tests
                     --threads ${early_threads} --ring-experts ${early_depth}
                     --fixture cache_policy=lru --fixture cache_allocation=uniform --fixture ready_first=${early_ready} --fixture read_fixed=${early_ready} --fixture profile=0)
                 set_tests_properties(${poll_test} PROPERTIES TIMEOUT 180)
@@ -449,8 +449,8 @@ if (TARGET ggml-cpu)
     foreach(role_threads 2 16)
         foreach(role_depth 1 8)
             foreach(role_ready 0 1)
-                set(role_test kimi_cpu_sink_role_major_t${role_threads}_d${role_depth}_ready${role_ready})
-                add_test(NAME ${role_test} COMMAND test-kimi-cpu-sink --role-major-tests
+                set(role_test ssd_cpu_sink_role_major_t${role_threads}_d${role_depth}_ready${role_ready})
+                add_test(NAME ${role_test} COMMAND test-ssd-cpu-sink --role-major-tests
                     --threads ${role_threads} --ring-experts ${role_depth}
                     --fixture cache_policy=lru --fixture cache_allocation=uniform --fixture ready_first=${role_ready} --fixture read_fixed=${role_ready} --fixture profile=0)
                 set_tests_properties(${role_test} PROPERTIES TIMEOUT 180)
@@ -460,60 +460,60 @@ if (TARGET ggml-cpu)
     foreach(nonblocking_threads 2 16)
         foreach(nonblocking_depth 1 8)
             foreach(nonblocking_fixed 0 1)
-                set(nonblocking_test kimi_cpu_sink_nonblocking_down_t${nonblocking_threads}_d${nonblocking_depth}_fixed${nonblocking_fixed})
-                add_test(NAME ${nonblocking_test} COMMAND test-kimi-cpu-sink --nonblocking-down-tests
+                set(nonblocking_test ssd_cpu_sink_nonblocking_down_t${nonblocking_threads}_d${nonblocking_depth}_fixed${nonblocking_fixed})
+                add_test(NAME ${nonblocking_test} COMMAND test-ssd-cpu-sink --nonblocking-down-tests
                     --threads ${nonblocking_threads} --ring-experts ${nonblocking_depth}
                     --fixture cache_policy=lru --fixture cache_allocation=uniform --fixture ready_first=1 --fixture read_fixed=${nonblocking_fixed} --fixture profile=0)
                 set_tests_properties(${nonblocking_test} PROPERTIES TIMEOUT 180)
             endforeach()
         endforeach()
     endforeach()
-    add_test(NAME kimi_cpu_sink_early_cache COMMAND test-kimi-cpu-sink --cache-tests --threads 16 --ring-experts 8
+    add_test(NAME ssd_cpu_sink_early_cache COMMAND test-ssd-cpu-sink --cache-tests --threads 16 --ring-experts 8
                     --fixture early_up_gate=1 --fixture ready_first=1 --fixture read_fixed=1)
-    set_tests_properties(kimi_cpu_sink_early_cache PROPERTIES TIMEOUT 180)
-    add_test(NAME kimi_cpu_sink_poll_early COMMAND test-kimi-cpu-sink --poll-early-tests --threads 16 --ring-experts 8
+    set_tests_properties(ssd_cpu_sink_early_cache PROPERTIES TIMEOUT 180)
+    add_test(NAME ssd_cpu_sink_poll_early COMMAND test-ssd-cpu-sink --poll-early-tests --threads 16 --ring-experts 8
                     --fixture cache_policy=lru --fixture cache_allocation=uniform --fixture ready_first=1 --fixture read_fixed=0 --fixture profile=0)
-    set_tests_properties(kimi_cpu_sink_poll_early PROPERTIES TIMEOUT 180)
+    set_tests_properties(ssd_cpu_sink_poll_early PROPERTIES TIMEOUT 180)
     foreach(schedule_threads 2 12 16)
         foreach(schedule_depth 1 8)
-            set(schedule_test kimi_cpu_sink_ordinary_schedule_t${schedule_threads}_d${schedule_depth})
-            add_test(NAME ${schedule_test} COMMAND test-kimi-cpu-sink --schedule-tests
+            set(schedule_test ssd_cpu_sink_ordinary_schedule_t${schedule_threads}_d${schedule_depth})
+            add_test(NAME ${schedule_test} COMMAND test-ssd-cpu-sink --schedule-tests
                 --threads ${schedule_threads} --ring-experts ${schedule_depth}
                     --fixture cache_policy=lru --fixture cache_allocation=uniform --fixture read_fixed=0 --fixture profile=0)
             set_tests_properties(${schedule_test} PROPERTIES TIMEOUT 180)
         endforeach()
     endforeach()
-    add_test(NAME kimi_cpu_sink_trace_profile COMMAND test-kimi-cpu-sink --trace-profile --threads 4 --ring-experts 1
+    add_test(NAME ssd_cpu_sink_trace_profile COMMAND test-ssd-cpu-sink --trace-profile --threads 4 --ring-experts 1
                     --fixture read_fixed=0)
-    set_tests_properties(kimi_cpu_sink_trace_profile PROPERTIES TIMEOUT 180)
+    set_tests_properties(ssd_cpu_sink_trace_profile PROPERTIES TIMEOUT 180)
     # the RAM cache cases require a finite cgroup memory limit like the other cache tests
-    add_test(NAME kimi_cpu_sink_prefetch COMMAND test-kimi-cpu-sink --prefetch-tests --threads 4 --ring-experts 2
+    add_test(NAME ssd_cpu_sink_prefetch COMMAND test-ssd-cpu-sink --prefetch-tests --threads 4 --ring-experts 2
                     --fixture read_fixed=0 --fixture profile=0)
-    set_tests_properties(kimi_cpu_sink_prefetch PROPERTIES TIMEOUT 180)
+    set_tests_properties(ssd_cpu_sink_prefetch PROPERTIES TIMEOUT 180)
     # the RAM cache's storage at load (a finite cgroup memory limit, like the other cache cases)
-    add_test(NAME kimi_cpu_sink_cache_load COMMAND test-kimi-cpu-sink --cache-load-tests --threads 4 --ring-experts 2
+    add_test(NAME ssd_cpu_sink_cache_load COMMAND test-ssd-cpu-sink --cache-load-tests --threads 4 --ring-experts 2
                     --fixture read_fixed=0 --fixture profile=0)
-    set_tests_properties(kimi_cpu_sink_cache_load PROPERTIES TIMEOUT 180)
+    set_tests_properties(ssd_cpu_sink_cache_load PROPERTIES TIMEOUT 180)
     # an allocation outside the caches, the CPU backend's work buffer, takes room from a RAM cache that took the
     # envelope at load (a finite memory envelope, like the other cache cases)
-    add_test(NAME kimi_cpu_sink_work_reclaim COMMAND test-kimi-cpu-sink --work-reclaim-tests --threads 2 --ring-experts 2
+    add_test(NAME ssd_cpu_sink_work_reclaim COMMAND test-ssd-cpu-sink --work-reclaim-tests --threads 2 --ring-experts 2
                     --fixture read_fixed=0 --fixture profile=0)
-    set_tests_properties(kimi_cpu_sink_work_reclaim PROPERTIES TIMEOUT 180)
+    set_tests_properties(ssd_cpu_sink_work_reclaim PROPERTIES TIMEOUT 180)
     # the prefetch against the GPU tier's residency, with a stand-in tier the executable exports (no GPU)
-    add_executable(test-kimi-prefetch-tier ssd/test-kimi-prefetch-tier.cpp)
-    target_include_directories(test-kimi-prefetch-tier PRIVATE ../ggml/src ../ggml/src/ggml-cpu ../vendor)
-    target_link_libraries(test-kimi-prefetch-tier PRIVATE ggml-ssd-host ggml-ssd-settings ggml-cpu ggml-base Threads::Threads)
-    add_test(NAME kimi_prefetch_tier COMMAND test-kimi-prefetch-tier)
-    set_tests_properties(kimi_prefetch_tier PROPERTIES TIMEOUT 180)
-    add_test(NAME kimi_cpu_sink_registered COMMAND test-kimi-cpu-sink --registered-lifecycle
+    add_executable(test-ssd-prefetch-tier ssd/test-ssd-prefetch-tier.cpp)
+    target_include_directories(test-ssd-prefetch-tier PRIVATE ../ggml/src ../ggml/src/ggml-cpu ../vendor)
+    target_link_libraries(test-ssd-prefetch-tier PRIVATE ggml-ssd-host ggml-ssd-settings ggml-cpu ggml-base Threads::Threads)
+    add_test(NAME ssd_prefetch_tier COMMAND test-ssd-prefetch-tier)
+    set_tests_properties(ssd_prefetch_tier PROPERTIES TIMEOUT 180)
+    add_test(NAME ssd_cpu_sink_registered COMMAND test-ssd-cpu-sink --registered-lifecycle
                     --fixture read_fixed=1)
 
     # A single compute participant and ring=1, and several participants with ring wraparound.
     foreach(cache_threads 2 4)
         math(EXPR cache_depth "${cache_threads} / 2")
         foreach(cache_fixed RANGE 0 1)
-            set(cache_test kimi_cpu_sink_cache_t${cache_threads}_fixed${cache_fixed})
-            add_test(NAME ${cache_test} COMMAND test-kimi-cpu-sink --cache-tests
+            set(cache_test ssd_cpu_sink_cache_t${cache_threads}_fixed${cache_fixed})
+            add_test(NAME ${cache_test} COMMAND test-ssd-cpu-sink --cache-tests
                 --threads ${cache_threads} --ring-experts ${cache_depth}
                     --fixture read_fixed=${cache_fixed} --fixture profile=0)
             set_tests_properties(${cache_test} PROPERTIES TIMEOUT 180)
@@ -521,8 +521,8 @@ if (TARGET ggml-cpu)
     endforeach()
     foreach(cache_threads 4 16)
         foreach(cache_depth 1 8)
-            set(max_cache_test kimi_cpu_sink_max_cache_t${cache_threads}_d${cache_depth})
-            add_test(NAME ${max_cache_test} COMMAND test-kimi-cpu-sink --max-cache-tests
+            set(max_cache_test ssd_cpu_sink_max_cache_t${cache_threads}_d${cache_depth})
+            add_test(NAME ${max_cache_test} COMMAND test-ssd-cpu-sink --max-cache-tests
                 --threads ${cache_threads} --ring-experts ${cache_depth}
                     --fixture cache_allocation=uniform --fixture ready_first=1 --fixture read_fixed=0 --fixture profile=0)
             set_tests_properties(${max_cache_test} PROPERTIES TIMEOUT 180)
@@ -530,13 +530,13 @@ if (TARGET ggml-cpu)
     endforeach()
     foreach(cache_policy lru lfu decay count_decay2)
         foreach(cache_allocation priority uniform global)
-            set(large_test kimi_cpu_sink_large_${cache_policy}_${cache_allocation})
-            add_test(NAME ${large_test} COMMAND test-kimi-cpu-sink --cache-large-tests --threads 4 --ring-experts 1
+            set(large_test ssd_cpu_sink_large_${cache_policy}_${cache_allocation})
+            add_test(NAME ${large_test} COMMAND test-ssd-cpu-sink --cache-large-tests --threads 4 --ring-experts 1
                     --fixture cache_policy=${cache_policy} --fixture cache_allocation=${cache_allocation} --fixture read_fixed=1 --fixture profile=0)
             set_tests_properties(${large_test} PROPERTIES TIMEOUT 180)
             foreach(cache_transport RANGE 0 1)
-                set(policy_test kimi_cpu_sink_policy_${cache_policy}_${cache_allocation}_fixed${cache_transport})
-                add_test(NAME ${policy_test} COMMAND test-kimi-cpu-sink --cache-policy-tests --threads 4 --ring-experts 2
+                set(policy_test ssd_cpu_sink_policy_${cache_policy}_${cache_allocation}_fixed${cache_transport})
+                add_test(NAME ${policy_test} COMMAND test-ssd-cpu-sink --cache-policy-tests --threads 4 --ring-experts 2
                     --fixture cache_policy=${cache_policy} --fixture cache_allocation=${cache_allocation} --fixture read_fixed=${cache_transport} --fixture profile=0)
                 set_tests_properties(${policy_test} PROPERTIES TIMEOUT 180)
             endforeach()
@@ -544,36 +544,36 @@ if (TARGET ggml-cpu)
     endforeach()
     # Not on Windows: it builds llama's internal graph classes, which llama.dll does not export.
     if (NOT WIN32)
-        add_executable(test-kimi-cpu-prefill-graph ssd/test-kimi-cpu-prefill-graph.cpp)
-        target_compile_features(test-kimi-cpu-prefill-graph PRIVATE cxx_std_17)
-        target_include_directories(test-kimi-cpu-prefill-graph PRIVATE ../src ../ggml/src ../ggml/src/ggml-cpu)
-        target_link_libraries(test-kimi-cpu-prefill-graph PRIVATE llama ggml-cpu)
-        add_test(NAME kimi_cpu_prefill_graph COMMAND test-kimi-cpu-prefill-graph)
+        add_executable(test-ssd-cpu-prefill-graph ssd/test-ssd-cpu-prefill-graph.cpp)
+        target_compile_features(test-ssd-cpu-prefill-graph PRIVATE cxx_std_17)
+        target_include_directories(test-ssd-cpu-prefill-graph PRIVATE ../src ../ggml/src ../ggml/src/ggml-cpu)
+        target_link_libraries(test-ssd-cpu-prefill-graph PRIVATE llama ggml-cpu)
+        add_test(NAME ssd_cpu_prefill_graph COMMAND test-ssd-cpu-prefill-graph)
     endif()
-    add_executable(test-kimi-cpu-prefill ssd/test-kimi-cpu-prefill.cpp)
-    target_include_directories(test-kimi-cpu-prefill PRIVATE ../ggml/src ../ggml/src/ggml-cpu)
-    target_link_libraries(test-kimi-cpu-prefill PRIVATE ggml-ssd-host ggml-cpu ggml-base Threads::Threads)
-    add_test(NAME kimi_cpu_prefill COMMAND test-kimi-cpu-prefill)
+    add_executable(test-ssd-cpu-prefill ssd/test-ssd-cpu-prefill.cpp)
+    target_include_directories(test-ssd-cpu-prefill PRIVATE ../ggml/src ../ggml/src/ggml-cpu)
+    target_link_libraries(test-ssd-cpu-prefill PRIVATE ggml-ssd-host ggml-cpu ggml-base Threads::Threads)
+    add_test(NAME ssd_cpu_prefill COMMAND test-ssd-cpu-prefill)
     # A manual x86 kernel benchmark; not on Windows, where ggml-cpu.dll does not export the kernels it calls.
     if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64" AND NOT WIN32)
-        add_executable(test-kimi-mxfp4-gemm ssd/test-kimi-mxfp4-gemm.cpp)
-        target_include_directories(test-kimi-mxfp4-gemm PRIVATE ../ggml/src ../ggml/src/ggml-cpu)
-        target_link_libraries(test-kimi-mxfp4-gemm PRIVATE ggml-cpu ggml-base)
+        add_executable(test-ssd-mxfp4-gemm ssd/test-ssd-mxfp4-gemm.cpp)
+        target_include_directories(test-ssd-mxfp4-gemm PRIVATE ../ggml/src ../ggml/src/ggml-cpu)
+        target_link_libraries(test-ssd-mxfp4-gemm PRIVATE ggml-cpu ggml-base)
     endif()
     foreach(retain_depth 1 8)
-        add_test(NAME kimi_cpu_prefill_retain_d${retain_depth} COMMAND test-kimi-cpu-prefill
+        add_test(NAME ssd_cpu_prefill_retain_d${retain_depth} COMMAND test-ssd-cpu-prefill
             --cache-retention --threads 4 --ring-experts ${retain_depth}
                     --fixture read_fixed=0 --fixture ready_first=1 --fixture cache_allocation=uniform)
-        set_tests_properties(kimi_cpu_prefill_retain_d${retain_depth} PROPERTIES TIMEOUT 180)
+        set_tests_properties(ssd_cpu_prefill_retain_d${retain_depth} PROPERTIES TIMEOUT 180)
     endforeach()
-    add_test(NAME kimi_cpu_prefill_registered COMMAND test-kimi-cpu-prefill --threads 4 --ring-experts 2
+    add_test(NAME ssd_cpu_prefill_registered COMMAND test-ssd-cpu-prefill --threads 4 --ring-experts 2
                     --fixture read_fixed=1)
 
     foreach(lifecycle_threads 2 4)
         math(EXPR lifecycle_depth "${lifecycle_threads} / 2")
         foreach(lifecycle_fixed RANGE 0 1)
-            set(lifecycle_test kimi_cpu_prefill_cache_t${lifecycle_threads}_fixed${lifecycle_fixed})
-            add_test(NAME ${lifecycle_test} COMMAND test-kimi-cpu-prefill --cache-lifecycle
+            set(lifecycle_test ssd_cpu_prefill_cache_t${lifecycle_threads}_fixed${lifecycle_fixed})
+            add_test(NAME ${lifecycle_test} COMMAND test-ssd-cpu-prefill --cache-lifecycle
                 --threads ${lifecycle_threads} --ring-experts ${lifecycle_depth}
                     --fixture read_fixed=${lifecycle_fixed} --fixture profile=0)
             set_tests_properties(${lifecycle_test} PROPERTIES TIMEOUT 180)
@@ -871,7 +871,7 @@ endif()
 
 # The default CI gate is model-free and requires neither GPU nor cgroup setup.
 # Keep this list explicit: other synthetic tests may still require Linux I/O facilities.
-foreach(unit_test kimi_prefill_cost test-reasoning-budget
+foreach(unit_test ssd_prefill_cost test-reasoning-budget
                   test-server-runtime-routing test-dsv41-engram
                   kv_cache_iswa_state_at)
     if (TEST ${unit_test})
@@ -890,13 +890,13 @@ else()
 endif()
 get_property(ssdash_registered_tests DIRECTORY PROPERTY TESTS)
 foreach(resource_test IN LISTS ssdash_registered_tests)
-    if (resource_test MATCHES "^(kimi_cpu_sink|kimi_cpu_prefill|kimi_prefetch_tier|dsv41_q2_cpu_sink_decode)")
-        if (resource_test MATCHES "^kimi_cpu_prefill_graph$")
+    if (resource_test MATCHES "^(ssd_cpu_sink|ssd_cpu_prefill|ssd_prefetch_tier|dsv41_q2_cpu_sink_decode)")
+        if (resource_test MATCHES "^ssd_cpu_prefill_graph$")
             set_property(TEST ${resource_test} APPEND PROPERTY LABELS unit)
         else()
             set_property(TEST ${resource_test} APPEND PROPERTY LABELS device)
             set_property(TEST ${resource_test} PROPERTY SKIP_RETURN_CODE 77)
-            if (NOT resource_test MATCHES "^(kimi_cpu_sink|kimi_cpu_sink_schedule_invalid|kimi_cpu_sink_threadpool|kimi_cpu_sink_threadpool_poll|kimi_cpu_sink_swiglu|kimi_cpu_sink_swiglu_ordinary|kimi_cpu_sink_registered|kimi_cpu_sink_trace_profile|dsv41_q2_cpu_sink_decode|kimi_cpu_prefill|kimi_cpu_prefill_registered)$")
+            if (NOT resource_test MATCHES "^(ssd_cpu_sink|ssd_cpu_sink_schedule_invalid|ssd_cpu_sink_threadpool|ssd_cpu_sink_threadpool_poll|ssd_cpu_sink_swiglu|ssd_cpu_sink_swiglu_ordinary|ssd_cpu_sink_registered|ssd_cpu_sink_trace_profile|dsv41_q2_cpu_sink_decode|ssd_cpu_prefill|ssd_cpu_prefill_registered)$")
                 set_property(TEST ${resource_test} APPEND PROPERTY LABELS ${ssd_envelope_label})
             endif()
         endif()

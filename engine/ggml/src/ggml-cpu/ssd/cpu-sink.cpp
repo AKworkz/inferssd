@@ -10,7 +10,7 @@
 #include "ggml-ssd/host/page-lock.h"
 #include "ggml-ssd/host/arbiter.h"
 #include "ggml-ssd/host/expert-cache.h"
-#include "ggml-ssd/gpu/kimi-vram-tier-api.h"
+#include "ggml-ssd/gpu/vram-tier-api.h"
 #include "ggml-ssd/io/read-ring.h"
 #include "ggml-ssd/platform/file.h"
 #include "ggml-ssd/platform/memory.h"
@@ -541,7 +541,7 @@ struct kimi_cpu_sink {
     sink_run_mutex run_mutex;
     sink_ring ring;
     std::vector<sink_slot> slots;
-    // The read ring's buffers page-locked for the GPU tier's copies (ring_lock, kimi-host-lock.h): once per
+    // The read ring's buffers page-locked for the GPU tier's copies (ring_lock, ggml-ssd/host/page-lock.h): once per
     // allocation, undone before the buffers are reallocated or freed.
     kimi_ring_lock ring_pages;
     std::vector<sink_request> requests;
@@ -753,7 +753,7 @@ struct kimi_cpu_sink {
     std::vector<double> expert_cpu_us;
     ssd::place::decode_learning learning;
     // The decode plan of the current layer: which experts the GPU computes, from the evaluator that also places
-    // grouped prefill (kimi-prefill-cost.h, the in-ring list schedule) over the measured lines.
+    // grouped prefill (ggml-ssd/place/layer-plan.h, the in-ring list schedule) over the measured lines.
     struct decode_plan_state : ssd::place::decode_plan {
         sink_clock::time_point start; // executor timestamp; policy receives elapsed feedback only
     } plan;
@@ -766,7 +766,7 @@ struct kimi_cpu_sink {
         std::array<uint64_t, 101> error = {};
         double predicted_us = 0, measured_us = 0, cpu_only_us = 0;
     } place;
-    // Page-locking of the RAM cache's slots for the GPU tier's copies, on a discrete GPU (kimi-host-lock.h): the slots
+    // Page-locking of the RAM cache's slots for the GPU tier's copies, on a discrete GPU (ggml-ssd/host/page-lock.h): the slots
     // the decode plan would move an expert from, one at a time, in the drive's shadow; unlocked before their pages go
     // (sink_cache::before_discard).
     kimi_host_lock host_lock;
@@ -1396,7 +1396,7 @@ struct kimi_cpu_sink {
     // ledger measures again and, below the floor, the RAM cache's demand and 64 MiB, the tier gives back blocks until
     // MemAvailable keeps the floor, the demand and the tier's low watermark. A sink run in progress keeps run_mutex
     // and is not waited for: the watcher acts between a decode's layers and outside the sink's runs. MemAvailable is
-    // read at the full watermark boost, as the tier reads its free memory (kimi-memory-boost.h).
+    // read at the full watermark boost, as the tier reads its free memory (ggml-ssd/host/budget-linux.h).
     void floor_watch_loop() {
         std::unique_lock<std::mutex> lock(watch_mutex);
         while (!watch_cv.wait_for(lock, std::chrono::milliseconds(100), [&] { return watch_stop; })) {
@@ -2037,7 +2037,7 @@ struct kimi_cpu_sink {
                 before, cache.enabled_slots(), (unsigned long long) (committed - std::min(committed, cache.stats.committed_bytes)));
         return fits;
     }
-    // The cost table a layer of `ntokens` tokens is placed from (kimi-prefill-cost.h, kimi_place_table), the same for a
+    // The cost table a layer of `ntokens` tokens is placed from (ggml-ssd/place/layer-plan.h, kimi_place_table), the same for a
     // decode token and a grouped-prefill pass: the CPU's time for a one-token expert (decode's experts and a one-token
     // pass's, their running mean) and the grouped path's line (the sink's prefill calibration); the tier's
     // vector-engine lines and copy rates (host API costs2: every call and copy it makes); the batched engine's lines

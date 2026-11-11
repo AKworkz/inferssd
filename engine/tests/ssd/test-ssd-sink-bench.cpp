@@ -217,7 +217,7 @@ int main(int argc, char ** argv) {
             else if (arg == "--variant") { variant = value(); }
             else if (arg == "--poll-us") { poll_us = std::stoi(value()); }
             else {
-                std::printf("usage: test-kimi-sink-bench [--threads N] [--calls N>=200] [--warmup N] [--experts N] "
+                std::printf("usage: test-ssd-sink-bench [--threads N] [--calls N>=200] [--warmup N] [--experts N] "
                     "[--variant hit|cold|both|empty] [--poll-us 0..1000]\n");
                 return arg == "--help" ? 0 : 2;
             }

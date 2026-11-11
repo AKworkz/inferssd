@@ -6,7 +6,7 @@
 // MXFP4 with ggml's CUDA kernels, so the rows are checked against the CPU sink's
 // numerically (relative L2 at most 2e-2, as for every other format), not bitwise.
 #define main original_sink_test_main
-#include "test-kimi-cpu-sink.cpp"
+#include "test-ssd-cpu-sink.cpp"
 #undef main
 
 int main() {

@@ -20,7 +20,7 @@
 #include "ggml-cuda.h"
 #include "gpu-services.h"
 #include "vram-tier.cpp"
-#include "test-kimi-vram-format-fixture.h"
+#include "test-ssd-vram-format-fixture.h"
 #include <future>
 
 namespace {

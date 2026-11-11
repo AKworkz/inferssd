@@ -1,5 +1,5 @@
 #pragma once
-#include "ggml-ssd/gpu/kimi-vram-tier-api.h"
+#include "ggml-ssd/gpu/vram-tier-api.h"
 #include <algorithm>
 #include <array>
 #include <cmath>

@@ -6,7 +6,7 @@
 // (kimi_vram_policy_api set_thread_cpus): on the process's CPUs other than those of the runs' coordinator (all of
 // them when none is left), again only when the coordinator's change.
 #define main original_sink_test_main
-#include "test-kimi-cpu-sink.cpp"
+#include "test-ssd-cpu-sink.cpp"
 #undef main
 #include "ggml-ssd/gpu/provider.h"
 #include <set>
@@ -109,7 +109,7 @@ int main(int argc, char ** argv) {
     fixture_inputs inputs; try {
     int threads = 4;
     if (argc == 3 && !std::strcmp(argv[1], "--threads")) { threads = std::stoi(argv[2]); }
-    else { require(argc == 1, "usage: test-kimi-prefetch-tier [--threads N]"); }
+    else { require(argc == 1, "usage: test-ssd-prefetch-tier [--threads N]"); }
     test_resources::io_ring();
     test_resources::finite_envelope();
     for (const auto & kv : { std::pair<const char *, const char *>{ "ready_first", "1" },

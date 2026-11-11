@@ -4,7 +4,7 @@
 // A hook on the upload thread holds a copy in flight or makes it fail, independently of GPU/CPU speed.
 #include "gpu-services.h"
 #include "vram-tier.cpp"
-#include "test-kimi-vram-format-fixture.h"
+#include "test-ssd-vram-format-fixture.h"
 #include <future>
 
 namespace {

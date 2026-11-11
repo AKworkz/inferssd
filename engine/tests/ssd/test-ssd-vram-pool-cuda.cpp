@@ -1,7 +1,7 @@
 #include "gpu-services.h"
 #include "explicit-fixture-inputs.h"
 #define main original_async_test_main
-#include "test-kimi-vram-async.cpp"
+#include "test-ssd-vram-async.cpp"
 #undef main
 
 int main(){

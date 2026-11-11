@@ -1,8 +1,8 @@
 #include "explicit-fixture-inputs.h"
-// The tier's host path (kimi_vram_host_api v3) through its C API, used by test-kimi-vram-generic (Q8_0 and MXFP4).
-// Included after test-kimi-cpu-sink.cpp (require, ggml).
+// The tier's host path (kimi_vram_host_api v3) through its C API, used by test-ssd-vram-generic (Q8_0 and MXFP4).
+// Included after test-ssd-cpu-sink.cpp (require, ggml).
 #pragma once
-#include "ggml-ssd/gpu/kimi-vram-tier-api.h"
+#include "ggml-ssd/gpu/vram-tier-api.h"
 #include <dlfcn.h>
 #include <functional>
 #include <sys/mman.h>

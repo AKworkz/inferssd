@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 #include "ggml-backend.h"
-#include "kimi-vram-tier-api.h"
+#include "vram-tier-api.h"
 #include "transport.h"
 #include "../gpu-tier-settings.h"
 #include "../testing/tier.h"

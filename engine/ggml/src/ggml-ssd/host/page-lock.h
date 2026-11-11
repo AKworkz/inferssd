@@ -1,7 +1,7 @@
 #pragma once
 // Page-locking of a RAM cache's slots for the GPU's copies (kimi_vram_host_api v2 register_host), on a discrete GPU:
-// the CPU sink's registrar (kimi-cpu-sink.cpp). Kept apart from the sink so that its rules are tested alone
-// (tests/test-kimi-host-lock.cpp, with fake page-locking).
+// the CPU sink's registrar (ggml-cpu/ssd/cpu-sink.cpp). Kept apart from the sink so that its rules are tested alone
+// (tests/ssd/test-ssd-host-lock.cpp, with fake page-locking).
 //   - Which slots: a registration is bought once and the moves it allows pay per use (rent or buy). The decode plan
 //     reports, per layer, the time the moves it could not make from unlocked slots would have saved (missed); each
 //     such slot accrues its share, and is wanted once that reaches one registration. The rent is the occupant's: a

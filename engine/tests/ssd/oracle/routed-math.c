@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Explicit historical math reference; never linked into a production backend.
 #include "../../../ggml/src/ggml-cpu/ggml-cpu.c"
-#include "kimi-routed-math.inc"
+#include "routed-math.inc"
 
 bool inferssd_test_kimi_matmul(struct ggml_tensor * output, void * work, size_t work_size) {
     if (!output || !work || output->op != GGML_OP_MUL_MAT_ID) { return false; }

@@ -55,7 +55,7 @@ def generate_alias(paths, profile, cache_dir):
     summary = cache_dir / f"{name}.json"
     with tempfile.TemporaryDirectory(prefix=".index-", dir=cache_dir) as temporary:
         pending_alias, pending_summary = Path(temporary) / "index.tsv", Path(temporary) / "summary.json"
-        command = [sys.executable, str(REPO / "scripts/kimi-build-gguf-expert-alias-tsv.py"),
+        command = [sys.executable, str(REPO / "scripts/build-gguf-expert-alias-tsv.py"),
                    "--n-experts", str(PROFILES[profile][0]), "--out", str(pending_alias),
                    "--summary-json", str(pending_summary)]
         for path in paths:

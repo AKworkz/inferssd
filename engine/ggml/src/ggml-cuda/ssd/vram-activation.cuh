@@ -1,5 +1,5 @@
 #pragma once
-#include "ggml-ssd/gpu/kimi-vram-tier-api.h"
+#include "ggml-ssd/gpu/vram-tier-api.h"
 // The routed experts' activation on the GPU, shared by the tier's engines: SwiGLU, SwiGLU with its clamp (an
 // infinite limit leaves it unclamped), or SiTU with its optional linear soft cap. The CPU sink computes the same
 // (compute_rows).

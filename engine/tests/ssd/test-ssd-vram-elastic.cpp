@@ -3,7 +3,7 @@
 #include "ggml-cuda.h"
 #include "gpu-services.h"
 #include "vram-tier.cpp"
-#include "test-kimi-vram-format-fixture.h"
+#include "test-ssd-vram-format-fixture.h"
 
 #include <functional>
 
@@ -43,7 +43,7 @@ void common_environment(fixture_inputs & inputs) {
 int main() {
     fixture_inputs inputs; inputs.set_runtime_services(test_gpu_services()); try {
     // A discrete GPU grows at allocation and at the decode phase boundary; unified memory grows at the token
-    // boundary after the first decode step (test-kimi-vram-reclaim has its own cases). Everything else is the same.
+    // boundary after the first decode step (test-ssd-vram-reclaim has its own cases). Everything else is the same.
     const bool unified = ggml_backend_cuda_device_is_unified(0);
     inputs.unset("tier.safety_blocks");
     inputs.unset("tier.margin_mib");

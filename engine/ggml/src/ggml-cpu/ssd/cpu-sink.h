@@ -132,7 +132,7 @@ GGML_BACKEND_API bool kimi_cpu_sink_preload(struct kimi_cpu_sink * sink, const s
 GGML_BACKEND_API void kimi_cpu_sink_cache_get_stats(
         struct kimi_cpu_sink * sink, struct kimi_cpu_sink_cache_stats * stats);
 // Room in host memory for other memory about to be allocated, decided by the host-memory ledger
-// (kimi-host-ledger.h): `host_bytes` of host memory (host compute buffers, checkpoints, prompt-cache blobs) and
+// (ggml-ssd/host/ledger.h): `host_bytes` of host memory (host compute buffers, checkpoints, prompt-cache blobs) and
 // `device_bytes` of GPU memory (device compute buffers), which count only where the GPU allocates out of the same
 // DRAM. Both ledger terms, the envelope and the available memory less the floor, must still hold. On a unified-memory
 // GPU the GPU tier gives blocks back first, then RAM cache slots go. Returns false when either would still be

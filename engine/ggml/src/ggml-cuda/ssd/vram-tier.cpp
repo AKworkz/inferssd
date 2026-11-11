@@ -1380,7 +1380,7 @@ struct tier {
         }
     }
     // One-token passes on the vector engine: the tier returns an expert's down row unweighted, and a layer with a
-    // per-expert post norm normalizes it as the CPU does (kimi-cpu-sink-internal.h, kimi_cpu_sink_normalize_expert)
+    // per-expert post norm normalizes it as the CPU does (ggml-cpu/ssd/cpu-sink-internal.h, kimi_cpu_sink_normalize_expert)
     // before the routing weight.
     void post_norm_row(float * values){
         if(prefill_post_norm.empty())return;

@@ -8,6 +8,14 @@ server for `sm_120a` and `sm_121a` on `main` and on pull requests that change th
 engine or build configuration; it does not establish GPU runtime correctness.
 Device runs must record both the selected and actually executed tests.
 
+The renamed generic SSD tests use `test-ssd-*` for source files and executables, and
+`ssd_*` or the executable name for CTest. The former `test-kimi-*` names came from the
+predecessor repository. Kimi model support and `test-kimi-deepseek2-guards` keep
+their model-specific names. Frozen launcher oracles and release-comparison
+sources also retain their original paths and hashes. Runtime symbols, environment
+variables and telemetry keys keep their existing spelling; renaming the test
+files does not change those contracts.
+
 The CPU sink suite runs on Linux, macOS and Windows against the same ggml
 reference graphs, bit for bit. It exercises direct reads, the OS read ring
 (io_uring on Linux, IoRing on Windows), affinity, the host memory envelope and

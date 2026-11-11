@@ -5,7 +5,7 @@
 // Synthetic packed weights; real tier kernels; zero input is an exact oracle
 // for these bias-free experts, independent of CPU/GPU rounding differences.
 #define main original_sink_test_main
-#include "test-kimi-cpu-sink.cpp"
+#include "test-ssd-cpu-sink.cpp"
 #undef main
 
 namespace {
@@ -320,7 +320,7 @@ int main(int argc, char ** argv) {
     try {
         ggml_cpu_init();
         (void) argv;
-        require(argc == 1, "usage: test-kimi-prefill-scratch");
+        require(argc == 1, "usage: test-ssd-prefill-scratch");
         for (int tokens : {9, 14, 48, 64, 65}) {
             run_case(inputs, GGML_TYPE_MXFP4, tokens, KIMI_CPU_SINK_ACTIVATION_SWIGLU_CLAMP);
             run_case(inputs, GGML_TYPE_Q8_0, tokens, KIMI_CPU_SINK_ACTIVATION_SWIGLU);

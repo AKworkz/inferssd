@@ -24,7 +24,7 @@ struct sink_vram {
     // A tier with no residency table holds nothing across layers: it serves grouped prefill alone, decode never calls it.
     bool prefill_only = false;
     bool prefill_job_active = false;
-    // The start values of the cost table's lines the sink fits (kimi-prefill-cost.h, kimi_place_table) and the fitted
+    // The start values of the cost table's lines the sink fits (ggml-ssd/place/layer-plan.h, kimi_place_table) and the fitted
     // lines. Typed place.costs overlays named priors; each calibrated line reports the same names.
     using prefill_costs = ssd::place::cost_lines;
     prefill_costs cost, prior;
@@ -570,7 +570,7 @@ struct sink_vram {
         }
         for (size_t i = 0; i < source.size(); ++i) { source[i].prefill_routes = token_routes[i]; }
 
-        // The makespan rule places the layer from the cost table (kimi-prefill-cost.h, kimi_place_layer), as a
+        // The makespan rule places the layer from the cost table (ggml-ssd/place/layer-plan.h, kimi_place_layer), as a
         // decode layer is placed: the CPU and the GPU at their measured lines for this pass's size, the copies at the measured rate of their transport (from the
         // page-locked ring or RAM slot: DMA on the link while the GPU computes; pageable: staged by the GPU's
         // worker), the drive's line, and the form the reads take (the list schedule when they fit the ring,

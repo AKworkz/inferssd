@@ -5,7 +5,7 @@
 #include "arbiter.h"
 #include "cache-stats.h"
 #include "expert-request.h"
-#include "../gpu/kimi-vram-tier-api.h"
+#include "../gpu/vram-tier-api.h"
 #include "../platform/file.h"
 #include "../platform/memory.h"
 #include "ggml.h"

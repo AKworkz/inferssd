@@ -3376,7 +3376,7 @@ static void host_ledger_tests(fixture_inputs & inputs) {
         }
     }
 
-    // MemAvailable at the kernel's full watermark boost (kimi-memory-boost.h). The zones of a DGX Spark (GB10, 4 KiB
+    // MemAvailable at the kernel's full watermark boost (ggml-ssd/host/budget-linux.h). The zones of a DGX Spark (GB10, 4 KiB
     // pages, 2 MiB pageblocks): DMA low 235 / high 409, Normal low 42934 / high 74638 pages without the boost, whose
     // largest boost is high * 15000 / 10000 = 111957 pages (437 MiB). /proc/zoneinfo prints low and high with the
     // boost added; a per-CPU pageset's "high:" is not the zone's.
@@ -4217,7 +4217,7 @@ int main(int argc, char ** argv) {
             else if (!std::strcmp(argv[i], "--threadpool-tests")) { threadpool_mode = true; }
             else if (!std::strcmp(argv[i], "--swiglu-tests")) { swiglu_mode = true; }
             else if (!std::strcmp(argv[i], "--lookahead-tests")) { lookahead_mode = true; }
-            else { throw std::runtime_error("usage: test-kimi-cpu-sink [--registered-lifecycle|--cache-tests|--cache-pressure] [--threads N] [--fixture KEY=VALUE] [--real-pack FILE --fixture-prefix PREFIX --ring-experts N --repeats N --warmup N --policy fixture|top16|top8|mass085 --jsonl FILE --resident-dir TMPFS]"); }
+            else { throw std::runtime_error("usage: test-ssd-cpu-sink [--registered-lifecycle|--cache-tests|--cache-pressure] [--threads N] [--fixture KEY=VALUE] [--real-pack FILE --fixture-prefix PREFIX --ring-experts N --repeats N --warmup N --policy fixture|top16|top8|mass085 --jsonl FILE --resident-dir TMPFS]"); }
         }
         require(options.threads >= 2 && options.threads <= 128 && options.ring_experts >= 1 && options.ring_experts <= 32, "invalid thread/ring count");
         require(options.repeats >= 1 && options.repeats <= 10000 && options.warmup >= 0 && options.warmup <= 10000, "invalid repeat/warmup count");
