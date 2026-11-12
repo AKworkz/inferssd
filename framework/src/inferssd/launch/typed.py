@@ -96,7 +96,11 @@ def connect_host(host: str) -> str:
     return LOOPBACK if host == "0.0.0.0" else host
 
 
-CONTEXT = 8192
+# The default context: room for a coding agent's instructions and tools and a task's files.
+# The engine keeps it within the model's trained context. A RAM-only model takes the largest
+# multiple of CONTEXT_STEP up to it that fits memory.
+CONTEXT = 65536
+CONTEXT_STEP = 8192
 BATCH = 512
 # The disk prompt cache's size limit per model.
 PROMPT_CACHE_MIB = 16384
@@ -446,15 +450,30 @@ def _resolve(
     if ordinary:
         runtime = runtime_facts_from(s.value("runtime_facts"))
         configured_budget = cast(int, value.at("host.budget_mib").value) << 20
-        ram_fit = ram.admission(
-            observed if observed is not None else s.value("model_facts", *paths),
-            context=spec.context or CONTEXT,
-            batch=spec.ubatch or BATCH,
-            gpu=bool(gpu_backends),
-            available=runtime.available_bytes,
-            budget=min(memory, configured_budget) if configured_budget else memory,
-            headroom=max(reserve, cast(int, value.at("host.headroom_mib").value) << 20),
+        facts = observed if observed is not None else s.value("model_facts", *paths)
+        # A context left unset steps down from CONTEXT until the model fits; one given must fit.
+        contexts = (
+            [spec.context]
+            if spec.context
+            else list(range(CONTEXT, CONTEXT_STEP - 1, -CONTEXT_STEP))
         )
+        for index, ram_context in enumerate(contexts):
+            try:
+                ram_fit = ram.admission(
+                    facts,
+                    context=ram_context,
+                    batch=spec.ubatch or BATCH,
+                    gpu=bool(gpu_backends),
+                    available=runtime.available_bytes,
+                    budget=min(memory, configured_budget) if configured_budget else memory,
+                    headroom=max(reserve, cast(int, value.at("host.headroom_mib").value) << 20),
+                )
+            except ValueError:
+                if index == len(contexts) - 1:
+                    raise
+                continue
+            spec = replace(spec, context=ram_context)
+            break
         if (
             not gpu_backends
             and not threads.cpus

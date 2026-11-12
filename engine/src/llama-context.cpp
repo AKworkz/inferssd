@@ -85,6 +85,14 @@ llama_context::llama_context(
     cparams.ctx_other = nullptr;
 
     cparams.n_ctx            = params.n_ctx           == 0    ? hparams.n_ctx_train           : params.n_ctx;
+    // A context past the trained one holds positions the model has not seen, and its cache memory is wasted,
+    // unless the RoPE is scaled to stretch the trained context.
+    if (hparams.n_ctx_train > 0 && cparams.n_ctx > hparams.n_ctx_train &&
+            params.rope_freq_scale == 0.0f && params.yarn_orig_ctx == 0) {
+        LLAMA_LOG_INFO("%s: n_ctx = %u is past the model's trained context, using n_ctx_train = %u\n",
+                __func__, cparams.n_ctx, hparams.n_ctx_train);
+        cparams.n_ctx = hparams.n_ctx_train;
+    }
     cparams.rope_freq_base   = params.rope_freq_base  == 0.0f ? hparams.rope_freq_base_train  : params.rope_freq_base;
     cparams.rope_freq_scale  = params.rope_freq_scale == 0.0f ? hparams.rope_freq_scale_train : params.rope_freq_scale;
 

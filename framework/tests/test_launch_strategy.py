@@ -97,11 +97,11 @@ def test_recorded_strategy_fills_what_the_user_left_unset(tmp_path):
     # A prompt is prefilled in one pass as large as the context.
     assert argv[argv.index("-c") : argv.index("-c") + 6] == [
         "-c",
-        "8192",
+        "65536",
         "-b",
-        "8192",
+        "65536",
         "-ub",
-        "8192",
+        "65536",
     ]
     settings = native(out, spec)
     for key in ("cpu.io_cpus", "cpu.decode_participants", "place.costs"):
@@ -133,9 +133,9 @@ def test_recorded_strategy_fills_what_the_user_left_unset(tmp_path):
     assert receipt["chosen"]["server_args"] == ["--ctx-checkpoints", "1"]
     assert any(note.startswith("prefill: one pass a prompt") for note in receipt["notes"])
     assert (line["launch"]["context"], line["launch"]["batch"], line["launch"]["ubatch"]) == (
-        8192,
-        8192,
-        8192,
+        65536,
+        65536,
+        65536,
     )
     assert (receipt["kept"], receipt["dropped"]) == ([], [])
     assert any(note.startswith("threads: all placement") for note in receipt["notes"])
