@@ -226,9 +226,10 @@ struct llama_model_loader {
     void init_mappings(bool prefetch = true, llama_mlocks * mlock_mmaps = nullptr);
 
     void get_mapping_range(size_t * first, size_t * last, void ** addr, int idx, ggml_context * ctx) const;
-    // Whether the file range a mapped buffer of ctx's tensors would span holds routed experts that
-    // live outside ctx, which that one mapping would pin as well.
-    bool mapping_range_encloses_experts(ggml_context * ctx) const;
+    // Whether the file range a mapped buffer of ctx's tensors would span holds tensors that live
+    // outside ctx unpinned, routed experts or a lazily mapped PLE table, which that one mapping
+    // would pin as well.
+    bool mapping_range_encloses_unpinned(ggml_context * ctx) const;
 
     // for backwards compatibility, does not support ggml-backend
     void load_data_for(struct ggml_tensor * cur) const;

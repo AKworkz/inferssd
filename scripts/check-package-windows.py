@@ -157,8 +157,8 @@ def main() -> None:
     assert cpu["compute"] and not cpu["skipped"]
     # Exercise the packaged Gemma RAM admission contract without downloading model weights.
     fit = admission({"architecture": "gemma4", "model_bytes": 1024, "tensor_bytes": 1024,
-                     "embedding_bytes": 512, "kv_layers": [[0, 1024]]},
-                    context=512, batch=512, gpu=False, available=8 << 30, budget=4 << 30, headroom=0)
+                     "embedding_bytes": 512, "ple_bytes": 0, "kv_layers": [[0, 1024]]},
+                    context=512, batch=512, weights="file", budget=4 << 30)
     receipt = {"version": version, "binary_audit": audit(package), "gemma_ram_admission": fit,
                "owned_runtime": owned_runtime(package, args.work / "owned run")}
     (args.work / "check-receipt.json").write_text(json.dumps(receipt, indent=2), encoding="utf-8")

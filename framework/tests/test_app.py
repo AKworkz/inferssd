@@ -151,17 +151,6 @@ def test_serve_reuses_owned_launch_and_policy(ready_app, monkeypatch):
     assert not args.output_dir.exists()  # owned runtime reserves it
 
 
-def test_ram_serve_keeps_its_admission_margin_in_the_owned_policy(ready_app, monkeypatch):
-    launch = Mock(return_value=0)
-    monkeypatch.setattr(command.typed_command, "run", launch)
-    monkeypatch.setattr(command.ram, "is_model", lambda _: True)
-    assert main(["serve", "-m", str(ready_app)]) == 0
-    args = launch.call_args.args[0]
-    policy = Policy.read(json.loads(args.runtime_policy.read_text()))
-    assert policy.host_reserve_bytes == 2 << 30
-    assert policy.memory_budget_bytes == 48 << 30
-
-
 def test_serve_listens_on_the_given_host(ready_app, monkeypatch, capsys):
     launch = Mock(return_value=0)
     monkeypatch.setattr(command.typed_command, "run", launch)

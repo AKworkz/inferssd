@@ -1839,7 +1839,7 @@ void llama_model_loader::print_info() const {
 void llama_model_loader::mark_ple_lazy(const llama_tensor_weight & weight) {
     if (no_alloc || files.empty()) return; // metadata-only or virtual architecture checks
     if (!use_mmap || check_tensors) {
-        throw std::runtime_error("Qwen PLE requires mmap without whole-table tensor validation");
+        throw std::runtime_error("a lazily mapped PLE table requires mmap without whole-table tensor validation");
     }
     const size_t bytes = ggml_nbytes(weight.tensor);
     if (weight.offs > files.at(weight.idx)->size() || bytes > files.at(weight.idx)->size() - weight.offs) {

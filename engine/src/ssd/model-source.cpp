@@ -83,7 +83,7 @@ void llama_model_loader::build_expert_tensor_index(const llama_hparams & hparams
     expert_tensor_index.dense_bytes = n_bytes > deferred_bytes ? n_bytes - deferred_bytes : 0;
 }
 
-bool llama_model_loader::mapping_range_encloses_experts(ggml_context * ctx) const {
+bool llama_model_loader::mapping_range_encloses_unpinned(ggml_context * ctx) const {
     for (uint32_t idx = 0; idx < files.size(); ++idx) {
         size_t first = 0;
         size_t last = 0;
@@ -91,6 +91,18 @@ bool llama_model_loader::mapping_range_encloses_experts(ggml_context * ctx) cons
         get_mapping_range(&first, &last, &addr, int(idx), ctx);
         if (first >= last) {
             continue;
+        }
+        const auto lazy = ple_lazy_ranges.find(idx);
+        if (lazy != ple_lazy_ranges.end() && lazy->second.first < last && first < lazy->second.second) {
+            // Enclosed unless ctx holds the table itself.
+            bool held = false;
+            for (ggml_tensor * t = ggml_get_first_tensor(ctx); t && !held; t = ggml_get_next_tensor(ctx, t)) {
+                const auto * weight = get_weight(ggml_get_name(t));
+                held = weight && weight->idx == idx && weight->offs == lazy->second.first;
+            }
+            if (!held) {
+                return true;
+            }
         }
         for (const auto & [name, weight] : weights_map) {
             uint32_t layer = 0;

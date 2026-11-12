@@ -29,9 +29,12 @@ These are the tested GGUF files, community conversions of the named model releas
 | Gemma4 E4B | 7.46B total / E4B | [Google · QAT Q4_0](https://huggingface.co/google/gemma-4-E4B-it-qat-q4_0-gguf) |
 
 Gemma uses the ordinary native loader without SSD expert offload. Before loading, the shared
-launcher checks that weights, KV cache and working memory fit the live available RAM, the
-configured budget and headroom. An insufficient fit is rejected. macOS and Windows use the
-same model selection and launch entry points.
+launcher checks that weights, KV cache and working memory fit the memory budget, the machine's
+physical memory unless a smaller one is configured; the system pages other memory out to make
+room. On Apple silicon the per-layer embedding table, 2.15 GiB of the 4.80 GiB file, stays in the
+file and its rows are read from the SSD as tokens use them; the other weights are held in memory.
+A model that does not fit is rejected. macOS and Windows use the same model selection and launch
+entry points.
 
 ## Performance benchmarks
 
