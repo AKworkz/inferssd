@@ -981,17 +981,22 @@ struct tier {
         if(!table || !has_storage() || poisoned || active || prefill_live)return false;
         const expert_format * x=format_of(r.layer);
         if(!x)return false;
-        for(int role=0;role<3;++role)if(!data[role] || r.role[role].bytes!=x->role_bytes[role])
-            throw std::runtime_error("preloaded expert has another layout than its layer's format");
+        static const char * const refused="preloaded expert has another layout than its layer's format";
+        for(int role=0;role<3;++role)if(!data[role])throw std::runtime_error(refused);
+        name_roles(size_t(x-formats.data()),r.role,refused); // the sink names the roles as decode does: their payload
         const int slot=table->reserve_preload(r);
         if(slot<0)return false;
         try{
             cuda_check(cudaSetDevice(device));
-            size_t offset=0;
+            char * dst=slot_base(size_t(slot));
+            bool padded=false;
             for(int role=0;role<3;++role){
-                cuda_check(cudaMemcpy(slot_base(size_t(slot))+offset,data[role],x->role_bytes[role],cudaMemcpyDefault));
-                offset+=x->role_bytes[role];
+                const size_t n=moved(*x,role); // what the source holds: a GGUF role's payload, short of the padded role
+                cuda_check(cudaMemcpy(dst,data[role],n,cudaMemcpyDefault));
+                if(x->role_bytes[role]>n){cuda_check(cudaMemset(dst+n,0,x->role_bytes[role]-n));padded=true;}
+                dst+=x->role_bytes[role];
             }
+            if(padded)cuda_check(cudaStreamSynchronize(nullptr)); // the memsets, before a tier stream reads the slot
         }catch(...){table->cancel_upload(size_t(slot),r);throw;}
         table->publish_cold_prefill(size_t(slot),r);
         return true;

@@ -12,7 +12,9 @@
 // Every role lives in its own host allocation of exactly its payload, followed by an inaccessible page, so a copy of
 // the padded length faults. Admissions, deferred uploads and host jobs copy the payload and zero the slot's padding,
 // and the GPU's rows match the experts computed on the CPU. A format's first request fixes how its roles are named: a
-// later padded name of a payload-named role is refused.
+// later padded name of a payload-named role is refused. Experts preloaded at load from payload-only host memory land
+// the same way and are hits for the first decode token.
+#include "ggml-cuda.h"
 #include "gpu-services.h"
 #include "vram-tier.cpp"
 #include <cmath>
@@ -187,9 +189,54 @@ void scribble(tier & t) {
     cuda_check(cudaDeviceSynchronize());
 }
 const kimi_vram_activation swiglu = { KIMI_VRAM_ACTIVATION_SWIGLU, 0.0f, 0.0f, 0.0f };
+// At load, as the sink fills the tier from the drive (cpu-sink.cpp preload): reserve takes the storage for a request
+// named by its payload, and preload copies experts no request has named from host memory that holds only their
+// payloads into empty slots. Each slot holds the payloads with zero padding, a padded name of a payload-named role is
+// refused, and the first decode token's request of a preloaded expert, keyed as the sink keys it, is a hit.
+std::vector<int> layer_step(tier & t, const store & s, int layer, int token, const std::vector<int> & ids, const char * what,
+        bool deferred = false);
+void preload_case(fixture_inputs & inputs, const store & s) {
+    if (ggml_backend_cuda_device_is_unified(0)) { std::printf("KIMI_VRAM_PAYLOAD preload case: unified memory, skipped\n"); return; }
+    inputs.set("tier.keep_across_requests", "1");
+    inputs.set("tier.elastic", "1");
+    inputs.set("tier.demand_reclaim", "0");
+    inputs.set("tier.margin_mib", "0");
+    tier u(tier::automatic_budget, inputs.tier_policy());
+    const auto f = declared(1);
+    u.reserve(key(1, 0), f);
+    require(u.has_storage() && u.table && u.growth_deferred, "the automatic tier did not take its storage at load");
+    const size_t empty = u.preload_slots();
+    require(empty >= 2, "no empty slots to preload");
+    scribble_pending = true;
+    scribble(u);
+    const int preloaded[2][2] = { { 1, 4 }, { 2, 6 } };
+    int slots[2] = { -1, -1 };
+    for (int i = 0; i < 2; ++i) {
+        const int layer = preloaded[i][0], e = preloaded[i][1];
+        const void * data[3] = { s.role_at(layer, e, 0), s.role_at(layer, e, 1), s.role_at(layer, e, 2) };
+        require(u.preload(key(layer, e), data), "a payload-named expert was not preloaded");
+        slots[i] = u.table->find(key(layer, e), [](const vram_slot_table::entry & x) { return x.valid; });
+        require(slots[i] >= 0 && u.table->slots[size_t(slots[i])].preloaded, "the preloaded expert is not a preloaded entry");
+        check_slot(u, s, slots[i], layer, e, "a preloaded expert");
+    }
+    require(u.preload_slots() == empty - 2, "a preload did not take one empty slot an expert");
+    {
+        auto r = key(1, 5);
+        r.role[2].bytes = padded(1, 2);
+        const void * data[3] = { s.role_at(1, 5, 0), s.role_at(1, 5, 1), s.role_at(1, 5, 2) };
+        std::string refused;
+        try { u.preload(r, data); } catch (const std::runtime_error & e) { refused = e.what(); }
+        require(refused == "preloaded expert has another layout than its layer's format",
+            "a padded preload of a payload-named role was not refused: " + refused);
+    }
+    u.begin(61, 1, true);
+    require(layer_step(u, s, 1, 1, { 4 }, "a preloaded expert")[0] == slots[0], "the preloaded layer 1 expert is not a hit");
+    require(layer_step(u, s, 2, 1, { 6 }, "a preloaded expert")[0] == slots[1], "the preloaded layer 2 expert is not a hit");
+    u.release();
+}
 // One decode layer as the sink runs it: prepare, launch, the misses' admissions (deferred where asked), finish.
 std::vector<int> layer_step(tier & t, const store & s, int layer, int token, const std::vector<int> & ids, const char * what,
-        bool deferred = false) {
+        bool deferred) {
     std::vector<kimi_vram_request> r;
     for (int e : ids) { r.push_back(key(layer, e)); }
     std::vector<int> slots(ids.size(), -1);
@@ -303,6 +350,7 @@ int main() {
         require(refused == "VRAM role bytes changed", "a padded name of a payload-named role was not refused: " + refused);
     }
     t.release();
+    preload_case(inputs, s);
     std::printf("KIMI_VRAM_PAYLOAD_PASS assertions=%d layer1=%s/%s down=%zu/%zu layer2=%s/%s role=%zu/%zu\n", assertions,
         ggml_type_name(type_of(1, 0)), ggml_type_name(type_of(1, 2)), payload(1, 2), padded(1, 2),
         ggml_type_name(type_of(2, 0)), ggml_type_name(type_of(2, 2)), payload(2, 0), padded(2, 0));
