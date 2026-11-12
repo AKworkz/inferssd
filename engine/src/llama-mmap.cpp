@@ -11,6 +11,11 @@
 #include <algorithm>
 #include <cstdlib>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <thread>
+#include <utility>
+#include <vector>
 
 #ifdef __has_include
     #if __has_include(<unistd.h>)
@@ -432,6 +437,9 @@ void llama_file::write_u32(uint32_t val) const { pimpl->write_u32(val); }
 
 // llama_mmap
 
+// Waits until no advice of llama_prefetch_rows is pending (below): a mapping goes only after that.
+static void llama_prefetch_drain();
+
 struct llama_mmap::impl {
     static void align_range(size_t * first, size_t * last, size_t page_size) {
         size_t offset_in_page = *first & (page_size - 1);
@@ -578,6 +586,7 @@ struct llama_mmap::impl {
 
         void * next_page_start = (uint8_t *) addr + first;
 
+        llama_prefetch_drain();
         if (munmap(next_page_start, len)) {
             LLAMA_LOG_WARN("warning: munmap failed: %s\n", strerror(errno));
         }
@@ -600,6 +609,7 @@ struct llama_mmap::impl {
     }
 
     ~impl() {
+        llama_prefetch_drain();
         for (const auto & frag : mapped_fragments) {
             if (munmap((char *) addr + frag.first, frag.second - frag.first)) {
                 LLAMA_LOG_WARN("warning: munmap failed: %s\n", strerror(errno));
@@ -693,6 +703,7 @@ struct llama_mmap::impl {
     }
 
     ~impl() {
+        llama_prefetch_drain();
         if (hMapping) {
             if (addr) {
                 if (!UnmapViewOfFile(addr)) {
@@ -910,6 +921,73 @@ size_t llama_path_max() {
     return PATH_MAX;
 }
 
+namespace {
+
+#if defined(_WIN32) && _WIN32_WINNT >= 0x602
+using llama_prefetch_fn = BOOL (WINAPI *)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
+llama_prefetch_fn llama_windows_prefetch() {
+    static const auto prefetch = (llama_prefetch_fn)(void *) GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory");
+    return prefetch;
+}
+#endif
+
+// Page runs of one llama_prefetch_rows call: start address and length.
+using llama_page_runs = std::vector<std::pair<uintptr_t, size_t>>;
+
+void llama_advise_runs(const llama_page_runs & runs);
+
+// The advice llama_prefetch_rows queues, given by one thread in the order asked. It lives as long as
+// the process (never destroyed, its thread detached), so no unload waits on a thread.
+struct llama_prefetch_queue {
+    std::mutex mutex;
+    std::condition_variable wake, idle;
+    std::deque<llama_page_runs> jobs;
+    bool busy = false;
+    bool started = false;
+
+    void push(llama_page_runs runs) {
+        std::lock_guard<std::mutex> lock(mutex);
+        jobs.push_back(std::move(runs));
+        if (!started) {
+            started = true;
+            std::thread([this] { run(); }).detach();
+        }
+        wake.notify_one();
+    }
+
+    // Until no advice is queued or being given.
+    void drain() {
+        std::unique_lock<std::mutex> lock(mutex);
+        idle.wait(lock, [&] { return jobs.empty() && !busy; });
+    }
+
+    void run() {
+        std::unique_lock<std::mutex> lock(mutex);
+        for (;;) {
+            wake.wait(lock, [&] { return !jobs.empty(); });
+            llama_page_runs runs = std::move(jobs.front());
+            jobs.pop_front();
+            busy = true;
+            lock.unlock();
+            llama_advise_runs(runs);
+            lock.lock();
+            busy = false;
+            if (jobs.empty()) { idle.notify_all(); }
+        }
+    }
+};
+
+llama_prefetch_queue & llama_prefetch_jobs() {
+    static auto * queue = new llama_prefetch_queue();
+    return *queue;
+}
+
+} // namespace
+
+static void llama_prefetch_drain() {
+    llama_prefetch_jobs().drain();
+}
+
 bool llama_prefetch_rows(const void * table, size_t row_bytes, int64_t n_rows, const int32_t * rows, size_t count) {
 #if defined(_WIN32)
     SYSTEM_INFO system{};
@@ -944,24 +1022,39 @@ bool llama_prefetch_rows(const void * table, size_t row_bytes, int64_t n_rows, c
         i = j;
     }
     if (runs.empty()) { return true; }
+#if defined(_WIN32) && _WIN32_WINNT < 0x602
+    return false;
+#else
+#if defined(_WIN32)
+    if (!llama_windows_prefetch()) { return false; }
 #endif
+    llama_prefetch_jobs().push(std::move(runs));
+    return true;
+#endif
+#endif
+}
+
+namespace {
+
+void llama_advise_runs(const llama_page_runs & runs) {
 #if defined(_WIN32)
 #if _WIN32_WINNT >= 0x602
-    using prefetch_fn = BOOL (WINAPI *)(HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
-    static const auto prefetch = (prefetch_fn)(void *) GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory");
-    if (!prefetch) { return false; }
+    const auto prefetch = llama_windows_prefetch();
+    if (!prefetch) { return; }
     std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
     ranges.reserve(runs.size());
     for (const auto & [start, bytes] : runs) { ranges.push_back({ reinterpret_cast<void *>(start), SIZE_T(bytes) }); }
-    return prefetch(GetCurrentProcess(), ULONG_PTR(ranges.size()), ranges.data(), 0) != 0;
+    (void) prefetch(GetCurrentProcess(), ULONG_PTR(ranges.size()), ranges.data(), 0);
 #else
-    return false;
+    (void) runs;
 #endif
 #elif defined(_POSIX_MAPPED_FILES)
-    bool advised = true;
     for (const auto & [start, bytes] : runs) {
-        advised = madvise(reinterpret_cast<void *>(start), bytes, MADV_WILLNEED) == 0 && advised;
+        (void) madvise(reinterpret_cast<void *>(start), bytes, MADV_WILLNEED);
     }
-    return advised;
+#else
+    (void) runs;
 #endif
 }
+
+} // namespace

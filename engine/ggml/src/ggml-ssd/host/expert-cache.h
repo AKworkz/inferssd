@@ -1174,16 +1174,26 @@ struct expert_cache {
         }
         return false;
     }
+    // What a slot held when a grouped prefill's read-ahead took it, before its read was issued: a read never issued
+    // gives the slot back as it was (prefetch_restore), and only an issued one evicts the entry (prefetch_issued).
+    struct prefetch_prior {
+        bool valid = false, prefetched = false;
+        int32_t id = -1;
+        size_t layer_index = 0;
+        uint64_t last_touch = 0;
+        source_key source[3] = {};
+    };
     // Next-layer prefetch, of a decode run or of a grouped prefill (its read-ahead, where the prefill reads the retained
     // entries): take a resident, idle slot of the layer (a free one first, else the coldest) for an expert that is not
     // cached. The slot is inflight, invisible to lookups and allocation, until prefetch_done publishes it (or
     // prefetch_activate publishes it early as a hit that its run waits for). keep: per expert of the layer, 1 for one
-    // whose entry the caller's pass is about to use, which is no victim (null: none).
+    // whose entry the caller's pass is about to use, which is no victim (null: none). prior: where the slot's entry is
+    // kept, not evicted, until its read is issued (null: evicted now).
     // Returns -2 when the expert is already cached or on its way, -1 when there is no slot.
     int prefetch_reserve(int32_t layer_id, int32_t expert, const kimi_cpu_sink_source * roles,
-            const std::vector<uint8_t> * keep = nullptr) {
+            const std::vector<uint8_t> * keep = nullptr, prefetch_prior * prior = nullptr) {
         if (!(active || prefill_read) || paused || !stats.budget_bytes || !arena || !stride) { return -1; }
-        return reserve_slot(layer_id, expert, roles, keep, false);
+        return reserve_slot(layer_id, expert, roles, keep, false, prior);
     }
     // At load (the sink's preload), before any request: an empty slot of the layer for an expert no request has named,
     // its read to follow as a prefetch's (prefetch_done publishes it). -1 when the layer has no empty slot.
@@ -1192,7 +1202,7 @@ struct expert_cache {
         return reserve_slot(layer_id, expert, roles, nullptr, true);
     }
     int reserve_slot(int32_t layer_id, int32_t expert, const kimi_cpu_sink_source * roles,
-            const std::vector<uint8_t> * keep, bool empty_only) {
+            const std::vector<uint8_t> * keep, bool empty_only, prefetch_prior * prior = nullptr) {
         const auto found = std::find_if(layers.begin(), layers.end(), [&](const layer & l) { return l.id == layer_id; });
         if (found == layers.end() || !found->count) { return -1; }
         const size_t layer_index = size_t(found - layers.begin());
@@ -1224,21 +1234,55 @@ struct expert_cache {
         }
         if (victim < 0) { return -1; }
         auto & e = entries[size_t(victim)];
-        if (e.valid) {
-            e.valid = false; ++stats.evictions; stats.valid_bytes -= stride;
-            if (e.prefetched) { ++prefetch_unused; }
-        }
+        take_victim(e, prior);
         e.id = expert; e.layer_index = layer_index; e.inflight = true; e.prefetched = false;
         e.generation = generation; e.last_touch = ++clock;
         for (int role = 0; role < 3; ++role) { e.source[role] = keys[role]; }
         return victim;
+    }
+    // A prefetch's victim: its entry is evicted now, or, with prior, kept there for the read's issue to evict.
+    void take_victim(entry & e, prefetch_prior * prior) {
+        if (prior) {
+            prior->valid = e.valid; prior->prefetched = e.prefetched; prior->id = e.id;
+            prior->layer_index = e.layer_index; prior->last_touch = e.last_touch;
+            for (int role = 0; role < 3; ++role) { prior->source[role] = e.source[role]; }
+        }
+        if (e.valid) {
+            e.valid = false; stats.valid_bytes -= stride;
+            if (!prior) { evicted(e.prefetched); }
+        }
+    }
+    void evicted(bool prefetched) {
+        ++stats.evictions;
+        if (prefetched) { ++prefetch_unused; }
+    }
+    // A read-ahead's read into the slot was issued: the entry the slot held is gone.
+    void prefetch_issued(const prefetch_prior & prior) {
+        if (prior.valid) { evicted(prior.prefetched); }
+    }
+    // A read-ahead's slot whose read was never issued: the slot holds what it held before the reservation, its bytes
+    // untouched, and leaves the layer it was lent to.
+    void prefetch_restore(int index, uint64_t reserved_generation, const prefetch_prior & prior) {
+        if (index < 0 || size_t(index) >= entries.size() || reserved_generation != generation) { return; }
+        auto & e = entries[size_t(index)];
+        if (!e.inflight || e.generation != reserved_generation) { return; }
+        e.inflight = false;
+        if (e.lent) {
+            e.lent = false;
+            lent.erase(std::remove(lent.begin(), lent.end(), size_t(index)), lent.end());
+        }
+        e.id = prior.id; e.layer_index = prior.layer_index; e.last_touch = prior.last_touch; e.prefetched = prior.prefetched;
+        for (int role = 0; role < 3; ++role) { e.source[role] = prior.source[role]; }
+        if (prior.valid && e.enabled && e.resident) { e.valid = true; stats.valid_bytes += stride; }
+        else if (prior.valid) { evicted(prior.prefetched); e.id = -1; e.prefetched = false; }
     }
     // A prefill read-ahead for `layer_id` that found no slot of its own (prefetch_reserve): a slot of a layer whose
     // call this pass has finished (an id below `finished_below`), an empty one first, else the coldest of them, as
     // prefetch_reserve takes one. Such a layer takes none of its slots again in this pass, and decode is what its
     // entries are kept for: the slot serves the borrower's prefill read once, then comes back empty
     // (return_borrowed), so that a pass's read-ahead cycles a few slots rather than empty the earlier layers. -1: none.
-    int prefetch_borrow(int32_t layer_id, int32_t expert, const kimi_cpu_sink_source * roles, int32_t finished_below) {
+    int prefetch_borrow(int32_t layer_id, int32_t expert, const kimi_cpu_sink_source * roles, int32_t finished_below,
+            prefetch_prior * prior = nullptr) {
         if (!prefill_read || paused || !stats.budget_bytes || !arena || !stride) { return -1; }
         const auto found = std::find_if(layers.begin(), layers.end(), [&](const layer & l) { return l.id == layer_id; });
         if (found == layers.end()) { return -1; }
@@ -1258,10 +1302,7 @@ struct expert_cache {
         }
         if (victim < 0) { return -1; }
         auto & e = entries[size_t(victim)];
-        if (e.valid) {
-            e.valid = false; ++stats.evictions; stats.valid_bytes -= stride;
-            if (e.prefetched) { ++prefetch_unused; }
-        }
+        take_victim(e, prior);
         e.id = expert; e.layer_index = size_t(found - layers.begin()); e.inflight = true; e.prefetched = false;
         e.lent = true; e.generation = generation; e.last_touch = ++clock;
         for (int role = 0; role < 3; ++role) { e.source[role] = key(roles[role]); }

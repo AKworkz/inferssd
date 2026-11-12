@@ -97,6 +97,10 @@ public:
 
     virtual void set_input(const llama_ubatch * ubatch) = 0;
 
+    // Before the graph takes its memory: the reads of the rows this input will gather for the ubatch are issued
+    // (llama_prefetch_rows), so that they overlap the reservation and what runs before the rows are used.
+    virtual void prefetch(const llama_ubatch * ubatch) { GGML_UNUSED(ubatch); }
+
     // return true if the resulting input tensors using the provided graph parameters would be
     //   the same as the previous input tensors that we have currently stored in the object
     virtual bool can_reuse(const llm_graph_params & params) {
@@ -118,11 +122,15 @@ public:
     virtual ~llm_graph_input_embd() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
+    void prefetch(const llama_ubatch * ubatch) override;
 
     bool can_reuse(const llm_graph_params & params) override;
 
     ggml_tensor * tokens = nullptr; // I32 [n_batch]
     ggml_tensor * embd   = nullptr; // F32 [n_embd, n_batch]
+
+    // the token embedding where it is host memory: a batch's rows are prefetched (llama_prefetch_rows)
+    const ggml_tensor * table = nullptr;
 
     const int64_t n_embd = 0;
 };
@@ -756,6 +764,7 @@ public:
     void reset();
 
     void set_inputs(const llama_ubatch * ubatch);
+    void prefetch_inputs(const llama_ubatch * ubatch);
     void set_outputs(const llm_graph_params & params);
 
     // try to update the existing graph result using the new graph parameters in order to reuse it

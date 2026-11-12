@@ -381,6 +381,7 @@ struct sink_lookahead_read {
     kimi_cpu_sink_source role[3] = {};
     int entry = -1;
     uint64_t generation = 0;
+    sink_cache::prefetch_prior prior; // the slot's entry until the read is issued
     void * target[3] = {};
     unsigned remaining = 0, ready_roles = 0;
     bool issued = false, failed = false;
@@ -712,8 +713,6 @@ struct kimi_cpu_sink {
         int32_t window_layer = -1;
         bool window_open = false;
         int32_t pass_layer = -1;                   // the last grouped-prefill call's layer: a pass runs in layer order
-        std::vector<double> pass_windows_us;       // this pass's windows so far
-        double last_pass_median_us = 0;
         // The plan in progress (io_mutex): experts issued, landed whole, failed.
         uint64_t issued = 0, landed = 0, failed = 0;
         // The cache slots the handover published for the call in progress: its prefill read counts the hits among them.
@@ -734,8 +733,8 @@ struct kimi_cpu_sink {
     // One grouped-prefill call's receipts ([kimi_cpu_prefill_lookahead]); the call's thread only.
     struct lookahead_receipt {
         int32_t layer = -1;
-        double window_us = -1, estimate_us = 0, drive_us_per_mb = 0;
-        uint64_t planned = 0, issued = 0, landed = 0, failed = 0, used = 0, unused = 0, bytes = 0, next_n = 0;
+        double window_us = -1;
+        uint64_t planned = 0, issued = 0, landed = 0, failed = 0, used = 0, unused = 0, bytes = 0;
         uint64_t likely = 0;  // the next layer's experts with P >= 1/2 that neither the GPU tier nor the RAM cache holds
         uint64_t no_slot = 0; // the next layer's plan stopped short: no slot of its own or of a finished layer was left
         uint64_t borrowed = 0; // the next layer's plan reads into slots of layers this pass finished
@@ -2827,15 +2826,6 @@ struct kimi_cpu_sink {
 
     // ---- The grouped prefill's cross-layer read-ahead (lookahead_state) ----
 
-    static double lookahead_median(std::vector<double> values) {
-        if (values.empty()) { return 0; }
-        const size_t mid = values.size() / 2;
-        std::nth_element(values.begin(), values.begin() + mid, values.end());
-        const double upper = values[mid];
-        if (values.size() % 2) { return upper; }
-        return (upper + *std::max_element(values.begin(), values.begin() + mid)) / 2;
-    }
-
     // The I/O thread: queues the plan's next experts into their RAM cache slots, as many as the ring's depth takes
     // beside the reads in flight, submits them and takes the completions the ring has. The ring is the I/O thread's
     // here: a run's reads are over, and the next entry stops this before it uses the ring. False when nothing happened.
@@ -2958,10 +2948,13 @@ struct kimi_cpu_sink {
         lookahead.stop = false;
     }
     // The read-ahead stopped (run_mutex held): each of the plan's cache slots holds the expert it read, published, or
-    // goes back. For a plan of `layer`, `published` gets the slots that hold its experts now.
+    // goes back: empty where its read failed, as it was where no read was issued into it. For a plan of `layer`,
+    // `published` gets the slots that hold its experts now.
     void lookahead_finish(int32_t layer, std::vector<int> * published) {
         for (const auto & read : lookahead.plan) {
-            const bool landed = read.issued && !read.remaining && !read.failed;
+            if (!read.issued) { cache.prefetch_restore(read.entry, read.generation, read.prior); continue; }
+            cache.prefetch_issued(read.prior);
+            const bool landed = !read.remaining && !read.failed;
             cache.prefetch_done(read.entry, read.generation, landed, false);
             if (landed && published && lookahead.layer == layer) { published->push_back(read.entry); }
         }
@@ -2971,11 +2964,8 @@ struct kimi_cpu_sink {
     }
     // Every other entry that holds the run mutex and may use the ring or the cache (a phase begin, a decode run, a
     // reserve, a reset): the read-ahead stops, what it read is published, and the pass ends.
-    // io_mutex held: the pass's windows estimate the next pass's until it has its own (lookahead_plan_next); the next
-    // call starts a pass.
+    // io_mutex held: the next call starts a pass.
     void lookahead_end_pass() {
-        if (!lookahead.pass_windows_us.empty()) { lookahead.last_pass_median_us = lookahead_median(lookahead.pass_windows_us); }
-        lookahead.pass_windows_us.clear();
         lookahead.pass_layer = -1;
     }
     void lookahead_quiesce() {
@@ -3020,7 +3010,6 @@ struct kimi_cpu_sink {
             r.issued = lookahead.issued; r.landed = lookahead.landed; r.failed = lookahead.failed;
             lookahead.issued = lookahead.landed = lookahead.failed = 0;
             if (layer < 0 || layer != lookahead.pass_layer + 1) { lookahead_end_pass(); }
-            if (window_us >= 0) { lookahead.pass_windows_us.push_back(window_us); }
             lookahead.pass_layer = layer;
         }
         lookahead.landed_entries.clear();
@@ -3055,21 +3044,16 @@ struct kimi_cpu_sink {
     // at some ranks; an expert named at ranks r_1..r_m is selected with P = 1 - prod(1 - q_r), q_r the rate at which
     // rank r's prediction was selected in the prefill passes so far (lookahead_measure). The plan: the next layer's
     // experts with P >= 1/2 that the GPU tier does not hold and the RAM cache's prefill read would not serve, most
-    // likely first, at most N = ceil(window x drive rate / expert bytes), the experts the drive reads in the idle window
-    // this pass is estimated to have, and as many as the layer's RAM cache slots take (prefetch_reserve, as the decode
-    // prefetch takes one: a free slot first, else the layer's coldest of the entries whose experts have P < 1/2). The
-    // estimate: the windows' median over the pass
-    // so far, else the last pass's. No plan without a prediction of the next layer or a measured rate, before any
-    // window, without a drive line, or for the last routed layer (the next one resolves no expert).
+    // likely first, as many as the layer's RAM cache slots take (prefetch_reserve, as the decode prefetch takes
+    // one: a free slot first, else the layer's coldest of the entries whose experts have P < 1/2), then slots of the
+    // layers this pass finished (prefetch_borrow). The I/O thread reads them in that order from the end of this call's
+    // reads until the next call starts, whatever that window's length: a slot's entry goes only once a read into it is
+    // issued, and a slot no read reached goes back as it was (lookahead_finish). No plan without a prediction of the
+    // next layer or a measured rate, or for the last routed layer (the next one resolves no expert).
     void lookahead_plan_next(int32_t layer, const ggml_tensor * up, int ntokens, int nslots) {
         auto & r = lookahead_report;
         // what an earlier call's read-ahead borrowed went to that call's read: its slots go back to their layers
         cache.return_borrowed(layer);
-        {
-            std::lock_guard<std::mutex> lock(io_mutex);
-            r.estimate_us = !lookahead.pass_windows_us.empty() ? lookahead_median(lookahead.pass_windows_us) :
-                lookahead.last_pass_median_us;
-        }
         // the prediction this plan takes, kept for the next call's measure
         const bool predicted = lookahead.hint_layer == layer + 1 && lookahead.hint_tokens == ntokens && layer >= 0;
         lookahead.planned_layer = predicted ? layer + 1 : -1;
@@ -3080,12 +3064,6 @@ struct kimi_cpu_sink {
         }
         lookahead.hint_layer = -1;
         if (!lookahead.enabled || !predicted || nslots <= 0 || requests.empty()) { return; }
-        // the drive's calibrated line (decode's layers with reads, the prefill window's, the measured prior)
-        const double drive_us_per_mb = r.drive_us_per_mb = place_table(ntokens).drive_us_per_mb;
-        const auto & first = requests.front();
-        const double expert_mb = double(first.role[0].nbytes + first.role[1].nbytes + first.role[2].nbytes) / 1e6;
-        if (!(r.estimate_us > 0) || !(drive_us_per_mb > 0) || !(expert_mb > 0)) { return; }
-        r.next_n = uint64_t(std::ceil(r.estimate_us / (expert_mb * drive_us_per_mb)));
         const int32_t next = layer + 1;
         const int experts = int(up->ne[2]);
         // log(1 - P) of each expert from the ranks the prediction names it at; a rate not yet measured (a rank no
@@ -3123,8 +3101,7 @@ struct kimi_cpu_sink {
             [&](int32_t a, int32_t b) { return log_unused[size_t(a)] < log_unused[size_t(b)]; });
         r.likely = likely.size();
         if (likely.empty()) { ++lookahead.unlikely; return; }
-        const size_t target = size_t(std::min<uint64_t>(r.next_n, likely.size()));
-        if (!target) { return; }
+        const size_t target = likely.size();
         char names[3][GGML_MAX_NAME];
         std::snprintf(names[0], sizeof(names[0]), "blk.%d.ffn_up_exps.weight", next);
         std::snprintf(names[1], sizeof(names[1]), "blk.%d.ffn_gate_exps.weight", next);
@@ -3142,10 +3119,10 @@ struct kimi_cpu_sink {
                     source.nbytes && source.nbytes % 4096 == 0 && source.nbytes <= size_t(std::numeric_limits<int>::max());
             }
             if (!resolved) { ++unresolved; continue; }
-            read.entry = cache.prefetch_reserve(next, read.expert, read.role, &keep);
+            read.entry = cache.prefetch_reserve(next, read.expert, read.role, &keep, &read.prior);
             if (read.entry == -2) { continue; }            // cached, or on its way
             if (read.entry < 0) {                           // the layer has no idle slot left: one a finished layer lends
-                read.entry = cache.prefetch_borrow(next, read.expert, read.role, layer);
+                read.entry = cache.prefetch_borrow(next, read.expert, read.role, layer, &read.prior);
                 if (read.entry < 0) { ++r.no_slot; break; }
                 ++r.borrowed;
             }
@@ -3202,13 +3179,13 @@ struct kimi_cpu_sink {
         lookahead.planned += r.next_planned; lookahead.issued_total += r.issued; lookahead.landed_total += r.landed;
         lookahead.failed_total += r.failed; lookahead.used += r.used; lookahead.unused += r.unused;
         lookahead.used_bytes += r.bytes; lookahead.no_slot += r.no_slot; lookahead.borrowed += r.borrowed;
-        std::fprintf(stderr, "[kimi_cpu_prefill_lookahead] layer=%d enabled=%d window_us=%.0f estimate_us=%.0f"
-            " drive_us_per_mb=%.3f likely=%llu planned=%llu issued=%llu read=%llu failed=%llu used=%llu unused=%llu"
-            " bytes=%llu next_n=%llu next_planned=%zu no_slot=%llu borrowed=%llu\n", r.layer, int(lookahead.enabled),
-            r.window_us, r.estimate_us, r.drive_us_per_mb, (unsigned long long) r.likely, (unsigned long long) r.planned,
+        std::fprintf(stderr, "[kimi_cpu_prefill_lookahead] layer=%d enabled=%d window_us=%.0f"
+            " likely=%llu planned=%llu issued=%llu read=%llu failed=%llu used=%llu unused=%llu"
+            " bytes=%llu next_planned=%zu no_slot=%llu borrowed=%llu\n", r.layer, int(lookahead.enabled),
+            r.window_us, (unsigned long long) r.likely, (unsigned long long) r.planned,
             (unsigned long long) r.issued, (unsigned long long) r.landed, (unsigned long long) r.failed,
             (unsigned long long) r.used, (unsigned long long) r.unused, (unsigned long long) r.bytes,
-            (unsigned long long) r.next_n, r.next_planned, (unsigned long long) r.no_slot, (unsigned long long) r.borrowed);
+            r.next_planned, (unsigned long long) r.no_slot, (unsigned long long) r.borrowed);
     }
     void lookahead_summary() {
         if (!lookahead.enabled || !lookahead.layers) { return; }

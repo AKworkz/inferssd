@@ -83,5 +83,8 @@ size_t llama_path_max();
 // Ask the OS to read ahead the pages that hold ROWS of a table of N_ROWS rows of ROW_BYTES bytes at
 // TABLE, a file mapping: madvise(MADV_WILLNEED) on POSIX, PrefetchVirtualMemory on Windows. Advice
 // only: rows outside the table are skipped, and without it the rows come in through page faults.
-// False when the OS refused it or has none.
+// The pages are worked out here and the advice is given on a background thread, in the order asked,
+// so the call returns at once: the OS queues a page's read before the advice returns, so advice on
+// many pages lasts as long as the drive takes to read them. A mapping is unmapped only once the
+// advice given on it is done. False when the OS has no such advice.
 bool llama_prefetch_rows(const void * table, size_t row_bytes, int64_t n_rows, const int32_t * rows, size_t count);

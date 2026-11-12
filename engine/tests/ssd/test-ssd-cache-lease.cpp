@@ -58,7 +58,45 @@ int main() {
         keep[9] = 1;
         require(c.prefetch_reserve(1, 12, n.role, &keep) == 1 && c.entries[0].valid && c.entries[1].inflight);
         c.prefetch_done(1, c.generation, false);
+        // A prefill read-ahead's slot keeps its entry until a read into it is issued: one never issued comes back as it
+        // was, with its bytes counted again and no eviction; an issued one evicts it once.
+        c.tier_held = nullptr;
+        c.entries[1].id = 6; c.entries[1].valid = true; c.entries[1].last_touch = 3; c.stats.valid_bytes += c.stride;
+        const auto before = c.stats.valid_bytes, evictions = c.stats.evictions;
+        sink_cache::prefetch_prior prior;
+        const int slot = c.prefetch_reserve(1, 13, n.role, nullptr, &prior);
+        require(slot >= 0 && prior.valid && c.entries[size_t(slot)].inflight && !c.entries[size_t(slot)].valid &&
+                c.stats.evictions == evictions);
+        const int32_t held = prior.id;
+        c.prefetch_restore(slot, c.generation, prior);
+        require(!c.entries[size_t(slot)].inflight && c.entries[size_t(slot)].valid && c.entries[size_t(slot)].id == held &&
+                c.stats.valid_bytes == before && c.stats.evictions == evictions);
+        require(c.prefetch_reserve(1, 13, n.role, nullptr, &prior) == slot);
+        c.prefetch_issued(prior);
+        c.prefetch_done(slot, c.generation, true, false);
+        require(c.entries[size_t(slot)].valid && c.entries[size_t(slot)].id == 13 && c.stats.evictions == evictions + 1 &&
+                c.stats.valid_bytes == before);
         c.arena = nullptr; // the test's own buffer
+    }
+    {
+        // A slot lent to a later layer (prefetch_borrow) and never read into goes back to its own layer as it was.
+        sink_cache c(configuration); c.prefill_read = true; c.stats.budget_bytes = 1; c.stride = 12288;
+        for (int role = 0; role < 3; ++role) { c.role_bytes[role] = 4096; }
+        for (int id = 1; id <= 2; ++id) { sink_cache::layer l; l.id = id; l.begin = size_t(id - 1); l.count = 1; c.layers.push_back(l); }
+        c.entries.resize(2);
+        std::vector<char> arena(2 * c.stride); c.arena = arena.data();
+        auto & own = c.entries[0]; own.id = 4; own.layer_index = 0; own.valid = own.resident = own.enabled = true;
+        c.entries[1].layer_index = 1; c.entries[1].resident = c.entries[1].enabled = true;
+        c.entries[1].id = 7; c.entries[1].valid = true;
+        c.stats.valid_bytes = 2 * c.stride;
+        sink_request n; n.id = 9;
+        for (int role = 0; role < 3; ++role) { n.role[role] = {fd,uint64_t(20 + role)*4096,4096}; }
+        sink_cache::prefetch_prior prior;
+        require(c.prefetch_borrow(2, 9, n.role, 2, &prior) == 0 && own.lent && own.layer_index == 1 && c.lent.size() == 1);
+        c.prefetch_restore(0, c.generation, prior);
+        require(!own.lent && c.lent.empty() && own.layer_index == 0 && own.id == 4 && own.valid &&
+                c.stats.valid_bytes == 2 * c.stride && !c.stats.evictions);
+        c.arena = nullptr;
     }
     {
         // A guard's shrink for room: a layer whose slots past its share are busy leaves the rest to the others' coldest
