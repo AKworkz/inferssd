@@ -31,7 +31,8 @@ class Planned:
     threads: Threads
     server_args: tuple[str, ...]
     receipt: dict[str, object]
-    # Prefill each prompt in one pass: -b and -ub as large as the context.
+    # A derived strategy prefills each prompt in one pass (-b and -ub as large as the context);
+    # a skipped one leaves the launch's sizes.
     one_pass: bool = False
 
 
@@ -102,11 +103,10 @@ def plan(
                 name: list(value) if name.endswith("cpus") else value
                 for name, value in pools.items()
             },
-            "one_pass": strategy.one_pass,
             "server_args": list(arguments),
         },
         "kept": kept,
         "dropped": list(applied.dropped),
         "notes": list(strategy.notes),
     }
-    return Planned(applied.settings, applied.threads, arguments, receipt, strategy.one_pass)
+    return Planned(applied.settings, applied.threads, arguments, receipt, one_pass=True)

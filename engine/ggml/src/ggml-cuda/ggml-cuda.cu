@@ -141,7 +141,7 @@ static bool ggml_cuda_memory_is_unified(int device);
 // Device memory a new allocation can still get. On a unified-memory GPU (DGX Spark, Jetson) device
 // allocations come out of system memory and cudaMemGetInfo reports MemFree, which leaves out the
 // reclaimable page cache, so the answer is MemAvailable there, as it reads at the kernel's full watermark
-// boost (kimi-memory-boost.h): a reserve kept on MemAvailable must survive the boost coming back.
+// boost (ggml-ssd/host/budget-linux.h): a reserve kept on MemAvailable must survive the boost coming back.
 static void ggml_cuda_memory_info(int device, size_t * free, size_t * total);
 
 // Memory that allocations must leave free, explicitly set by the typed tier
@@ -6020,7 +6020,7 @@ static bool ggml_backend_cuda_get_available_uma_memory(long * available_memory_k
 }
 
 // How far MemAvailable can still fall with nothing allocated, as the kernel raises the zones' watermark boosts to their
-// largest (kimi-memory-boost.h); 0 when a file cannot be read.
+// largest (ggml-ssd/host/budget-linux.h); 0 when a file cannot be read.
 static size_t ggml_cuda_uma_boost_headroom() {
     auto slurp = [](const char * path, std::string & text) {
         FILE * file = fopen(path, "r");

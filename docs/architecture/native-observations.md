@@ -17,7 +17,6 @@ belongs to one native runtime and is closed after its users have drained.
 | `ssd.place.layer` | epoch, token, has_token, layer, decode, success, selected_experts, vram_hit, cache_hit, wall_us, wait_io_us, compute_us |
 | `ssd.prefill.graph` | requested_tokens, configured_max, selected_ubatch |
 | `ssd.prefill.layer` | layer, n_tokens, read_bytes |
-| `ssd.prefill.copy` | bytes, read_us, passes, tokens |
 
 Route arrays are captured from the completed native layer, not reconstructed
 from text. Wall-time counters are already collected by the executor; enabling

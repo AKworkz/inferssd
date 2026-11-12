@@ -10,9 +10,8 @@ Python resource. There are no environment mirrors or legacy-name aliases.
 | `expert.source` | paths / path | `[]` | plan | all |  |
 | `cpu.io_cpus` | cpus / CPU ID | `empty` | plan | all |  |
 | `cpu.decode_participants` | integer / compute participants | `0` | plan | all |  |
-| `prefetch.depth` | integer / predicted experts | `2` | plan | all |  |
+| `prefetch.depth` | integer / predicted experts | `64` | plan | all |  |
 | `place.costs` | costs / named us and GB/s terms | `empty` | plan | all |  |
-| `prefill.cpu_max_tokens` | integer / tokens | `4294967295` | plan | all | CUDA |
 | `prefill.lookahead` | integer / boolean | `1` | plan | all |  |
 | `vram.budget` | budget / bytes | `auto` | plan | all |  |
 | `vram.max_slots` | integer / slots | `0` | plan | all | CUDA |
@@ -61,6 +60,19 @@ at launch, and 0 otherwise; a setting of yours replaces that choice. On a GPU th
 shares the host's memory, the reserve adds to the host memory floor below, and the
 tier gives memory back under pressure from any process.
 
+In decode, each layer's graph also predicts the next layer's experts, best first, and
+the experts of its first `prefetch.depth` ranks that neither the GPU tier nor the
+RAM cache holds are read into that layer's RAM cache slots while the drive would
+otherwise wait for the next router. It reads them likeliest first, each while its
+read pays: a read the drive finishes in the gap saves a read if the expert is used;
+one the gap ends during saves the part it has read if the expert is used and takes
+the rest of its drive time from the next layer's reads if not, so it pays when the
+expert's chance of use is above the share of its read left at the gap's end; one
+the gap ends before it starts is dropped. The chance of use is how often the next
+layer selected that rank's predictions so far, the gaps and an expert's read time
+are measured as decode runs. A read takes the slot of a less likely entry, never
+one of another predicted expert. `0` turns the prefetch off.
+
 `prefill.lookahead = 1` keeps the drive reading through the gap between two layers
 of a prompt pass, while the GPU computes the next layer's attention and routing.
 Each layer's graph also applies the next layer's router to its input, which
@@ -68,12 +80,33 @@ predicts the next layer's experts for every token. The experts that this predict
 makes likely to be used (at least even odds, from how often each rank of the
 prediction was right so far) and that neither the GPU tier nor the RAM cache holds
 are read into that layer's RAM cache slots, most likely first (a free slot first,
-else the layer's coldest, as for the decode prefetch), and the next layer takes
-them as RAM hits instead of reading them. The read-ahead holds no memory of its
+else the layer's coldest entry of an expert the pass is less likely to use than
+even odds), and the next layer takes them as RAM hits instead of reading them. The read-ahead holds no memory of its
 own: what it read stays cached. It reads as many experts as the drive reads in the
-measured gap at its calibrated rate, and at most as many as the layer's RAM cache
-slots, so it needs a RAM cache that a prompt pass reads. `0` turns this off, for
+measured gap at its calibrated rate. When the layer's own RAM cache slots are all
+taken, it borrows slots of the layers the pass has already computed, an empty one
+first, else the coldest: those layers take no slot again in the pass, and a
+borrowed slot serves that one layer's read and comes back empty, so a pass cycles a
+few slots instead of emptying the earlier layers. It needs a RAM cache that a prompt
+pass reads. `0` turns this off, for
 A/B timing.
+
+At load, once the server's first pass is done and before any request, the expert
+caches take their experts from the drive. No request has named an expert yet, so
+each layer's experts are taken in their order: the GPU tier's empty slots, shared
+alike among the layers, take each layer's first experts, and the RAM cache's empty
+slots the next ones. Nothing from earlier runs is kept or used. An expert loaded
+this way and not used since is as good as an empty slot to whatever allocates
+later: a prompt's seeds and decode's admissions take its slot as they take an
+empty one, and a prompt pass's read-ahead takes it unless the pass is likely to
+use it. On a discrete GPU the tier is made at load and first grows into the card,
+once the load's pass has shown that the device memory other work holds has
+settled. The load then leaves the graph reserved for decode's single token, as a
+request's prefill does, so the tier grows into the memory a prompt's graph does
+not need; each prompt's prefill reserves its own graph and takes back what that
+needs from the tier. Whenever the tier gives memory back, it keeps its most
+valuable experts: the ones in the block it frees move into the slots of the
+least used ones first.
 
 The host memory ledger has two terms on every platform, and they size the expert
 caches. The envelope is a finite limit on this process's memory less a 512 MiB

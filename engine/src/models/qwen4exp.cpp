@@ -838,9 +838,12 @@ public:
     virtual ~llm_graph_input_ple() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
+    // the ubatch's rows, read ahead before the graph takes its memory
+    void prefetch(const llama_ubatch * ubatch) override;
 
     bool can_reuse(const llm_graph_params & params) override {
         mctx = static_cast<const llama_memory_hybrid_idx_context *>(params.mctx)->get_attn();
+        idx_ubatch = nullptr; // a reused input works its rows out again
         return rows->ne[0] == (int64_t) pmodel.hparams.ple_n_heads * params.ubatch.n_tokens;
     }
 
@@ -853,9 +856,30 @@ public:
 
     // scratch, reused across set_input() calls
     std::vector<llama_token> prev;
+
+    // the rows of the ubatch prefetch() worked out, which its set_input() takes
+    std::vector<int32_t> idx;
+    const llama_ubatch * idx_ubatch = nullptr;
+
+    void compute_rows(const llama_ubatch * ubatch);
 };
 
+void llm_graph_input_ple::prefetch(const llama_ubatch * ubatch) {
+    compute_rows(ubatch);
+    idx_ubatch = ubatch;
+    pmodel.prefetch_ple_rows(idx.data(), idx.size());
+}
+
 void llm_graph_input_ple::set_input(const llama_ubatch * ubatch) {
+    if (idx_ubatch != ubatch) {
+        compute_rows(ubatch);
+        pmodel.prefetch_ple_rows(idx.data(), idx.size());
+    }
+    idx_ubatch = nullptr;
+    ggml_backend_tensor_set(rows, idx.data(), 0, idx.size()*ggml_element_size(rows));
+}
+
+void llm_graph_input_ple::compute_rows(const llama_ubatch * ubatch) {
     const auto & hp = pmodel.hparams;
 
     // an image arrives as an embd batch, so ubatch->token is null, but every position still needs a row for ggml_get_rows
@@ -875,7 +899,7 @@ void llm_graph_input_ple::set_input(const llama_ubatch * ubatch) {
     const int64_t eos      = hp.ple_eos_token_id;
     const int64_t n_prev   = n_gram - 1;
 
-    std::vector<int32_t> idx(n_heads * n_tokens);
+    idx.assign(size_t(n_heads * n_tokens), 0);
 
     GGML_ASSERT(mctx != nullptr);
 
@@ -914,9 +938,6 @@ void llm_graph_input_ple::set_input(const llama_ubatch * ubatch) {
             }
         }
     }
-
-    pmodel.prefetch_ple_rows(idx.data(), idx.size());
-    ggml_backend_tensor_set(rows, idx.data(), 0, idx.size()*ggml_element_size(rows));
 }
 
 // Read a conv history out of its own recurrent row and write the new tail back.

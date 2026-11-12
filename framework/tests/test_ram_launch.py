@@ -110,6 +110,30 @@ def test_ram_launch_respects_the_policy_reserve_and_budget(tmp_path):
         resolved(inputs, spec, adapter, out, "windows", memory=1 << 30)
 
 
+def test_ram_launch_steps_an_unset_context_down_to_what_fits(tmp_path):
+    inputs, spec, _, adapter, out, _ = gemma(tmp_path, "darwin", [])
+    # 768 bytes of KV a token (3 layers, 256 bytes each): 24576 tokens fit beside the workspace.
+    memory = ram.WORKSPACE_BYTES + (20 << 20)
+    result = resolved(inputs, spec, adapter, out, "darwin", memory=memory)
+    assert result.code == 0
+    argv = list(result.argv)
+    assert argv[argv.index("-c") + 1] == "24576"
+    assert json.loads(result.outputs[-1].text)["launch"]["context"] == 24576
+
+
+def test_ram_launch_refuses_a_given_context_that_does_not_fit(tmp_path):
+    inputs, spec, _, adapter, out, _ = gemma(tmp_path, "darwin", [])
+    with pytest.raises(ValueError, match="RAM-only model"):
+        resolved(
+            inputs,
+            replace(spec, context=32768),
+            adapter,
+            out,
+            "darwin",
+            memory=ram.WORKSPACE_BYTES + (20 << 20),
+        )
+
+
 @pytest.mark.parametrize(
     "extra",
     [

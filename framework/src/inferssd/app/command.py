@@ -47,7 +47,11 @@ def add_commands(commands: argparse._SubParsersAction[argparse.ArgumentParser]) 
                 "0.0.0.0 also accepts other devices on your network",
             )
         parser.add_argument("--port", type=int, default=8080)
-        parser.add_argument("--context", type=int, default=8192)
+        parser.add_argument(
+            "--context",
+            type=int,
+            help="context in tokens (default: 65536, within the model's trained context)",
+        )
         parser.add_argument(
             "--settings", type=Path, help="typed settings file (see docs/configuration.md)"
         )
@@ -95,7 +99,7 @@ def run(args: argparse.Namespace) -> int:
     from inferssd.app.chat import chat
     from inferssd.engine.command import run_native
 
-    if not 1 <= args.port <= 65535 or args.context < 1:
+    if not 1 <= args.port <= 65535 or (args.context is not None and args.context < 1):
         raise ValueError("port must be 1..65535; context must be positive")
     # Terminal chat talks to its own server, so only serve listens beyond this machine.
     host = listen_host(args.host) if args.command == "serve" else LOOPBACK
@@ -148,11 +152,11 @@ def run(args: argparse.Namespace) -> int:
         host,
         "--port",
         str(args.port),
-        "--context",
-        str(args.context),
         "--output-dir",
         str(state / "runs" / uuid.uuid4().hex),
     ]
+    if args.context is not None:
+        command.extend(["--context", str(args.context)])
     for name in ("settings", "machine"):
         if getattr(args, name):
             command.extend(["--" + name, str(getattr(args, name))])

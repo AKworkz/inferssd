@@ -64,26 +64,15 @@ struct kimi_vram_tier_api {
                   char * error, size_t error_size);
     int (*cancel)(void * context, char * error, size_t error_size);
 };
-// Optional extension, separate from transport ABI 2. acquire may only follow a
-// successful finish. It pins each returned ready copy while RAM decides whether
-// to drop its duplicate; pending uploads never count as ready. The caller owns
-// all metadata under the sink run mutex and must release its CPU/I/O/DMA leases
-// before committing a RAM drop. No begin/prepare may occur with a live lease.
-// held (version 2): which of `count` experts of `layer` the tier holds now (out[i] 1 or 0): a slot has its bytes,
+// Optional extension, separate from transport ABI 2.
+// held (version 3): which of `count` experts of `layer` the tier holds now (out[i] 1 or 0): a slot has its bytes,
 // or is reserved for a deferred upload of them that the layer's next prepare collects first, so that prepare would
 // pin it as a hit. A seed counts from its publication: a prefill's planned seeds when the decode phase completes the
-// prefill, Q2's cold-prefill admission right after its copy. No lease and any phase: the next-layer prefetch asks
-// before it reads an expert into RAM, and the answer may change at the next admission, eviction or resize.
-struct kimi_vram_ready_lease { uint64_t epoch, generation; };
+// prefill, Q2's cold-prefill admission right after its copy. Any phase: the next-layer prefetch asks before it reads
+// an expert into RAM, and the RAM cache before it takes a slot (its copy of an expert the tier holds goes first); the
+// answer may change at the next admission, eviction or resize.
 struct kimi_vram_residency_api {
-    uint32_t version, size;   // 2
-    int (*acquire)(void * context, uint64_t epoch, const struct kimi_vram_request * requests,
-                   int count, struct kimi_vram_ready_lease * lease, int * ready,
-                   char * error, size_t error_size);
-    int (*validate)(void * context, const struct kimi_vram_ready_lease * lease,
-                    char * error, size_t error_size);
-    int (*release)(void * context, const struct kimi_vram_ready_lease * lease,
-                   char * error, size_t error_size);
+    uint32_t version, size;   // 3
     void (*held)(void * context, int32_t layer, const int32_t * experts, int count, uint8_t * out);
 };
 // Optional explicit-format extension, separate from transport ABI 2. The ABI 2
@@ -263,20 +252,19 @@ struct kimi_vram_prefill_api {
                       int * admitted, char * error, size_t error_size);
     // The format's lane, after prepare (which initializes the format on a cold prefill). Read-only.
     void (*lane)(void * context, struct kimi_vram_prefill_lane * lane);
-    // Version 10, the seeds of a prefill the CPU sink runs, as a graph prefill's are seeded. seed_routes gives the
-    // routes of each request of the next prepare's union (index-aligned with its requests); that prepare reserves the
-    // layer's share of the empty slots for the experts the pass routes most, before it leases its residents. The tier
-    // copies a seed its prefill lane computes from the bytes it reads; seed_host copies one the CPU computes from its
-    // payload (request_index into the prepared union), which stays valid until seed_wait returns for that request.
-    // The seeds are published as a graph prefill's are, when the decode phase completes the prefill, or at the first
-    // decode token begun without that completion; a block given back or a cancelled prefill drops them.
+    // Version 10, the seeds of a prefill the CPU sink runs: empty slots filled with the experts it routes most.
+    // seed_routes gives the routes of each request of the next prepare's union (index-aligned with its requests); that
+    // prepare reserves the layer's share of the empty slots for the experts the pass routes most, before it leases its
+    // residents. The tier copies a seed its prefill lane computes from the bytes it reads; seed_host copies one the CPU
+    // computes from its payload (request_index into the prepared union), which stays valid until seed_wait returns for
+    // that request. The seeds are published when the decode phase completes the prefill, or at the first decode token
+    // begun without that completion; a block given back or a cancelled prefill drops them.
     int (*seed_routes)(void * context, const int32_t * routes, int count, char * error, size_t error_size);
     int (*seed_host)(void * context, int32_t request_index, const void * up, const void * gate, const void * down,
                      char * error, size_t error_size);
     int (*seed_wait)(void * context, int32_t request_index, char * error, size_t error_size);
 };
-// Optional deferred-upload extension (GGML_KIMI_CPU_SINK_VRAM_DEFERRED_UPLOAD=1 in the tier and its CPU owner,
-// with ASYNC_UPLOAD=1). admit replaces ABI 2 admit for a borrowed RAM source, but the upload may outlive finish:
+// Optional deferred-upload extension (deferred and async uploads on in the tier and its CPU owner). admit replaces ABI 2 admit for a borrowed RAM source, but the upload may outlive finish:
 // when *queued is 1 the caller keeps that source unchanged and leased until collect returns the request, and the
 // reserved GPU slot is never evicted meanwhile. collect runs outside prepare..finish and without a live residency
 // lease, except with KIMI_VRAM_COLLECT_IF_IDLE. It waits for the in-flight uploads of wait_layer (>= 0) or as named
@@ -306,7 +294,7 @@ struct kimi_vram_deferred_api {
 // reserve; phase_complete(true) runs only after the decode graph is reserved
 // and grows best-effort into currently free device memory.
 struct kimi_vram_elastic_api {
-    uint32_t version, size;   // 4 (kimi_vram_expert_format with per-layer types)
+    uint32_t version, size;   // 5 (preload)
     int (*phase_complete)(void * context, int decode, char * error, size_t error_size);
     // Reserve the actual grouped-prefill accumulator before starting streamed I/O.
     int (*reserve_accumulate)(void * context, int tokens, char * error, size_t error_size);
@@ -316,6 +304,14 @@ struct kimi_vram_elastic_api {
     // The request gives the role bytes (one expert of a routed layer), format the geometry.
     int (*reserve)(void * context, const struct kimi_vram_request * request,
                    const struct kimi_vram_expert_format * format, char * error, size_t error_size);
+    // At load, after the load's passes, before any request: preload_slots grows a tier made at load into the card if
+    // its memory has settled, then gives in *slots how many slots no entry holds. preload copies one expert no
+    // request has named (request: its key and role bytes) from host memory into one of them, preloaded: any lookup
+    // finds it, and every allocation may take its slot as if it were empty until a request uses it. *copied is 0 when
+    // no slot is empty or the tier holds the expert already.
+    int (*preload_slots)(void * context, int * slots, char * error, size_t error_size);
+    int (*preload)(void * context, const struct kimi_vram_request * request, const void * up, const void * gate,
+                   const void * down, int * copied, char * error, size_t error_size);
 };
 // Optional decode extension: the GPU computes experts that sit in host memory (a RAM cache slot or a ring
 // buffer). How depends on the device, and costs2 says which:
@@ -335,7 +331,7 @@ struct kimi_vram_elastic_api {
 // ranges. Both return 0 and do nothing where the device reads host memory in place. Either may run on any thread;
 // a registration holds the driver for about a millisecond per 19 MB and delays other threads' CUDA calls meanwhile.
 // The measured lines are those of every copy and every vector-engine call the tier makes, decode's and grouped
-// prefill's alike: the caller prices both from them (kimi-prefill-cost.h, kimi_place_table).
+// prefill's alike: the caller prices both from them (ggml-ssd/place/layer-plan.h, kimi_place_table).
 struct kimi_vram_host_job { int32_t row; float weight; const void * role[3]; };
 // The measured lines of the host path (microseconds; 0 until measured).
 struct kimi_vram_host_costs {
@@ -368,10 +364,10 @@ struct kimi_vram_host_api {
     void (*costs2)(void * context, struct kimi_vram_host_costs * costs);
 };
 // Optional extension, the sink's side of the tier's decisions.
-// set_miss_cost: the measured cost of an expert the tier does not hold (microseconds: the slower of its
-// compute and its share of the layer's SSD reads). The tier admits an expert when the hits it can expect to
-// earn are worth more than its upload: selection count > upload / (hits per count x (miss cost - hit
-// cost)), from its own measured upload time and hit history.
+// set_miss_cost (version 5): what a decode layer's use of an expert the tier does not hold costs, in microseconds,
+// by where it comes from: the RAM cache (its compute) and the drive (the slower of its compute and its share of the
+// layer's drive reads); 0 for one the layer did not have. The tier prices its replacements with them
+// (vram_slot_table::candidate_saving).
 // set_host_demand: host memory the sink may still commit (its RAM cache's mapped but not yet resident
 // slots). On unified memory the tier keeps it free, with the host floor, instead of taking it first.
 // set_host_floor: the floor of the sink's host-memory ledger (file reserve + margin + explicit reserves). On
@@ -387,14 +383,18 @@ struct kimi_vram_host_api {
 // calls itself. The tier moves its threads there, or places them there when it starts them; until the first call they
 // keep the CPUs of the thread that started them. The sink calls it at its first layer on the tier and again when the
 // coordinator's CPUs change.
+// set_ram_holds (version 5): the sink's RAM cache, which keeps its copy of an expert the tier takes (a backup it
+// drops first when it needs the slot): holds(arg, layer, expert) is nonzero while it has a copy. The tier asks it on
+// the sink's thread, in a decode layer's prepare, to price a replacement (vram_slot_table::ram_copy).
 struct kimi_vram_policy_api {
-    uint32_t version, size;   // 4
-    void (*set_miss_cost)(void * context, double miss_us);
+    uint32_t version, size;   // 5
+    void (*set_miss_cost)(void * context, double ram_us, double drive_us);
     void (*set_host_demand)(void * context, uint64_t bytes);
     void (*set_host_floor)(void * context, uint64_t bytes);
     int (*reclaim_host)(void * context, uint64_t bytes);
     uint64_t (*host_bytes)(void * context);
     int (*set_thread_cpus)(void * context, const int * cpus, int count, char * error, size_t error_size);
+    void (*set_ram_holds)(void * context, int (*holds)(void * arg, int32_t layer, int32_t expert), void * arg);
 };
 #ifdef __cplusplus
 extern "C" {

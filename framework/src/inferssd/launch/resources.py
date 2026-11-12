@@ -56,6 +56,25 @@ def data_directory(
     return home / ".local/share/inferssd"
 
 
+def cache_directory(
+    environ: Mapping[str, str] = os.environ,
+    home: Optional[Path] = None,
+    platform: Optional[str] = None,
+) -> Path:
+    """Where this user's inferssd caches live: the prompt caches and the expert indexes."""
+    home = home or Path.home()
+    name = platform or host_platform()
+    if name == "darwin":
+        root = home / "Library" / "Caches"
+    elif name == "windows":
+        local = environ.get("LOCALAPPDATA")
+        root = Path(local) if local else home / "AppData" / "Local"
+    else:
+        cache = environ.get("XDG_CACHE_HOME")
+        root = Path(cache) if cache else home / ".cache"
+    return root / "inferssd"
+
+
 def installed_resources(
     environ: Mapping[str, str] = os.environ, home: Optional[Path] = None
 ) -> Path:

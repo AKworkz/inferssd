@@ -20,7 +20,7 @@ from inferssd.launch.machine import MachineSource
 from inferssd.launch.machine import characteristics as machine_characteristics
 from inferssd.launch.prepare import prepare
 from inferssd.launch.recorded import run_indexer
-from inferssd.launch.resources import probe_paths, server_binary
+from inferssd.launch.resources import cache_directory, probe_paths, server_binary
 from inferssd.launch.typed import (
     LOOPBACK,
     LaunchSpec,
@@ -96,6 +96,7 @@ class Runtime:
             replace=os.replace,
             python=sys.executable,
             machine=self.characteristics(specification),
+            index_cache=cache_directory(dict(inputs.environment)) / "expert-index",
         )
         value = prepare(
             inputs,

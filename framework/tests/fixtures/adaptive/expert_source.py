@@ -14,7 +14,7 @@ usage: expert_source.py index MODEL [PACK] DIR   -> DIR/experts.json (+ DIR/expe
        expert_source.py facts MODEL [ALIAS]    -> what run-ssd-llama.sh derives settings from, as shell assignments:
                                                   expert_types (the experts' ggml types), alias_unaligned (entries
                                                   of ALIAS, a GGUF alias index, that do not start on a PAGE boundary)
-       expert_source.py lane-args DIR          -> the arguments of test-kimi-vram-group --time for the experts DIR
+       expert_source.py lane-args DIR          -> the arguments of test-ssd-vram-group --time for the experts DIR
                                                   indexes: --latent L --hidden H --up TYPE --down TYPE (the routed
                                                   experts' shape, and each role's most common type over the layers)
        expert_source.py dense MODEL HOMES OUT  -> OUT, the alias index of the dense matrices HOMES (tensor<TAB>ram|drive

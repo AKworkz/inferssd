@@ -944,7 +944,7 @@ int main(int argc, char ** argv) {
             else if (arg == "--cache-lifecycle") { cache_lifecycle = true; }
             else if (arg == "--cache-retention") { cache_retention = true; }
             else if (arg == "--cache-prefill-read") { cache_prefill_read = true; }
-            else { throw std::runtime_error("usage: test-kimi-cpu-prefill [--cache-lifecycle] [--threads N --ring-experts N] [--fixture KEY=VALUE] [--real-pack FILE --fixture-prefix PREFIX --start-token N --tokens 1..64 --mode grouped|per-token|both --warmup N --repeats N --jsonl FILE]"); }
+            else { throw std::runtime_error("usage: test-ssd-cpu-prefill [--cache-lifecycle] [--threads N --ring-experts N] [--fixture KEY=VALUE] [--real-pack FILE --fixture-prefix PREFIX --start-token N --tokens 1..64 --mode grouped|per-token|both --warmup N --repeats N --jsonl FILE]"); }
         }
         require(o.threads >= 2 && o.threads <= 128 && o.ring >= 1 && o.ring <= 32 &&
                 o.repeats >= 1 && o.repeats <= 1000 && o.warmup >= 0 && o.warmup <= 1000, "invalid thread/ring/repeat count");

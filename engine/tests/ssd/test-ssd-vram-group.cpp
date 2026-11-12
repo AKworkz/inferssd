@@ -37,7 +37,7 @@
 // when its busy chain is no longer than the longer of the copy and the chain from device memory. Needs an owned GPU and
 // the tier DSO preloaded; not registered with ctest.
 #define main original_sink_test_main
-#include "test-kimi-cpu-sink.cpp"
+#include "test-ssd-cpu-sink.cpp"
 #undef main
 #include "vram-compute-api.h"
 

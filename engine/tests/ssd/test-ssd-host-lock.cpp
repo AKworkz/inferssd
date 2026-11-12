@@ -1,4 +1,4 @@
-// The CPU sink's registrar alone (ggml/src/ggml-cpu/kimi-host-lock.h), with fake page-locking that records its calls:
+// The CPU sink's registrar alone (ggml/src/ggml-ssd/host/page-lock.h), with fake page-locking that records its calls:
 // nothing is page-locked outside an offer in the drive's shadow; before a range of slots loses its pages every locked
 // slot of it is unlocked, a hand-off not yet taken is withdrawn and a registration in flight is waited for; a refused
 // registration leaves the slot pageable; the rent-or-buy rule.

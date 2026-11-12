@@ -567,7 +567,14 @@ int elastic_reserve(void * context, const kimi_vram_request *, const kimi_vram_e
     self(context)->learn_format(*format);
     return 0;
 }
-const kimi_vram_elastic_api elastic_table = { 4, sizeof(kimi_vram_elastic_api), elastic_phase_complete, elastic_reserve_accumulate, elastic_reserve };
+// The graph lane keeps no expert of its own: nothing to preload.
+int elastic_preload_slots(void *, int * slots, char *, size_t) { *slots = 0; return 0; }
+int elastic_preload(void *, const kimi_vram_request *, const void *, const void *, const void *, int * copied, char *, size_t) {
+    *copied = 0;
+    return 0;
+}
+const kimi_vram_elastic_api elastic_table = { 5, sizeof(kimi_vram_elastic_api), elastic_phase_complete, elastic_reserve_accumulate,
+    elastic_reserve, elastic_preload_slots, elastic_preload };
 
 int host_available(void *) { return 0; }
 int host_launch(void *, const kimi_vram_host_job *, int, int * accepted, char *, size_t) { *accepted = 0; return 0; }

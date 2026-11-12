@@ -181,10 +181,8 @@ void llama_ssd_context::attach_backend(ggml_backend_t backend) {
     const auto * transport = provider->transport;
     if (transport && (transport->version != 1 || transport->size != sizeof(*transport) ||
             transport->runtime_services_size != sizeof(services) || !transport->create ||
-            !transport->quiesce || !transport->destroy || !transport->copy_ranges ||
-            !transport->dense_has || !transport->dense_prepare || !transport->dense_read_ahead ||
-            !transport->dense_copy || !transport->seed_register || !transport->seed_unregister ||
-            !transport->seed_offer || !transport->seed_fence)) {
+            !transport->quiesce || !transport->destroy || !transport->dense_has || !transport->dense_prepare ||
+            !transport->dense_read_ahead || !transport->dense_copy)) {
         throw std::runtime_error("GPU backend has no compatible context transport table");
     }
     const int device = provider->device_ordinal(backend);

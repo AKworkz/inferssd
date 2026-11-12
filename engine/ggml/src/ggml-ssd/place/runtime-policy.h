@@ -8,7 +8,9 @@
 #include <array>
 #include <cmath>
 #include <deque>
+#include <cstdint>
 #include <utility>
+#include <vector>
 
 namespace ssd { namespace place {
 
@@ -94,9 +96,16 @@ inline double overhead_row_prior(const cost_lines & prior, const lane_geometry &
     const double us_per_mb = locked_us_per_mb > 0.0 ? locked_us_per_mb : 1e3 / prior.link_gbps;
     return (double(lane.token_bytes) + double(lane.output_bytes)) / 1e6 * us_per_mb;
 }
+// The drive's prefill sample: the newest layer with reads. A layer reads hundreds of experts, which fix the drive's
+// rate to about 2%, and a drive changes speed at once (a throttled volume, a hot drive), so an older layer can only
+// make the line late. On the RTX 5090 VM, replaying 40 servers' 1,754 layers, the newest layer alone predicted the next
+// layer's reads within 4.0% on average at a steady rate, against 28% for the pass's 40 layers, and within 56% just
+// after a slow span, against 113%.
 inline void prefill_reads(const prefill_learning & s, kimi_prefill_fit & drive) {
-    for (const auto & x : s.samples) {
-        if (x.read_bytes > 0.0 && x.read_us > 0.0) { drive.add(x.read_bytes / 1e6, x.read_us); }
+    const size_t n = s.samples.size();
+    for (size_t k = 0; k < n; ++k) {
+        const auto & x = s.samples[(s.next + n - 1 - k) % n];
+        if (x.read_bytes > 0.0 && x.read_us > 0.0) { drive.add(x.read_bytes / 1e6, x.read_us); return; }
     }
 }
 inline kimi_place_table make_table(const cost_lines & s, const cost_lines & prior,
@@ -192,6 +201,27 @@ inline prefetch_plan plan_prefetch(int layer, int hint_layer, int hint_n, int to
     const bool hinted = hint_n && hint_layer == layer + 1;
     return {layer + 1, hinted ? std::min(topk, hint_n) : 0, hinted, !demand_reads};
 }
+// How likely the next layer selects a novel expert of a hint rank: the share of the rank's novel experts it selected,
+// by the rule of succession (no evidence: one half).
+inline double prefetch_use_probability(uint64_t selected, uint64_t novel) {
+    return (double(selected) + 1.0) / (double(novel) + 2.0);
+}
+// What a speculative read of an expert is worth, in reads of it: p the chance the next layer uses the expert,
+// start_us when the read starts after the drive's idle window opens, read_us how long it takes, windows the idle
+// windows seen (length in us, weight). A window that ends after the read saves a read if the expert is used. One
+// that ends during it, a share r of the read left: the done part (1 - r) is saved if the expert is used, and the
+// rest takes r of a read's drive time from the demand reads if it is not, p (1 - r) - (1 - p) r = p - r. One that ends
+// before the read starts drops it, at no cost. No window seen yet: p.
+inline double prefetch_read_value(double p, double start_us, double read_us,
+        const std::vector<std::pair<double, double>> & windows) {
+    double value = 0, weight = 0;
+    for (const auto & w : windows) {
+        weight += w.second;
+        if (w.first >= start_us + read_us) { value += w.second * p; }
+        else if (w.first > start_us) { value += w.second * (p - (start_us + read_us - w.first) / read_us); }
+    }
+    return weight > 0 ? value / weight : p;
+}
 struct prefetch_rank { bool novel, skipped, request; };
 inline prefetch_rank plan_prefetch_rank(int32_t expert, bool held, bool cached, int rank, int topk) {
     return {expert >= 0 && !held && !cached, expert >= 0 && held && rank < topk, expert >= 0 && !held && rank < topk};
@@ -261,93 +291,51 @@ struct prefill_input {
     const std::vector<int> & routes;
     const std::vector<kimi_place_item> & items;
     const kimi_place_table & table;
-    int ntokens, ram_threshold, ssd_threshold, ssd_cap;
+    int ntokens;
     size_t ssd_staging_limit, ring_slots;
-    bool makespan;
 };
 struct prefill_candidates {
-    std::vector<prefill_choice> ranked;
     size_t ram_candidates = 0, ssd_candidates = 0, ssd_limit = 0;
 };
-inline prefill_candidates rank_prefill(const prefill_input & in, uint64_t & candidate_count) {
+// The experts a layer could move to the GPU: from a leased RAM entry, or from the drive.
+inline prefill_candidates count_prefill(const prefill_input & in, uint64_t & candidate_count) {
     const auto & source = in.experts;
-    const auto & token_routes = in.routes;
-    const auto ram_movable = [&](size_t i) {
-        return in.ram_threshold && source[i].ram && source[i].leased && token_routes[i] >= in.ram_threshold;
-    };
-    const auto ssd_movable = [&](size_t i) {
-        return in.ssd_threshold && !source[i].ram && token_routes[i] >= in.ssd_threshold;
-    };
     prefill_candidates out;
-    auto & candidates = out.ranked;
     for (size_t i = 0; i < source.size(); ++i) {
-        if (source[i].resident) { continue; }
-        if (ram_movable(i)) { candidates.push_back({i, 0}); ++out.ram_candidates; }
-        else if (ssd_movable(i)) { candidates.push_back({i, 1}); ++out.ssd_candidates; }
+        if (source[i].resident || in.routes[i] <= 0) { continue; }
+        if (source[i].ram && source[i].leased) { ++out.ram_candidates; }
+        else if (!source[i].ram) { ++out.ssd_candidates; }
     }
-    // Publish this scalar at the same point, including when stable_sort throws.
     candidate_count = out.ssd_candidates;
-    std::stable_sort(candidates.begin(), candidates.end(), [&](const prefill_choice & a, const prefill_choice & b) {
-        if (token_routes[a.index] != token_routes[b.index]) { return token_routes[a.index] > token_routes[b.index]; }
-        if (a.source != b.source) { return a.source < b.source; }
-        return source[a.index].id < source[b.index].id;
-    });
-    out.ssd_limit = in.ssd_cap < 0 ? in.ssd_staging_limit : std::min(in.ssd_staging_limit, size_t(in.ssd_cap));
+    out.ssd_limit = in.ssd_staging_limit;
     return out;
 }
-inline prefill_selection plan_prefill(const prefill_input & in, const prefill_candidates & ranked, bool & in_place) {
+inline prefill_selection plan_prefill(const prefill_input & in, const prefill_candidates & counted, bool & in_place) {
     const auto & source = in.experts;
-    const auto & token_routes = in.routes;
     const auto & table = in.table;
-    const auto & candidates = ranked.ranked;
     prefill_selection out;
-    out.ram_candidates = ranked.ram_candidates; out.ssd_candidates = ranked.ssd_candidates;
-    out.ssd_limit = ranked.ssd_limit;
-    if (in.makespan) {
-        kimi_place_limits limits;
-        limits.reads = out.ssd_limit;
-        out.placed = kimi_place_layer(table, in.ntokens, in.ring_slots, in.items.data(), in.items.size(), limits);
-        in_place = !table.one(in.ntokens) && out.placed.in_place;
-        for (size_t i : out.placed.moved) { out.chosen.push_back({ i, source[i].ram ? 0 : 1 }); }
-        out.time_before = out.placed.time_none; out.time_after = out.placed.time; out.in_ring = out.placed.ring;
-        for (size_t i = 0; i < source.size(); ++i) {
-            if (!source[i].resident) { out.cpu_before += table.cpu(in.ntokens, token_routes[i]); }
-        }
-        out.cpu_after = out.placed.cpu; out.gpu_after = out.placed.gpu_lane; out.link_after = out.placed.link;
-    } else {
-        const auto cpu_cost = [](int routes) { return routes ? 70.0 + 95.0 * routes : 0.0; };
-        const auto gpu_cost = [](int routes) { return routes ? 55.0 + 7.0 * routes : 0.0; };
-        const auto upload_cost = [](uint64_t bytes) { return double(bytes) / 6740.0 + 10.0; };
-        for (size_t i = 0; i < source.size(); ++i) {
-            if (source[i].resident) { out.gpu_before += gpu_cost(token_routes[i]); }
-            else { out.cpu_before += cpu_cost(token_routes[i]); }
-        }
-        double cpu_backlog = out.cpu_before, gpu_backlog = out.gpu_before;
-        out.time_before = std::max(cpu_backlog, gpu_backlog);
-        size_t ssd_selected = 0;
-        for (const prefill_choice & item : candidates) {
-            if (item.source == 1 && ssd_selected >= out.ssd_limit) { continue; }
-            const int routes = token_routes[item.index];
-            const double old_makespan = std::max(cpu_backlog, gpu_backlog);
-            const double next_cpu = cpu_backlog - cpu_cost(routes);
-            const double next_gpu = gpu_backlog + gpu_cost(routes) + upload_cost(source[item.index].bytes);
-            if (std::max(next_cpu, next_gpu) + std::max(50.0, old_makespan * 0.02) >= old_makespan) { continue; }
-            cpu_backlog = next_cpu; gpu_backlog = next_gpu;
-            ssd_selected += item.source == 1;
-            out.chosen.push_back(item);
-        }
-        out.time_after = std::max(cpu_backlog, gpu_backlog);
-        out.cpu_after = cpu_backlog; out.gpu_after = gpu_backlog;
+    out.ram_candidates = counted.ram_candidates; out.ssd_candidates = counted.ssd_candidates;
+    out.ssd_limit = counted.ssd_limit;
+    kimi_place_limits limits;
+    limits.reads = out.ssd_limit;
+    out.placed = kimi_place_layer(table, in.ntokens, in.ring_slots, in.items.data(), in.items.size(), limits);
+    in_place = !table.one(in.ntokens) && out.placed.in_place;
+    for (size_t i : out.placed.moved) { out.chosen.push_back({ i, source[i].ram ? 0 : 1 }); }
+    out.time_before = out.placed.time_none; out.time_after = out.placed.time; out.in_ring = out.placed.ring;
+    for (size_t i = 0; i < source.size(); ++i) {
+        if (!source[i].resident) { out.cpu_before += table.cpu(in.ntokens, in.routes[i]); }
     }
+    out.cpu_after = out.placed.cpu; out.gpu_after = out.placed.gpu_lane; out.link_after = out.placed.link;
     return out;
 }
 
-inline double miss_cost(size_t ram, size_t ssd, double cpu_expert_us, double io_us,
-        bool in_place, double host_expert_us) {
+// What a decode use of an expert outside the GPU tier costs: from the RAM cache, its compute by the faster processor
+// that can take it; from the drive, no less than its share of the layer's reads (io_us over its `ssd` drive experts).
+struct expert_use_costs { double ram_us = 0, drive_us = 0; };
+inline expert_use_costs miss_costs(size_t ssd, double cpu_expert_us, double io_us, bool in_place, double host_expert_us) {
     double compute = cpu_expert_us;
     if (in_place && host_expert_us > 0) { compute = std::min(compute, host_expert_us); }
-    const double read = ssd ? io_us / double(ssd) : 0.0;
-    return (double(ram) * compute + double(ssd) * std::max(compute, read)) / double(ram + ssd);
+    return { compute, ssd ? std::max(compute, io_us / double(ssd)) : 0.0 };
 }
 
 }} // namespace ssd::place

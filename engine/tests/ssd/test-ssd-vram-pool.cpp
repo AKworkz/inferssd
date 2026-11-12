@@ -64,12 +64,12 @@ int main() { try {
     publish(pool);rejected([&]{pool.clear();});
     pool.slots[pinned].native_refs=0;
     int ready[2]={};kimi_vram_request lookup[]={a,c};
-    const auto generation=pool.acquire_ready(lookup,2,ready);
-    require(ready[0] && ready[1],"global ready lookup lost a layer identity");
+    const auto generation=pool.acquire_slots(lookup,2,ready);
+    require(ready[0]>=0 && ready[1]>=0,"global lookup lost a layer identity");
     rejected([&]{pool.prepare(&b,1);});pool.release_ready(generation);
     lookup[0].layer=2;lookup[1].role[0].ctime_ns++;
-    const auto stale=pool.acquire_ready(lookup,2,ready);
-    require(!ready[0] && !ready[1],"global lookup accepted wrong layer or stale payload");
+    const auto stale=pool.acquire_slots(lookup,2,ready);
+    require(ready[0]<0 && ready[1]<0,"global lookup accepted wrong layer or stale payload");
     pool.release_ready(stale);
 
     // Global logical slots grow and shrink at block boundaries without
@@ -79,7 +79,7 @@ int main() { try {
     require(pool.slots.size()==6 && pool.layers[1].count==6 && pool.layers[2].count==6,
             "global grow did not publish every slot to every layer");
     require(pool.layers[1].counts[0]==retained_heat,"global grow reset selection heat");
-    const auto resize_lease=pool.acquire_ready(&c,1,ready);
+    const auto resize_lease=pool.acquire_slots(&c,1,ready);
     rejected([&]{pool.resize_global(2);});pool.release_ready(resize_lease);
     pool.slots[5].uploading=true;rejected([&]{pool.resize_global(5);});pool.slots[5].uploading=false;
     pool.resize_global(2);
@@ -112,8 +112,8 @@ int main() { try {
         publish(slow);publish(legacy);
     }
     // Prefill seeds take only empty slots and never evict. Their selection count is zero, so the unused ones are
-    // decode's first victims; they stay out of the earned statistics; the ones decode never selected are freed
-    // before the next prefill. A seed decode selects becomes an ordinary entry admitted at that selection's count.
+    // decode's first victims; the ones decode never selected are freed before the next prefill. A seed decode
+    // selects becomes an ordinary entry.
     {
         vram_slot_table t(3,{1},true,0,true,16);
         t.next_token();
@@ -125,18 +125,11 @@ int main() { try {
         t.publish_cold_prefill(size_t(s7),r7);t.publish_cold_prefill(size_t(s8),r8);
         require(t.slots[size_t(s7)].seed && t.layers[1].counts[7]==0 && t.layers[1].counts[8]==0,"a seed changed decode's counts");
         t.next_token();t.prepare(&r7,1);require(t.hits[0]==s7,"decode missed a published seed");publish(t);
-        require(!t.slots[size_t(s7)].seed && t.slots[size_t(s7)].admit_count==t.mature(1) && t.slots[size_t(s7)].hits_since_admit==0,
-                "a seed decode selected did not become an entry admitted at that selection");
+        require(!t.slots[size_t(s7)].seed,"a seed decode selected did not become an ordinary entry");
         t.next_token();t.prepare(&r7,1);require(t.hits[0]==s7,"decode missed the former seed");publish(t);
-        t.refresh_expected();
-        // r5 and r7 are recorded at count 1 over the table's memory (one and two tokens old: the last step), with
-        // one hit between them; the unused seed (count 0) would lower step 0
-        require(t.expected[0]==0.125 && t.expected[4]==1.125 &&
-                vram_slot_table::earned_step(t.slots[size_t(s7)].admit_count)==vram_slot_table::earned_steps-1,
-                "the unused seed entered the earned statistics, or the selected one did not");
         t.next_token();t.prepare(&r9,1);
         require(t.admissions[0]==s8,"decode did not evict the unused seed first");publish(t);
-        require(t.earned_samples==0 && !t.slots[size_t(s8)].seed,"an evicted seed entered the earned statistics");
+        require(!t.slots[size_t(s8)].seed,"the slot of an evicted seed is still a seed");
         t.next_token();
         const int s10=t.reserve_cold_prefill(request(1,10));
         require(s10<0,"a seed evicted a decode entry");
@@ -146,6 +139,43 @@ int main() { try {
         u.next_token();u.prepare(&r7,1);publish(u);
         require(u.free_unused_seeds()==1 && !u.slots[size_t(b)].valid && u.slots[size_t(a)].valid,
                 "only the seed decode never selected is freed");
+    }
+    // Preloads (filled at load, no request having named their experts): held like any entry. A prefill's pass makes
+    // the ones it routes in a layer seeds of its prompt (adopt_preloaded); its seeds take the others of the layers it
+    // has reached as if empty, never those of a layer ahead of it. A decode miss takes one as if empty, at the price
+    // of an empty slot; decode's first selection of one makes it an ordinary entry.
+    {
+        vram_slot_table t(4,{1,2},true,0,true,16);
+        const auto p1=request(1,1),p2=request(1,2),p3=request(2,3),p4=request(2,4);
+        for (const auto & r : {p1,p2,p3,p4}) {
+            const int s=t.reserve_preload(r);require(s>=0,"no empty slot for a preload");t.publish_cold_prefill(size_t(s),r);
+        }
+        require(t.empty_slots()==0 && t.holds(1,1) && t.holds(2,4) && t.slots[0].preloaded && !t.slots[0].seed,
+                "preloads are not held, preloaded entries");
+        require(t.reserve_preload(request(1,5))<0,"a preload took a preloaded slot");
+        holds_match(t,"held differs from the slots after preloads");
+        t.adopt_preloaded(&p1,1);
+        const auto valid=[](const vram_slot_table::entry & e){return e.valid;};
+        const int s1=t.find(p1,valid);
+        require(s1>=0 && t.slots[size_t(s1)].seed && !t.slots[size_t(s1)].preloaded,"a routed preload did not become a seed");
+        require(t.free_slots(1)==1 && t.free_slots(2)==3,"the slots a seed may take do not follow the pass's layers");
+        const auto r9=request(1,9);
+        const int s9=t.reserve_cold_prefill(r9);
+        require(s9>=0 && !t.holds(1,2) && t.holds(2,3) && t.holds(2,4) && t.reserve_cold_prefill(request(1,10))<0,
+                "a seed took a slot of a layer ahead of its pass, or not the unused preload of its own");
+        t.publish_cold_prefill(size_t(s9),r9);
+        t.candidate_saving=t.ram_saving=100;t.drive_saving=1000;
+        t.next_token();
+        const auto r6=request(2,6);t.prepare(&r6,1);
+        require(t.admissions[0]>=0 && t.slots[size_t(t.admissions[0])].key.expert==6 && (t.holds(2,3)!=t.holds(2,4)),
+                "a decode miss did not take a preloaded slot as if empty");
+        publish(t);
+        const auto left=t.holds(2,3)?p3:p4;
+        t.next_token();t.prepare(&left,1);
+        require(t.hits[0]>=0 && !t.slots[size_t(t.hits[0])].preloaded && !t.slots[size_t(t.hits[0])].seed,
+                "decode's first selection of a preload did not make it an ordinary entry");
+        publish(t);
+        holds_match(t,"held differs from the slots after preloads were used");
     }
     // What the tier holds, for the next-layer prefetch: admissions once published, not their victims; deferred
     // uploads from their reservation, until a block given back drops them; seeds from their publication, not while
@@ -193,38 +223,68 @@ int main() { try {
         t.abort();require(!t.holds(1,5) && !t.holds(2,3),"abort kept what the tier held");holds_match(t,"held differs after abort");
         require(!t.holds(0,1) && !t.holds(7,1) && !t.holds(1,-1) && !t.holds(1,999),"held answered outside the table");
     }
-    // A young table's counts read low: after two tokens an expert has at most 1.96 selections, where one selected
-    // every token reaches about 23 (half-life 16). Where counts meet what admissions earned they are taken over the
-    // table's memory. Four experts admitted at count 1 in the second token, priced as on an RTX 5060 Ti (0.59 hits an
-    // upload), turn out hot: hit in each of the next 30 tokens. They are recorded with the hottest counts, so the
-    // expected hits of a count-1 admission stay the prior's, and in the mature table a new count-1 miss priced at 2
-    // hits is refused (recorded at count 1 they made it 15.6). The fixed minimum count keeps raw counts: the first
-    // token admits nothing at 2.5, though one selection is 23.6 over the memory.
+    // Decode's replacements, priced by what a use of an expert saves when the tier serves it: a candidate's
+    // (candidate_saving), and a victim's against its RAM copy where the RAM cache keeps one (ram_saving), else against
+    // the drive (drive_saving). Before the prices are measured only the fixed minimum count takes a free slot; then
+    // any expert does, and a full table replaces its least used entry when count x candidate_saving exceeds that
+    // entry's count x its saving. Where the tier saves a candidate nothing it admits nothing.
     {
-        vram_slot_table t(8,{1},true,2.5,true,16);
-        kimi_vram_request first[4],cohort[4];
-        for(int i=0;i<4;++i){first[i]=request(1,i);cohort[i]=request(1,4+i);}
-        t.next_token();t.prepare(first,4);
-        require(std::all_of(t.admissions.begin(),t.admissions.end(),[](int a){return a<0;}) &&
-                std::fabs(t.mature(1)-1/(1-std::exp2(-1.0/16)))<1e-12,"the minimum count was taken over the table's memory");
-        publish(t);
-        t.admission_hits=0.59;t.refresh_expected();
-        t.next_token();t.prepare(cohort,4);
-        require(std::all_of(t.admissions.begin(),t.admissions.end(),[](int a){return a>=0;}),
-                "a young table refused count-1 misses into free slots at 0.59 hits an upload");
-        publish(t);
-        for(int i=0;i<4;++i)
-            require(vram_slot_table::earned_step(t.slots[size_t(i)].admit_count)==vram_slot_table::earned_steps-1,
-                    "an admission of the second token was recorded at its count over two tokens");
-        for(int k=0;k<30;++k){t.next_token();t.prepare(cohort,4);require(std::all_of(t.hits.begin(),t.hits.end(),[](int h){return h>=0;}),"the cohort was not resident");publish(t);}
-        while(t.step<100)t.next_token();
-        t.admission_hits=2;t.refresh_expected();
-        require(t.expected[4]==1.125 && t.expected[vram_slot_table::earned_steps-1]>15,
-                "the cohort's hits were recorded at count 1, or not at all");
-        const auto fresh=request(1,9);
-        t.prepare(&fresh,1);
-        require(t.admissions[0]<0 && std::fabs(t.mature(1)-1)<0.02,"a mature table admitted a count-1 miss at 2 hits an upload");
-        publish(t);
+        const auto a=request(1,1),b=request(1,2);
+        const auto price=[](vram_slot_table & t,double candidate,double ram,double drive){
+            t.candidate_saving=candidate;t.ram_saving=ram;t.drive_saving=drive;};
+        vram_slot_table t(1,{1},true,2.5,true,16);
+        t.next_token();t.prepare(&a,1);require(t.admissions[0]<0,"an unpriced table admitted below the minimum count");publish(t);
+        price(t,100,100,1000);
+        t.next_token();t.prepare(&a,1);require(t.admissions[0]>=0,"a priced table refused a free slot");publish(t);
+        t.next_token();t.prepare(&b,1);
+        require(t.admissions[0]<0,"one selection replaced an entry whose uses would come from the drive");publish(t);
+        t.layers[1].counts[2]=20; // as if b had been selected in most of the recent tokens
+        t.next_token();t.prepare(&b,1);
+        require(t.admissions[0]>=0 && t.evictions==1,"a candidate worth more than its victim's loss was refused");publish(t);
+        // a victim the RAM cache keeps a copy of costs only its uses' RAM hits (here a tenth of a drive read's): b at
+        // four times a's count replaces a where the RAM cache keeps a copy of a, not where it does not
+        for (const bool copy : {true,false}) {
+            vram_slot_table u(1,{1},true,2.5,true,16);price(u,100,100,1000);
+            if(copy)u.ram_holds=[](void *,int32_t layer,int32_t expert){return int(layer==1 && expert==1);};
+            u.next_token();u.prepare(&a,1);publish(u);
+            u.layers[1].counts[2]=3;
+            u.next_token();u.prepare(&b,1);
+            require((u.admissions[0]>=0)==copy,"a victim's RAM copy did not set what replacing it gives up");publish(u);
+        }
+        vram_slot_table none(1,{1},true,0,true,16);price(none,0,0,1000);
+        none.next_token();none.prepare(&a,1);require(none.admissions[0]<0,"a tier that saves nothing on a candidate admitted");publish(none);
+    }
+    // A shrink gives up the least valuable entries (compaction): the most valuable of the leaving slots' entries move
+    // into empty slots below the boundary first, then onto entries worth less; live slots neither move nor take a move.
+    {
+        vram_slot_table t(4,{1},true,0,true,16);
+        const kimi_vram_request four[]={request(1,1),request(1,2),request(1,3),request(1,4)};
+        t.next_token();t.prepare(four,4);publish(t);
+        const int head_cold=t.slots[0].key.expert,head_warm=t.slots[1].key.expert;
+        const int tail_hot=t.slots[2].key.expert,tail_cold=t.slots[3].key.expert;
+        auto & counts=t.layers[1].counts;
+        counts[size_t(head_cold)]=1;counts[size_t(head_warm)]=3;counts[size_t(tail_hot)]=5;counts[size_t(tail_cold)]=.5;
+        const auto moves=t.compaction(2);
+        require(moves.size()==1 && moves[0].first==2 && moves[0].second==0,
+                "compaction did not put the hottest leaving entry on the coldest kept one, and stop there");
+        const auto evicted=t.evictions;
+        t.move_entry(2,0);t.resize_global(2);
+        require(t.holds(1,tail_hot) && t.holds(1,head_warm) && !t.holds(1,head_cold) && !t.holds(1,tail_cold) &&
+                t.evictions==evicted+1,"a shrink did not give up the coldest entries");
+        require(t.find(request(1,tail_hot),[](const vram_slot_table::entry & e){return e.valid;})==0,
+                "the moved entry is not found in its new slot");
+        holds_match(t,"held differs after a compaction");
+        vram_slot_table u(4,{1},true,0,true,16);
+        u.next_token();u.prepare(four,4);publish(u);
+        u.change(u.slots[1],[](vram_slot_table::entry & x){x={};});
+        const auto into_empty=u.compaction(2);
+        require(into_empty.size()==1 && into_empty[0].second==1,"a leaving entry did not take the empty slot below first");
+        u.slots[2].uploading=true;u.slots[3].uploading=true;
+        require(u.compaction(2).empty(),"a slot being uploaded moved");
+        u.slots[2].uploading=u.slots[3].uploading=false;u.slots[1].locked=true;u.slots[0].native_refs=1;
+        require(u.compaction(2).empty(),"a live slot took a move");
+        u.slots[1].locked=false;u.slots[0].native_refs=0;
+        rejected([&]{u.move_entry(1,0);});
     }
     std::printf("VRAM_GLOBAL_POOL_PASS assertions=%d\n",checks);return 0;
 } catch(const std::exception & e) { std::fprintf(stderr,"VRAM_GLOBAL_POOL_FAIL: %s\n",e.what());return 1; } }

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <initializer_list>
 #include <utility>
+#include <vector>
 
 static void require(bool condition, const char * message) {
     if (!condition) {
@@ -168,7 +169,64 @@ static void test_full_removal_only_removes_obsolete_shorter_with_checkpoint() {
     }
 }
 
+// The batches update_slots fills for a prompt of n_prompt tokens from n_start, for a memory that is checkpointed only
+// between batches.
+static std::vector<int64_t> prompt_batches(int64_t n_start, int64_t n_prompt, int64_t n_shared, int64_t n_batch) {
+    std::vector<int64_t> batches;
+    for (int64_t n_done = n_start; n_done < n_prompt;) {
+        int64_t n = 0;
+        while (n_done < n_prompt && n < n_batch) {
+            ++n_done;
+            ++n;
+            if (server_prompt_batch_stops(n_done, n_prompt, n_shared, n_batch)) {
+                break;
+            }
+        }
+        batches.push_back(n);
+    }
+    return batches;
+}
+
+static void test_prompt_batches_stop_at_shared_prefix_and_end() {
+    // a new conversation behind a system prompt and tools of 8503 tokens: the prefix, the rest, the last 4 tokens
+    require(prompt_batches(0, 8673, 8503, 65536) == std::vector<int64_t>({ 8503, 166, 4 }),
+            "a new prompt stops after its shared prefix and 4 tokens before its end");
+    // the next turn of a chat without a shared prefix, from the previous turn's checkpoint: no stop n_ubatch earlier
+    require(prompt_batches(987, 2068, 0, 65536) == std::vector<int64_t>({ 1077, 4 }),
+            "a later turn stops only 4 tokens before its end");
+    // a prompt resumed at the shared prefix (from the prompt cache) or after it does not stop there again
+    require(prompt_batches(8503, 8675, 8503, 65536) == std::vector<int64_t>({ 168, 4 }),
+            "a prompt resumed at its shared prefix does not stop there");
+    require(prompt_batches(8669, 8673, 8503, 65536) == std::vector<int64_t>({ 4 }),
+            "a prompt resumed after its shared prefix stops only at its end");
+    // batches still end at n_batch
+    require(prompt_batches(0, 1200, 0, 512) == std::vector<int64_t>({ 512, 512, 172, 4 }),
+            "a long prompt is still split at n_batch");
+    // a shared prefix that is too short, or ends inside the last 4 tokens, adds no stop
+    require(prompt_batches(0, 200, 40, 65536) == std::vector<int64_t>({ 196, 4 }),
+            "a shared prefix under 64 tokens adds no stop");
+    require(prompt_batches(0, 100, 98, 65536) == std::vector<int64_t>({ 96, 4 }),
+            "a shared prefix inside the last 4 tokens adds no stop");
+}
+
+static void test_shared_prefix_serves_a_new_conversation() {
+    // The previous conversation as the slot leaves it, with its one checkpoint 4 tokens before the end of its prompt,
+    // and the shared prefix the prompt cache keeps; a new conversation shares only the prefix.
+    server_prompt previous = make_prompt({ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 });
+    add_checkpoint(previous, 8);
+    const server_prompt prefix = make_prompt({ 1, 2, 3, 4, 5, 6 });
+    const server_tokens next(llama_tokens({ 1, 2, 3, 4, 5, 6, 20, 21, 22, 23 }), false);
+
+    const server_prompt_checkpoint * checkpoint = nullptr;
+    require(server_prompt_reuse_full(previous, next, &checkpoint) == -1,
+            "the previous conversation's state and checkpoint lie past where the new one branches off");
+    require(server_prompt_reuse_full(prefix, next, &checkpoint) == 6 && checkpoint == nullptr,
+            "the shared prefix restores its whole state for the new conversation");
+}
+
 int main() {
+    test_prompt_batches_stop_at_shared_prefix_and_end();
+    test_shared_prefix_serves_a_new_conversation();
     test_find_checkpoint_before_tail_truncation_pos();
     test_oaicompat_chat_streams_reasoning_delta();
     test_oaicompat_chat_final_contains_reasoning();

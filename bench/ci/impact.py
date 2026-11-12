@@ -26,7 +26,7 @@ CASES = {
     "normalization": ("test-backend-ops", "RMS_NORM", ""),
     "activation": ("test-backend-ops", "SWIGLU", ""),
     "dsv-hc": ("test-backend-ops", "DSV4_HC_COMB", ""),
-    "cuda-generic-tier": ("test-kimi-vram-generic", None, None),
+    "cuda-generic-tier": ("test-ssd-vram-generic", None, None),
     "model-adapter": ("test-ssd-model-adapter", None, None),
     "runtime-policy": ("test-ssd-runtime-policy", None, None),
 }

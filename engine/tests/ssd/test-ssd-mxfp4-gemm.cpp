@@ -257,7 +257,7 @@ int main(int argc, char ** argv) {
     try {
         require(argc == 2 || (argc == 3 && (!std::strcmp(argv[2], "--bench") ||
                 !std::strcmp(argv[2], "--cache-bench"))),
-                "usage: test-kimi-mxfp4-gemm EXPERT_PACK [--bench|--cache-bench]");
+                "usage: test-ssd-mxfp4-gemm EXPERT_PACK [--bench|--cache-bench]");
         ggml_cpu_init();
         const matrix up = load_matrix(argv[1], "up", 5120, 2304);
         const matrix gate = load_matrix(argv[1], "gate", 5120, 2304);

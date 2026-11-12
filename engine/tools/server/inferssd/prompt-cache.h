@@ -5,6 +5,7 @@
 #include "common.h"
 #include "llama.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <list>
 #include <string>
@@ -86,6 +87,15 @@ int64_t server_prompt_reuse_full(
         const server_prompt              & prompt,
         const server_tokens              & tokens_new,
         const server_prompt_checkpoint ** checkpoint);
+
+// For a memory that is checkpointed only between batches: whether a prompt batch stops after n_done of the prompt's
+// n_prompt tokens, so that a checkpoint can be taken there. It stops where a later prompt is likely to branch off: at
+// the end of the shared prefix (n_shared, the leading system messages and tools; 0 for none) and 4 tokens before the
+// end of the prompt (the generation prompt may be rendered differently in the next turn).
+inline bool server_prompt_batch_stops(int64_t n_done, int64_t n_prompt, int64_t n_shared, int64_t n_batch) {
+    const int64_t n_end = n_prompt - std::min<int64_t>(n_batch, 4);
+    return n_done == n_end || (n_done == n_shared && n_done >= 64 && n_done < n_end);
+}
 
 inline const server_prompt_checkpoint * server_prompt_find_checkpoint_before_pos(
         const server_prompt & prompt,

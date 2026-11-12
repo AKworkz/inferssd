@@ -18,10 +18,10 @@ int main(){try{
     int rejected=0;
     try{table.next_token();}catch(const std::exception &){++rejected;}
     try{table.clear();}catch(const std::exception &){++rejected;}
-    int ready[4]={};try{table.acquire_ready(r,4,ready);}catch(const std::exception &){++rejected;}
+    int ready[4]={};try{table.acquire_slots(r,4,ready);}catch(const std::exception &){++rejected;}
     if(rejected!=3)throw std::runtime_error("native lease did not protect lifecycle boundaries");
-    table.slots[0].native_refs=0;const auto lease=table.acquire_ready(r,4,ready);
-    if(ready[0]!=1||ready[1]!=0||ready[2]!=1||ready[3]!=0)throw std::runtime_error("wrong post-finish residency");
+    table.slots[0].native_refs=0;const auto lease=table.acquire_slots(r,4,ready);
+    if(ready[0]<0||ready[1]>=0||ready[2]<0||ready[3]>=0)throw std::runtime_error("wrong post-finish residency");
     table.release_ready(lease);table.next_token();table.clear();
     std::puts("VRAM_NATIVE_METADATA_PASS checks=7");return 0;
 }catch(const std::exception & e){std::fprintf(stderr,"VRAM_NATIVE_METADATA_FAIL: %s\n",e.what());return 1;}}

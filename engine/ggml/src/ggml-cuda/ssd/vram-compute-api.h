@@ -2,7 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "export.h"
-#include "ggml-ssd/gpu/kimi-vram-tier-api.h"
+#include "ggml-ssd/gpu/vram-tier-api.h"
 struct vram_compute_expert { const void * up; const void * gate; const void * down; };
 struct CUevent_st;
 // Decode engine of the tier (generic-compute-adapter.cu): an f32 input row, up and gate, the activation and down over

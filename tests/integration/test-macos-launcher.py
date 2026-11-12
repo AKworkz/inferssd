@@ -18,7 +18,7 @@ def load(name, path):
 
 
 launcher = load("mac_launcher", ROOT / "framework/tests/fixtures/macos/run-macos-ssd.py")
-indexer = load("alias_indexer", ROOT / "framework/tests/fixtures/macos/kimi-build-gguf-expert-alias-tsv.py")
+indexer = load("alias_indexer", ROOT / "framework/tests/fixtures/macos/build-gguf-expert-alias-tsv.py")
 
 
 def test_split_model_requires_first_and_every_shard(tmp_path):

@@ -1,8 +1,8 @@
 #pragma once
 // The placement of a layer's routed experts, for any number of tokens: the per-expert fits, the layer's predicted time
 // and the choice of the experts that move to the GPU. One table of measured lines and one choice (kimi_place_layer,
-// at the end) for grouped prefill (kimi-cpu-sink-vram.inc, select_prefill_transient) and decode (kimi-cpu-sink.cpp,
-// the decode plan). Kept apart from the sink so that it is tested alone (tests/test-kimi-prefill-cost.cpp).
+// at the end) for grouped prefill (ggml-cpu/ssd/cpu-sink-vram.inc, select_prefill_transient) and decode (ggml-cpu/ssd/cpu-sink.cpp,
+// the decode plan). Kept apart from the sink so that it is tested alone (tests/ssd/test-ssd-prefill-cost.cpp).
 //
 // A layer's time has two forms, chosen by the physics of its reads:
 //   - its reads stream through the ring (more reads than ring slots): the drive and the lanes hand the reads over

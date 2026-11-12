@@ -12,8 +12,7 @@
 // Every role lives in its own host allocation of exactly its payload, followed by an inaccessible page, so a copy of
 // the padded length faults. Admissions, deferred uploads and host jobs copy the payload and zero the slot's padding,
 // and the GPU's rows match the experts computed on the CPU. A format's first request fixes how its roles are named: a
-// later padded name of a payload-named role is refused, and a tier named padded (as the pack fixtures are) seeds and
-// hits whole padded roles.
+// later padded name of a payload-named role is refused.
 #include "gpu-services.h"
 #include "vram-tier.cpp"
 #include <cmath>
@@ -188,98 +187,6 @@ void scribble(tier & t) {
     cuda_check(cudaDeviceSynchronize());
 }
 const kimi_vram_activation swiglu = { KIMI_VRAM_ACTIVATION_SWIGLU, 0.0f, 0.0f, 0.0f };
-// A tier whose requests name layer 2's MXFP4 roles padded, as the pack fixtures do: the prefill's seed plan resolves and
-// keys the routed expert padded, the seed offered from a device tensor of padded roles copies each whole role, and the
-// next decode's padded request, built as the sink builds it, hits it. File `self` (this executable) stands in for the
-// pack: up, gate and down of expert e at (3 e + role) padded roles.
-int seed_file = -1;
-void padded_seed(fixture_inputs & inputs, const char * self) {
-    const size_t mx = padded(2, 0);
-    require(mx == padded(2, 2) && payload(2, 0) < mx, "the seed fixture wants non-page MXFP4 roles");
-    const int32_t one_layer[1] = { 2 };
-    const kimi_vram_expert_format f = { latent, hidden, up_types[1], down_types[1], experts, 1, one_layer, nullptr, nullptr };
-    std::FILE * file = std::fopen(self, "rb");
-    require(file != nullptr, "no file for the seed resolver");
-#ifdef _WIN32
-    seed_file = _fileno(file);
-#else
-    seed_file = fileno(file);
-#endif
-    ssd::platform::file_identity pack;
-    require(ssd::platform::identity(seed_file, pack), "no identity of the seed resolver's file");
-    // a request as the sink keys what it reads: the file's identity, each role's offset and its named bytes
-    auto named_padded = [&](int expert) {
-        kimi_vram_request r = {}; r.layer = 2; r.expert = expert; r.weight = .5f;
-        for (int i = 0; i < 3; ++i) { r.role[i] = kimi_vram_source_identity(pack, uint64_t(3 * expert + i) * mx, mx); }
-        return r;
-    };
-    inputs.set("tier.keep_across_requests", "1"); // a discrete GPU keeps its slots through the prefill that seeds them
-    tier u(10 * 3 * mx, inputs.tier_policy());
-    std::vector<float> rows(static_cast<size_t>(latent), 0.0f);
-    const auto x = input(2, 1);
-    // decode token 1: the first request names the roles padded and allocates the slots
-    u.begin(51, 1, true);
-    {
-        const auto r = named_padded(0);
-        int slot = -1;
-        u.prepare_format(&r, 1, &f, &slot);
-        u.launch_activation(x.data(), x.size() * sizeof(float), &swiglu);
-        u.finish(rows.data(), latent);
-        require(u.table && u.has_storage() && slot < 0, "the padded tier did not take its slots");
-    }
-    // a prefill of the same context routes expert 5 most; its seed plan resolves the expert's roles as decode names them
-    u.begin(51, 2, false);
-    require(u.table && u.has_storage(), "the slots did not stay through the prefill");
-    u.seed_resolve = [](const char * name, int expert, size_t bytes, int64_t, int * fd, uint64_t * offset, size_t * n) {
-        const uint64_t role = std::strstr(name, "_up_") ? 0 : std::strstr(name, "_gate_") ? 1 : 2;
-        *fd = seed_file; *offset = (3 * uint64_t(expert) + role) * bytes; *n = bytes; return true;
-    };
-    char * source = nullptr;
-    cuda_check(cudaMalloc(reinterpret_cast<void **>(&source), 3 * size_t(experts) * mx));
-    cudaEvent_t ready = nullptr;
-    cuda_check(cudaEventCreateWithFlags(&ready, cudaEventDisableTiming));
-    const int32_t counts[experts] = { 0, 0, 0, 0, 0, 3, 0, 0 };
-    std::vector<uint8_t> roles[3];
-    for (int role = 0; role < 3; ++role) {
-        roles[role].resize(size_t(experts) * mx);
-        for (size_t i = 0; i < roles[role].size(); ++i) { roles[role][i] = uint8_t(i * 7 + 3 + role * 31); }
-        char * tensor = source + size_t(role) * experts * mx;
-        cuda_check(cudaMemcpy(tensor, roles[role].data(), roles[role].size(), cudaMemcpyHostToDevice));
-        cuda_check(cudaEventRecord(ready, 0));
-        char name[64];
-        std::snprintf(name, sizeof(name), "blk.2.ffn_%s_exps.weight", role == 0 ? "up" : role == 1 ? "gate" : "down");
-        void * done = nullptr;
-        require(u.seed_offer(name, tensor, mx, experts, counts, ready, &done) == 1 && done, "a padded seed role was not copied");
-    }
-    u.phase_complete(true);
-    require(u.seeds.empty(), "a planned seed was not published");
-    int slot = -1;
-    for (size_t s = 0; s < u.table->slots.size(); ++s) {
-        if (u.table->slots[s].valid && u.table->slots[s].seed && u.table->slots[s].key.expert == 5) { slot = int(s); }
-    }
-    require(slot >= 0, "the routed expert was not seeded");
-    const kimi_vram_request want = named_padded(5);
-    for (int i = 0; i < 3; ++i) {
-        const auto & got = u.table->slots[size_t(slot)].key.role[i];
-        require(got.bytes == mx && got.offset == want.role[i].offset, "the seed is not keyed as decode names its roles");
-    }
-    std::vector<uint8_t> got(3 * mx);
-    cuda_check(cudaMemcpy(got.data(), u.slot_base(size_t(slot)), got.size(), cudaMemcpyDeviceToHost));
-    for (int role = 0; role < 3; ++role) {
-        require(!std::memcmp(got.data() + size_t(role) * mx, roles[role].data() + 5 * mx, mx), "a padded seed role holds other bytes");
-    }
-    cuda_check(cudaEventDestroy(ready));
-    cuda_check(cudaFree(source));
-    // the next decode token: a request of expert 5 built on its own, as the sink keys what it reads, is the seed's hit
-    u.begin(51, 3, true);
-    int hit = -1;
-    u.prepare_format(&want, 1, &f, &hit);
-    u.launch_activation(x.data(), x.size() * sizeof(float), &swiglu);
-    u.finish(rows.data(), latent);
-    require(hit == slot, "the padded request did not hit its padded seed");
-    u.release();
-    std::fclose(file);
-}
 // One decode layer as the sink runs it: prepare, launch, the misses' admissions (deferred where asked), finish.
 std::vector<int> layer_step(tier & t, const store & s, int layer, int token, const std::vector<int> & ids, const char * what,
         bool deferred = false) {
@@ -306,7 +213,7 @@ std::vector<int> layer_step(tier & t, const store & s, int layer, int token, con
 }
 }
 
-int main(int, char ** argv) {
+int main() {
     fixture_inputs inputs; inputs.set_runtime_services(test_gpu_services()); try {
     ggml_cpu_init();
     inputs.set("vram_async", "1");
@@ -396,7 +303,6 @@ int main(int, char ** argv) {
         require(refused == "VRAM role bytes changed", "a padded name of a payload-named role was not refused: " + refused);
     }
     t.release();
-    padded_seed(inputs, argv[0]);
     std::printf("KIMI_VRAM_PAYLOAD_PASS assertions=%d layer1=%s/%s down=%zu/%zu layer2=%s/%s role=%zu/%zu\n", assertions,
         ggml_type_name(type_of(1, 0)), ggml_type_name(type_of(1, 2)), payload(1, 2), padded(1, 2),
         ggml_type_name(type_of(2, 0)), ggml_type_name(type_of(2, 2)), payload(2, 0), padded(2, 0));

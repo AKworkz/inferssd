@@ -186,13 +186,16 @@ class llm_graph_input_engram : public llm_graph_input_i {
 public:
     llm_graph_input_engram(const llama_model & model,
                            const llama_kv_cache_dsv4_raw_context * mctx,
-                           int eg, bool prefetch) : model(model), mctx(mctx), eg(eg), prefetch(prefetch) {}
+                           int eg, bool advise) : model(model), mctx(mctx), eg(eg), advise(advise) {}
     virtual ~llm_graph_input_engram() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
+    // the ubatch's rows, read ahead before the graph takes its memory
+    void prefetch(const llama_ubatch * ubatch) override;
 
     bool can_reuse(const llm_graph_params & params) override {
         mctx = static_cast<const llama_kv_cache_dsv4_context *>(params.mctx)->get_raw();
+        idx_ubatch = nullptr; // a reused input works its rows out again
         const int64_t n_cols = (model.hparams.engram_max_ngram_size - 1) * model.hparams.engram_n_head;
         return rows->ne[0] == n_cols * params.ubatch.n_tokens;
     }
@@ -206,13 +209,39 @@ public:
 
     // which engram layer this is, so the right multipliers and buckets are used
     const int eg;
-    const bool prefetch;
+    // whether the rows are read ahead (model.engram_prefetch)
+    const bool advise;
 
     // scratch, reused across set_input() calls
     std::vector<llama_token> prev;
+
+    // the rows of the ubatch prefetch() worked out, which its set_input() takes
+    std::vector<int32_t> idx;
+    const llama_ubatch * idx_ubatch = nullptr;
+
+    void compute_rows(const llama_ubatch * ubatch);
 };
 
+void llm_graph_input_engram::prefetch(const llama_ubatch * ubatch) {
+    compute_rows(ubatch);
+    idx_ubatch = ubatch;
+    if (advise) {
+        dsv41_engram_prefetch_rows(model.layers[model.hparams.engram_layer_ids[eg]].engram_embd, idx);
+    }
+}
+
 void llm_graph_input_engram::set_input(const llama_ubatch * ubatch) {
+    if (idx_ubatch != ubatch) {
+        compute_rows(ubatch);
+        if (advise) {
+            dsv41_engram_prefetch_rows(model.layers[model.hparams.engram_layer_ids[eg]].engram_embd, idx);
+        }
+    }
+    idx_ubatch = nullptr;
+    ggml_backend_tensor_set(rows, idx.data(), 0, idx.size()*ggml_element_size(rows));
+}
+
+void llm_graph_input_engram::compute_rows(const llama_ubatch * ubatch) {
     const auto & hp = model.hparams;
 
     const int64_t n_tokens = ubatch->n_tokens;
@@ -235,7 +264,7 @@ void llm_graph_input_engram::set_input(const llama_ubatch * ubatch) {
         return (uint64_t) model.engram_token_map[t];
     };
 
-    std::vector<int32_t> idx(n_cols * n_tokens);
+    idx.assign(size_t(n_cols * n_tokens), 0);
 
     GGML_ASSERT(mctx != nullptr);
 
@@ -270,12 +299,6 @@ void llm_graph_input_engram::set_input(const llama_ubatch * ubatch) {
             }
         }
     }
-
-    if (prefetch) {
-        dsv41_engram_prefetch_rows(model.layers[hp.engram_layer_ids[eg]].engram_embd, idx);
-    }
-
-    ggml_backend_tensor_set(rows, idx.data(), 0, idx.size()*ggml_element_size(rows));
 }
 
 } // namespace

@@ -6,7 +6,7 @@
 // (kimi_vram_policy_api set_thread_cpus): on the process's CPUs other than those of the runs' coordinator (all of
 // them when none is left), again only when the coordinator's change.
 #define main original_sink_test_main
-#include "test-kimi-cpu-sink.cpp"
+#include "test-ssd-cpu-sink.cpp"
 #undef main
 #include "ggml-ssd/gpu/provider.h"
 #include <set>
@@ -26,12 +26,6 @@ int tier_launch(void *, const void *, size_t, float, float, char *, size_t) { re
 int tier_admit(void *, const kimi_vram_request *, const void *, const void *, const void *, int, char *, size_t) { return 0; }
 int tier_finish(void *, float *, size_t, char *, size_t) { return 0; }
 int tier_cancel(void *, char *, size_t) { return 0; }
-int tier_no_lease(void *, uint64_t, const kimi_vram_request *, int, kimi_vram_ready_lease *, int *, char * e, size_t n) {
-    std::snprintf(e, n, "no ready leases in this test"); return 1;
-}
-int tier_no_lease_check(void *, const kimi_vram_ready_lease *, char * e, size_t n) {
-    std::snprintf(e, n, "no ready leases in this test"); return 1;
-}
 void tier_held(void *, int32_t layer, const int32_t * experts, int count, uint8_t * out) {
     for (int i = 0; i < count; ++i) { out[i] = tier_holds.count({ layer, experts[i] }) != 0; }
 }
@@ -50,8 +44,7 @@ int tier_place(void *, const int * cpus, int count, char *, size_t) {
 const ssd::gpu::provider_v1 * stand_in_provider() {
     static const kimi_vram_tier_api api = { 2, sizeof(kimi_vram_tier_api), tier_create, tier_destroy, tier_begin,
         tier_prepare, tier_launch, tier_admit, tier_finish, tier_cancel };
-    static const kimi_vram_residency_api residency = { 2, sizeof(kimi_vram_residency_api), tier_no_lease,
-        tier_no_lease_check, tier_no_lease_check, tier_held };
+    static const kimi_vram_residency_api residency = { 3, sizeof(kimi_vram_residency_api), tier_held };
     static const kimi_vram_format_api format = { 2, sizeof(kimi_vram_format_api), no_slots,
         [](void *, const void *, size_t, const kimi_vram_activation *, char *, size_t) { return 0; } };
     static const kimi_vram_prefill_api prefill = { 10, sizeof(kimi_vram_prefill_api), no_slots,
@@ -66,9 +59,12 @@ const ssd::gpu::provider_v1 * stand_in_provider() {
         [](void *, const int32_t *, int, char *, size_t) { return 0; },
         [](void *, int32_t, const void *, const void *, const void *, char *, size_t) { return 0; },
         [](void *, int32_t, char *, size_t) { return 0; } };
-    static const kimi_vram_elastic_api elastic = { 4, sizeof(kimi_vram_elastic_api),
+    static const kimi_vram_elastic_api elastic = { 5, sizeof(kimi_vram_elastic_api),
         [](void *, int, char *, size_t) { return 0; }, [](void *, int, char *, size_t) { return 0; },
-        [](void *, const kimi_vram_request *, const kimi_vram_expert_format *, char *, size_t) { return 0; } };
+        [](void *, const kimi_vram_request *, const kimi_vram_expert_format *, char *, size_t) { return 0; },
+        [](void *, int * slots, char *, size_t) { *slots = 0; return 0; },
+        [](void *, const kimi_vram_request *, const void *, const void *, const void *, int * copied, char *, size_t) {
+            *copied = 0; return 0; } };
     static const kimi_vram_deferred_api deferred = { 3, sizeof(kimi_vram_deferred_api),
         [](void *, const kimi_vram_request *, const void *, const void *, const void *, int * queued, char * e, size_t n) {
             *queued = 0; return refuse(nullptr, e, n); },
@@ -79,9 +75,10 @@ const ssd::gpu::provider_v1 * stand_in_provider() {
         [](void *, double * resident, double * hosted) { *resident = *hosted = 0; },
         [](void *, const void *, size_t, char *, size_t) { return 0; }, [](void *, const void *, char *, size_t) { return 0; },
         [](void *, kimi_vram_host_costs * costs) { *costs = {}; } };
-    static const kimi_vram_policy_api policy = { 4, sizeof(kimi_vram_policy_api), [](void *, double) {},
+    static const kimi_vram_policy_api policy = { 5, sizeof(kimi_vram_policy_api), [](void *, double, double) {},
         [](void *, uint64_t) {}, [](void *, uint64_t) {}, [](void *, uint64_t) { return 0; },
-        [](void *) { return uint64_t(0); }, tier_place };
+        [](void *) { return uint64_t(0); }, tier_place,
+        [](void *, int (*)(void *, int32_t, int32_t), void *) {} };
     static const ssd::gpu::settings_api settings = {};
     static const ssd::gpu::testing::api testing = { 3, sizeof(ssd::gpu::testing::api),
         [](uint64_t, const ssd::gpu::testing::tier_options *, char *, size_t) noexcept -> void * {
@@ -106,7 +103,7 @@ int main(int argc, char ** argv) {
     fixture_inputs inputs; try {
     int threads = 4;
     if (argc == 3 && !std::strcmp(argv[1], "--threads")) { threads = std::stoi(argv[2]); }
-    else { require(argc == 1, "usage: test-kimi-prefetch-tier [--threads N]"); }
+    else { require(argc == 1, "usage: test-ssd-prefetch-tier [--threads N]"); }
     test_resources::io_ring();
     test_resources::finite_envelope();
     for (const auto & kv : { std::pair<const char *, const char *>{ "ready_first", "1" },
@@ -115,7 +112,7 @@ int main(int argc, char ** argv) {
             { "cache_policy", "lru" }, { "cache_allocation", "uniform" },
             { "read_fixed", "0" }, { "profile", "0" },
             { "prefetch_depth", "2" }, { "vram_budget", "1" },
-            { "vram_exclusive", "0" }, { "vram_async", "0" },
+            { "vram_async", "0" },
             { "vram_deferred", "0" }, { "vram_prefill", "0" } }) {
         require(inputs.set(kv.first, kv.second) == 0, "set prefetch tier test environment");
     }

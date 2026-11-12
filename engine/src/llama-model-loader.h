@@ -108,6 +108,7 @@ struct llama_model_loader {
     bool no_alloc;
 
     llama_files files;
+    std::vector<std::string> paths; // files[i]'s path: load_all_data opens its own handles under mmap
     llama_ftype ftype;
     llama_fver  fver;
 

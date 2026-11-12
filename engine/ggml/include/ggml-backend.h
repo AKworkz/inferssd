@@ -360,18 +360,10 @@ extern "C" {
     GGML_API void                 ggml_backend_sched_synchronize(ggml_backend_sched_t sched);
     GGML_API void                 ggml_backend_sched_kimi_set_profile_phase(ggml_backend_sched_t sched, int phase);
     GGML_API void                 ggml_backend_sched_kimi_set_dense_decode(ggml_backend_sched_t sched, bool decode);
-    // The expert copies of this context (counters survive graph rebuilds).
-    // Previously the expert copies of every scheduler of the process so far (GGML_SCHED_MOE_COPY_EXPERT_PACK_SOURCE): expert
-    // slices (one expert of one expert tensor: gate, up, down or a fused gate-up) and bytes read from the expert
-    // source, the time those reads took, and the reads that fell back to a slower path (a failed batched read redone
-    // range by range, a range read left to the mmap'd tensor); and the copies of the weights homed on the drive:
-    // tensors, bytes, the time in the transport's copy (of it, in the copies not read ahead), the time waiting for
-    // the device before it, the copies whose blocks had been read ahead, the copies left to the mapped weight
+    // The copies of this context's weights homed on the drive (counters survive graph rebuilds): tensors, bytes, the
+    // time in the transport's copy (of it, in the copies not read ahead), the time waiting for the device before it,
+    // the copies whose blocks had been read ahead, the copies left to the mapped weight
     struct ggml_backend_sched_kimi_copy_stats {
-        uint64_t expert_slices;
-        uint64_t bytes;
-        uint64_t read_us;
-        uint64_t fallbacks;
         uint64_t dense_tensors;
         uint64_t dense_bytes;
         uint64_t dense_read_us;
@@ -390,10 +382,6 @@ extern "C" {
         bool (*drive_home)(void *, const struct ggml_tensor *);
         bool (*copy_dense)(void *, ggml_backend_t, const struct ggml_tensor *, struct ggml_tensor *,
                            const struct ggml_tensor *, uint64_t);
-        // 0: ordinary backend copy, 1: copied, -1: configured transport failed.
-        int (*copy_experts)(void *, ggml_backend_t, const struct ggml_tensor *, struct ggml_tensor *,
-                           int64_t, size_t, const int32_t *);
-        bool (*fence)(void *, ggml_backend_t);
         void (*phase)(void *, int);
         void (*stats)(void *, struct ggml_backend_sched_kimi_copy_stats *);
         void (*reset)(void *);
