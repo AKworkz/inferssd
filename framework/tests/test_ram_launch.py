@@ -15,6 +15,7 @@ from inferssd.launch.machine import MachineSource
 from inferssd.launch.prepare import prepare
 from inferssd.launch.typed import resolve_typed
 from inferssd.launch.types import Threads
+from inferssd.source import header as gguf_header
 from inferssd.source.header import Header, Tensor
 
 
@@ -22,7 +23,7 @@ def gemma(tmp_path, platform, backends):
     inputs, spec, host, adapter, out, indexed = setup(tmp_path, platform)
     write_gguf(
         spec.model,
-        [("token_embd.weight", (32, 32), F32)],
+        [("token_embd.weight", (32, 32), F32), ("per_layer_token_embd.weight", (64, 32), F32)],
         {
             "general.architecture": "gemma4",
             "gemma4.block_count": 4,
@@ -63,22 +64,24 @@ def resolved(inputs, spec, adapter, out, platform, memory=8 << 30, reserve=0):
 
 
 @pytest.mark.parametrize(
-    "platform,backends,mapping,layers",
+    "platform,backends,mapping,layers,locked,weights",
     [
-        ("darwin", ["Metal"], "--no-mmap", "99"),
-        ("darwin", [], "--mmap", "0"),
-        ("windows", ["Vulkan"], "--no-mmap", "99"),
-        ("windows", [], "--mmap", "0"),
+        # Apple silicon: the per-layer embedding table (8192 bytes) stays in the file, unlocked.
+        ("darwin", ["Metal"], "--mmap", "99", False, 4096),
+        ("darwin", [], "--mmap", "0", False, 4096),
+        # Other GPU backends: the tensors plus the tied output's copy of the token embedding.
+        ("windows", ["Vulkan"], "--no-mmap", "99", True, 4096 + 8192 + 4096),
+        ("windows", [], "--mmap", "0", True, None),  # the whole file, locked
     ],
 )
 def test_same_ram_profile_uses_existing_native_backends(
-    tmp_path, platform, backends, mapping, layers
+    tmp_path, platform, backends, mapping, layers, locked, weights
 ):
     inputs, spec, _, adapter, out, indexed = gemma(tmp_path, platform, backends)
     result = resolved(inputs, spec, adapter, out, platform)
     assert result.code == 0 and indexed == []
     argv = list(result.argv)
-    assert mapping in argv and "--mlock" in argv and "--no-repack" in argv
+    assert mapping in argv and ("--mlock" in argv) == locked and "--no-repack" in argv
     assert argv[argv.index("-ngl") + 1] == layers
     assert "--defer-experts" not in argv
     assert not any(x.startswith("--ssd-") for x in argv)
@@ -88,26 +91,46 @@ def test_same_ram_profile_uses_existing_native_backends(
     }
     receipt = json.loads(result.outputs[-1].text)
     assert receipt["profile"] == "gemma4" and receipt["mode"] == "ram"
-    assert receipt["memory"]["required_bytes"] + receipt["memory"]["headroom_bytes"] < 16 << 30
+    memory = receipt["memory"]
+    assert memory["required_bytes"] <= memory["budget_bytes"]
+    facts = ram.facts([gguf_header.read(spec.model)])
+    assert facts["ple_bytes"] == 8192
+    assert memory["weights_bytes"] == (facts["model_bytes"] if weights is None else weights)
 
 
-@pytest.mark.parametrize("available", [None, 2 << 30])
+@pytest.mark.parametrize(
+    "available,context",
+    [
+        (None, 65536),
+        (ram.WORKSPACE_BYTES + (20 << 20), 24576),  # 768 bytes of KV a token
+        (1 << 20, 8192),
+    ],
+)
 @pytest.mark.parametrize("platform", ["darwin", "windows"])
-def test_ram_launch_refuses_unknown_or_insufficient_available_memory(tmp_path, platform, available):
-    inputs, spec, host, adapter, out, indexed = gemma(tmp_path, platform, [])
+def test_ram_launch_admits_by_the_budget_and_sizes_the_context_by_available_memory(
+    tmp_path, platform, available, context
+):
+    # The model's memory is required, so too little available now refuses nothing short of
+    # the budget: the system pages other memory out. It only takes a smaller context.
+    inputs, spec, host, adapter, out, _ = gemma(tmp_path, platform, [])
     host["runtime_facts"]["available_bytes"] = available
-    with pytest.raises(ValueError, match="RAM-only model"):
-        resolved(inputs, spec, adapter, out, platform)
-    assert not indexed and list(out.iterdir()) == []
+    result = resolved(inputs, spec, adapter, out, platform)
+    assert result.code == 0
+    argv = list(result.argv)
+    assert argv[argv.index("-c") + 1] == str(context)
 
 
 def test_ram_launch_respects_the_policy_reserve_and_budget(tmp_path):
-    inputs, spec, host, adapter, out, _ = gemma(tmp_path, "windows", [])
+    inputs, spec, host, adapter, out, indexed = gemma(tmp_path, "windows", [])
     host["runtime_facts"]["available_bytes"] = 4 << 30
-    with pytest.raises(ValueError, match="3.00 GiB headroom"):
+    with pytest.raises(ValueError, match="keeps 3.00 GiB free; available 4.00 GiB"):
         resolved(inputs, spec, adapter, out, "windows", reserve=3 << 30)
-    with pytest.raises(ValueError, match="budget 1.00"):
+    host["runtime_facts"]["available_bytes"] = None
+    with pytest.raises(ValueError, match="available unknown"):
+        resolved(inputs, spec, adapter, out, "windows", reserve=1)
+    with pytest.raises(ValueError, match="memory budget of 1.00 GiB"):
         resolved(inputs, spec, adapter, out, "windows", memory=1 << 30)
+    assert not indexed and list(out.iterdir()) == []
 
 
 def test_ram_launch_steps_an_unset_context_down_to_what_fits(tmp_path):
@@ -238,7 +261,5 @@ def test_gemma_header_accounts_shared_kv_and_sliding_windows():
         4096,
     )
     metadata = ram.facts([header])
-    fit = ram.admission(
-        metadata, context=8192, batch=512, gpu=False, available=16 << 30, budget=8 << 30, headroom=0
-    )
+    fit = ram.admission(metadata, context=8192, batch=512, weights=ram.FILE, budget=8 << 30)
     assert fit["kv_bytes"] == 168 << 20  # The native ordinary engine's F16 KV allocation.

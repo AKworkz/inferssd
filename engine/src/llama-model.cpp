@@ -5100,6 +5100,11 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         per_layer_tok_embd   = create_tensor(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"),    {n_embd_per_layer * n_layer, n_vocab}, 0);
                         per_layer_model_proj = create_tensor(tn(LLM_TENSOR_PER_LAYER_MODEL_PROJ, "weight", 0), {n_embd, n_embd_per_layer * n_layer}, 0);
                         per_layer_proj_norm  = create_tensor(tn(LLM_TENSOR_PER_LAYER_PROJ_NORM,  "weight", 0), {n_embd_per_layer}, 0);
+                        // The per-layer embedding table is a row lookup, one row a token: with the weights
+                        // mapped and not locked, it stays in the file and its rows are read as tokens use them.
+                        if (ml.use_mmap && !use_mlock && !ml.check_tensors) {
+                            ml.mark_ple_lazy(ml.require_weight(tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight").str().c_str()));
+                        }
                     }
 
                     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
@@ -8834,17 +8839,18 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
         bool is_default_buft = buft == ggml_backend_dev_buffer_type(dev);
 
         // A mapped buffer spans the whole file range of its tensors. Where a GGUF interleaves
-        // the dense tensors with routed experts that live outside this context, on the CPU or
-        // deferred to the SSD executor, as Muse's and the Qwen MoE GGUFs do, one enclosing Metal
-        // mmap would pin those experts too. Allocate the GPU tensors compactly instead;
-        // load_all_data copies only them, while the CPU expert tensors retain their original mmap.
+        // the dense tensors with tensors that live outside this context unpinned, routed experts
+        // on the CPU or deferred to the SSD executor (as Muse's and the Qwen MoE GGUFs do) or a
+        // lazily mapped per-layer embedding table (as Gemma 4's), one enclosing Metal mmap would
+        // pin those too. Allocate the GPU tensors compactly instead; load_all_data copies only
+        // them, while the tensors outside keep their original mmap.
 #if defined(__APPLE__)
         if (ml.use_mmap && use_mmap_buffer && buffer_from_host_ptr_supported && is_default_buft &&
                 ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU &&
                 std::strncmp(ggml_backend_dev_name(dev), "MTL", 3) == 0 &&
-                ml.mapping_range_encloses_experts(ctx)) {
+                ml.mapping_range_encloses_unpinned(ctx)) {
             buffer_from_host_ptr_supported = false;
-            LLAMA_LOG_INFO("%s: compact Metal allocation for %s: its mapped range would enclose experts held elsewhere\n",
+            LLAMA_LOG_INFO("%s: compact Metal allocation for %s: its mapped range would enclose tensors held elsewhere\n",
                     __func__, ggml_backend_buft_name(buft));
         }
 #endif

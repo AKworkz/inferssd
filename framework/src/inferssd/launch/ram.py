@@ -10,7 +10,8 @@ from inferssd.source import header
 
 ARCHITECTURE = "gemma4"
 WORKSPACE_BYTES = 1 << 30
-HEADROOM_BYTES = 2 << 30
+# How the engine holds the weights (see admission).
+FILE, COPIED, LOOKUPS_IN_FILE = "file", "copied", "lookups-in-file"
 
 
 def is_model(path: str) -> bool:
@@ -59,6 +60,8 @@ def facts(headers: Sequence[header.Header]) -> dict[str, object]:
         ),
         "tensor_bytes": sum(t.nbytes for t in tensors),
         "embedding_bytes": sum(t.nbytes for t in tensors if t.name == "token_embd.weight"),
+        # The per-layer embedding table, a row lookup of one row a token.
+        "ple_bytes": sum(t.nbytes for t in tensors if t.name == "per_layer_token_embd.weight"),
         # Shared tail layers reuse earlier KV storage. Sliding layers retain a window
         # plus the batch being processed, as llama_memory_iswa does.
         "kv_layers": [
@@ -78,6 +81,9 @@ def validate(raw: object) -> dict[str, object]:
     for key in ("model_bytes", "tensor_bytes", "embedding_bytes"):
         if type(raw.get(key)) is not int or raw[key] <= 0:
             raise ValueError("invalid RAM model fact: " + key)
+    ple = raw.get("ple_bytes")
+    if type(ple) is not int or not 0 <= ple < cast(int, raw["tensor_bytes"]):
+        raise ValueError("invalid RAM model fact: ple_bytes")
     layers = raw.get("kv_layers")
     if not isinstance(layers, list) or not layers:
         raise ValueError("invalid RAM model fact: kv_layers")
@@ -99,41 +105,55 @@ def admission(
     *,
     context: int,
     batch: int,
-    gpu: bool,
-    available: Optional[int],
+    weights: str,
     budget: int,
-    headroom: int,
+    available: Optional[int] = None,
+    reserve: int = 0,
 ) -> dict[str, object]:
-    """Fail closed unless the whole model and working buffers fit memory now."""
+    """Fail closed unless the whole model and working buffers fit memory.
+
+    This memory is all required, so it is refused only past the budget (the machine's physical
+    memory or a smaller configured one), as the engine refuses a required allocation only at a
+    real limit: the system makes room by compressing or paging other memory out. A runtime
+    policy that keeps RESERVE bytes free also needs that much available beside the model now.
+    """
     model = validate(raw)
-    if available is None:
-        raise ValueError("cannot verify RAM-only model fit: available physical memory is unknown")
-    # A CPU file mapping avoids the tied embedding copy. Ordinary GPU loading
-    # reads directly into buffers, avoiding a duplicate source mapping.
-    weights = (
-        cast(int, model["tensor_bytes"]) + cast(int, model["embedding_bytes"])
-        if gpu
-        else cast(int, model["model_bytes"])
-    )
+    tensors = cast(int, model["tensor_bytes"])
+    # FILE: the whole file mapping, locked. COPIED: the tensors read into a GPU backend's
+    # buffers, plus the tied output's own copy of the token embedding. LOOKUPS_IN_FILE (Apple
+    # silicon): every tensor but the per-layer embedding table, which stays in the file, unlocked,
+    # its rows read as tokens use them; the GPU's tensors, the tied output among them, are copied
+    # into a Metal buffer while the token embedding's CPU rows also stay in the file.
+    resident = {
+        FILE: cast(int, model["model_bytes"]),
+        COPIED: tensors + cast(int, model["embedding_bytes"]),
+        LOOKUPS_IN_FILE: tensors - cast(int, model["ple_bytes"]),
+    }[weights]
     kv = sum(
         ((min(context, window + batch) if window else context) + 255) // 256 * 256 * width
         for window, width in cast(list[list[int]], model["kv_layers"])
     )
-    required = weights + kv + WORKSPACE_BYTES
-    reserve = max(HEADROOM_BYTES, headroom)
-    if required > budget or required + reserve > available:
+    required = resident + kv + WORKSPACE_BYTES
+    if required > budget:
         raise ValueError(
-            f"RAM-only model needs {required / 2**30:.2f} GiB "
-            f"plus {reserve / 2**30:.2f} GiB headroom; "
-            f"available {available / 2**30:.2f} GiB, budget {budget / 2**30:.2f} GiB. "
+            f"RAM-only model needs {required / 2**30:.2f} GiB at context {context}, "
+            f"more than the memory budget of {budget / 2**30:.2f} GiB. "
+            "Reduce context; SSD offload is not enabled for this model."
+        )
+    if reserve and (available is None or required + reserve > available):
+        shown = "unknown" if available is None else f"{available / 2**30:.2f} GiB"
+        raise ValueError(
+            f"RAM-only model needs {required / 2**30:.2f} GiB at context {context} and the "
+            f"runtime policy keeps {reserve / 2**30:.2f} GiB free; available {shown}. "
             "Free memory or reduce context; SSD offload is not enabled for this model."
         )
     return {
-        "weights_bytes": weights,
+        "weights": weights,
+        "weights_bytes": resident,
         "kv_bytes": kv,
         "workspace_bytes": WORKSPACE_BYTES,
         "required_bytes": required,
-        "headroom_bytes": reserve,
+        "reserve_bytes": reserve,
         "available_bytes": available,
         "budget_bytes": budget,
     }

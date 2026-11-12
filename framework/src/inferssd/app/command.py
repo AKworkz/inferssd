@@ -9,11 +9,10 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from typing import cast
 
 from inferssd.app.hub import download, selection
 from inferssd.configuration.settings import host_platform
-from inferssd.launch import ram, typed_command
+from inferssd.launch import typed_command
 from inferssd.launch.resources import data_directory, installed_resources, read_resources
 from inferssd.launch.typed import LOOPBACK, connect_host, listen_host
 from inferssd.platform.captured_command import run_captured
@@ -130,11 +129,6 @@ def run(args: argparse.Namespace) -> int:
     else:
         model = args.model.expanduser().resolve(strict=True)
     policy = default_policy(state)
-    if ram.is_model(str(model)):
-        # Keep the RAM-only admission margin enforced while other applications run.
-        policy["host_reserve_bytes"] = max(
-            ram.HEADROOM_BYTES, cast(int, policy.get("host_reserve_bytes") or 0)
-        )
     # Keep the policy alongside launch receipts for reproducibility.
     policy_path.write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
     parser = argparse.ArgumentParser()

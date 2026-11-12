@@ -447,33 +447,44 @@ def _resolve(
         )
     planned: Optional[Planned] = None
     ram_fit: Optional[dict[str, object]] = None
+    # How the engine holds an ordinary model's weights (ram.admission). On Apple silicon the
+    # per-layer embedding table stays in the file unlocked, read by rows as tokens use it, and the
+    # GPU's tensors sit in a Metal buffer the GPU keeps resident; elsewhere the CPU maps and
+    # locks the whole file and other GPU backends read it into their own buffers.
+    weights = (
+        ram.LOOKUPS_IN_FILE if platform == "darwin" else ram.COPIED if gpu_backends else ram.FILE
+    )
     if ordinary:
         runtime = runtime_facts_from(s.value("runtime_facts"))
         configured_budget = cast(int, value.at("host.budget_mib").value) << 20
         facts = observed if observed is not None else s.value("model_facts", *paths)
-        # A context left unset steps down from CONTEXT until the model fits; one given must fit.
+        available = runtime.available_bytes
+        # A context left unset takes the largest step down from CONTEXT that fits the memory
+        # available now, else the smallest step; one given is kept. Either must be admitted.
         contexts = (
             [spec.context]
             if spec.context
             else list(range(CONTEXT, CONTEXT_STEP - 1, -CONTEXT_STEP))
         )
         for index, ram_context in enumerate(contexts):
+            last = index == len(contexts) - 1
             try:
                 ram_fit = ram.admission(
                     facts,
                     context=ram_context,
                     batch=spec.ubatch or BATCH,
-                    gpu=bool(gpu_backends),
-                    available=runtime.available_bytes,
+                    weights=weights,
                     budget=min(memory, configured_budget) if configured_budget else memory,
-                    headroom=max(reserve, cast(int, value.at("host.headroom_mib").value) << 20),
+                    available=available,
+                    reserve=reserve,
                 )
             except ValueError:
-                if index == len(contexts) - 1:
+                if last:
                     raise
                 continue
-            spec = replace(spec, context=ram_context)
-            break
+            if last or available is None or cast(int, ram_fit["required_bytes"]) <= available:
+                break
+        spec = replace(spec, context=ram_context)
         if (
             not gpu_backends
             and not threads.cpus
@@ -617,7 +628,7 @@ def _resolve(
                 literal(item, platform),
             ]
     command += [
-        "--no-mmap" if ordinary and gpu_backends else "--mmap",
+        "--no-mmap" if ordinary and weights == ram.COPIED else "--mmap",
         "--no-repack",
         "--fit",
         "off",
@@ -632,8 +643,8 @@ def _resolve(
         str(ubatch),
     ]
     if ordinary:
+        command += ["--mlock"] if weights != ram.LOOKUPS_IN_FILE else []
         command += [
-            "--mlock",
             "--cache-type-k",
             "f16",
             "--cache-type-v",
