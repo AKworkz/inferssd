@@ -61,8 +61,8 @@ class LaunchSpec:
     overrides: tuple[tuple[str, str], ...] = ()
     binary: Optional[str] = None
     artifact_directory: Optional[str] = None
-    # Unset sizes take CONTEXT and BATCH, or one pass per prompt where the
-    # strategy prefills that way: -b and -ub as large as the context.
+    # Unset sizes take CONTEXT and BATCH; with the strategy, one pass per
+    # prompt: -b and -ub as large as the context.
     context: Optional[int] = None
     batch: Optional[int] = None
     ubatch: Optional[int] = None

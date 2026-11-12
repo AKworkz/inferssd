@@ -94,7 +94,7 @@ def test_recorded_strategy_fills_what_the_user_left_unset(tmp_path):
     # unpinned threads, one left for the I/O thread.
     assert argv[argv.index("-t") : argv.index("-t") + 4] == ["-t", "61", "-tb", "60"]
     assert "-C" not in argv and argv[-2:] == ["--ctx-checkpoints", "1"]
-    # With the CUDA GPU a prompt is prefilled in one pass as large as the context.
+    # A prompt is prefilled in one pass as large as the context.
     assert argv[argv.index("-c") : argv.index("-c") + 6] == [
         "-c",
         "8192",
@@ -131,7 +131,7 @@ def test_recorded_strategy_fills_what_the_user_left_unset(tmp_path):
     assert any(note.startswith("prefill: the SSD sink for every pass") for note in receipt["notes"])
     assert receipt["chosen"]["threads"] == {"decode": 61, "batch": 60}
     assert receipt["chosen"]["server_args"] == ["--ctx-checkpoints", "1"]
-    assert receipt["chosen"]["one_pass"] is True
+    assert any(note.startswith("prefill: one pass a prompt") for note in receipt["notes"])
     assert (line["launch"]["context"], line["launch"]["batch"], line["launch"]["ubatch"]) == (
         8192,
         8192,

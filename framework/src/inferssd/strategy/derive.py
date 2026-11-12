@@ -3,8 +3,8 @@
 
 ``derive`` is a pure function of the machine characteristics, the model's
 header facts, the runtime facts and the platform. It chooses thread counts and
-CPU placement, placement cost priors, the host memory budget and margin, and,
-where the engine has a GPU expert tier, that a prompt is prefilled in one pass.
+CPU placement, placement cost priors, and the host memory budget and margin; a
+launch with a strategy prefills each prompt in one pass.
 The pass shape changes the computation, for speed; everything else keeps it
 bit-exact. Every prompt pass takes the engine's own route, the SSD sink, and the
 VRAM budget's behaviour stays as the engine has it.
@@ -78,8 +78,6 @@ class Strategy:
     server_args: tuple[str, ...]
     inputs: Inputs
     notes: tuple[str, ...]
-    # Prefill each prompt in one pass: -b and -ub as large as the context.
-    one_pass: bool = False
 
 
 def span(cpus: Sequence[int]) -> str:
@@ -644,7 +642,6 @@ def derive(
     if costs is not None:
         choices["place.costs"] = costs
 
-    one_pass = False
     # The CUDA tier's budget, where the engine has the tier. A GPU lane (Vulkan, Metal) takes
     # the default.
     if "CUDA" in engine_gpu_backends(runtime.gpu_backends, characteristics):
@@ -693,14 +690,13 @@ def derive(
             "prefill: the SSD sink for every pass; it reads only what the VRAM tier and the "
             "RAM cache do not hold"
         )
-        if device is None:
-            notes.append("prefill: passes of the launch's batch; no single profiled CUDA GPU")
-        else:
-            one_pass = True
-            notes.append(
-                "prefill: one pass a prompt, -b and -ub as large as the context; a pass reads "
-                "every expert it routes to once"
-            )
+    # A prompt in one pass, on every platform: a pass reads every expert it routes to once,
+    # whatever computes it. The engine reserves each prompt's own graph, a smaller one where that
+    # does not fit, and the expert caches give back what it needs.
+    notes.append(
+        "prefill: one pass a prompt, -b and -ub as large as the context; a pass reads every "
+        "expert it routes to once"
+    )
     if offered("host.budget_mib", platform) and runtime.memory_budget_bytes:
         mib = runtime.memory_budget_bytes >> 20
         if mib:
@@ -716,5 +712,4 @@ def derive(
         server_args=SERVER_ARGS,
         inputs=Inputs(hashlib.sha256(text.encode()).hexdigest(), model.paths, platform),
         notes=tuple(notes),
-        one_pass=one_pass,
     )

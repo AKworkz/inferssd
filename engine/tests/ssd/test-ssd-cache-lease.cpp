@@ -60,5 +60,30 @@ int main() {
         c.prefetch_done(1, c.generation, false);
         c.arena = nullptr; // the test's own buffer
     }
+    {
+        // A guard's shrink for room: a layer whose slots past its share are busy leaves the rest to the others' coldest
+        // idle slots, and every busy slot stays.
+        sink_cache c(configuration); c.partial_reclaim = true; c.stride = 3 * c.page_size;
+        for (int id = 1; id <= 2; ++id) {
+            sink_cache::layer l; l.id = id; l.begin = size_t(4 * (id - 1)); l.count = 4; c.layers.push_back(l);
+        }
+        c.entries.resize(8);
+        for (size_t i = 0; i < 8; ++i) {
+            auto & x = c.entries[i]; x.enabled = true; x.layer_index = i / 4; x.id = int32_t(i % 4); x.last_touch = i + 1;
+        }
+        c.stats.enabled_bytes = 8 * c.stride;
+        for (size_t i = 1; i < 4; ++i) { c.entries[i].leases = 1; } // layer 1: one idle slot of four
+        require(c.shrink_to(4, true, "test", false) == 4);
+        require(c.entries[1].enabled && c.entries[2].enabled && c.entries[3].enabled && !c.entries[0].enabled);
+        size_t second = 0;
+        for (size_t i = 4; i < 8; ++i) { second += c.entries[i].enabled; }
+        require(second == 1 && c.entries[7].enabled); // the coldest of layer 2 went, its warmest stayed
+        // a strict shrink (a phase boundary) keeps each layer to its share and refuses a busy one
+        c.enable_to(8);
+        c.entries[0].leases = 1;
+        bool refused = false;
+        try { c.shrink_to(4, false, "test", true); } catch (const std::runtime_error &) { refused = true; }
+        require(refused);
+    }
     ssd::platform::close_fd(fd); test_resources::remove_file(path); std::printf("CACHE_LEASE_PASS assertions=%d payload_allocated=0\n",checks); return 0;
 } catch (const std::exception & e) { std::fprintf(stderr,"CACHE_LEASE_FAIL: %s\n",e.what()); return 1; } }

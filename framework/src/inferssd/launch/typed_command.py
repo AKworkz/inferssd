@@ -87,14 +87,12 @@ def add_arguments(launch: argparse.ArgumentParser) -> None:
     launch.add_argument(
         "--batch",
         type=int,
-        help=f"-b (default: the context where the strategy prefills a prompt in one pass, "
-        f"else {BATCH})",
+        help=f"-b (default: the context with the launch strategy, else {BATCH})",
     )
     launch.add_argument(
         "--ubatch",
         type=int,
-        help=f"-ub (default: --batch where the strategy prefills a prompt in one pass, "
-        f"else {BATCH})",
+        help=f"-ub (default: --batch with the launch strategy, else {BATCH})",
     )
     launch.add_argument(
         "--threads", type=int, help="decode ggml threads, -t (1..256; default: the server's)"

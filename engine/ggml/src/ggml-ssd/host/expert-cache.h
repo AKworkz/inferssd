@@ -533,6 +533,29 @@ struct expert_cache {
         if (target >= before) { return before; }
         const uint64_t started = ggml_time_us();
         const uint64_t released_before = stats.released_bytes;
+        const auto idle = [](const entry & e) { return e.enabled && !e.leases && !e.reserved && !e.protected_now && !e.inflight; };
+        const auto give_back = [&](size_t index) {
+            entry & e = entries[index];
+            if (e.resident) {
+                if (arena && before_discard) { before_discard(before_discard_arg, index, 1); }
+                if (!arena || !ssd::platform::arena_discard(arena + index * stride, stride)) {
+                    const auto error = detail::cache_sys_error("CPU sink cache slot discard");
+                    release();
+                    throw error;
+                }
+                e.resident = false;
+                e.was_released = true;
+                stats.committed_bytes -= stride;
+                stats.released_bytes = add(stats.released_bytes, stride);
+            }
+            if (e.valid) {
+                e.valid = false;
+                stats.valid_bytes -= stride;
+                ++stats.evictions;
+            }
+            e.enabled = false;
+            stats.enabled_bytes -= stride;
+        };
         for (size_t layer_index = 0; layer_index < layers.size(); ++layer_index) {
             const auto & item = layers[layer_index];
             const size_t wanted = target / layers.size() + (layer_index < target % layers.size());
@@ -541,36 +564,25 @@ struct expert_cache {
             std::vector<size_t> candidates;
             candidates.reserve(item.count);
             for (size_t index = item.begin; index < item.begin + item.count; ++index) {
-                entry & e = entries[index];
-                if (!e.enabled) { continue; }
+                if (!entries[index].enabled) { continue; }
                 ++have;
-                if (!e.leases && !e.reserved && !e.protected_now && !e.inflight) { candidates.push_back(index); }
+                if (idle(entries[index])) { candidates.push_back(index); }
             }
             if (have <= wanted) { continue; }
             std::sort(candidates.begin(), candidates.end(), [&](size_t a, size_t b) { return colder(a, b); });
             const size_t count = std::min(have - wanted, candidates.size());
-            for (size_t offset = 0; offset < count; ++offset) {
-                entry & e = entries[candidates[offset]];
-                if (e.resident) {
-                    if (arena && before_discard) { before_discard(before_discard_arg, candidates[offset], 1); }
-                    if (!arena || !ssd::platform::arena_discard(arena + candidates[offset] * stride, stride)) {
-                        const auto error = detail::cache_sys_error("CPU sink cache slot discard");
-                        release();
-                        throw error;
-                    }
-                    e.resident = false;
-                    e.was_released = true;
-                    stats.committed_bytes -= stride;
-                    stats.released_bytes = add(stats.released_bytes, stride);
-                }
-                if (e.valid) {
-                    e.valid = false;
-                    stats.valid_bytes -= stride;
-                    ++stats.evictions;
-                }
-                e.enabled = false;
-                stats.enabled_bytes -= stride;
-            }
+            for (size_t offset = 0; offset < count; ++offset) { give_back(candidates[offset]); }
+        }
+        // For room (a guard's reclaim): what a layer could not give, its slots past its share busy (a run's leases, a
+        // read-ahead's reads into the slots of finished layers), the coldest idle slots of the others give, so that
+        // the shrink stops short only where every slot is busy. A request's prefill takes room as it goes, and a
+        // shrink that stopped short would leave its guard to drop the whole cache. enable_to evens the layers again.
+        size_t left = enabled_slots();
+        if (guard_reclaim && left > target) {
+            std::vector<size_t> others;
+            for (size_t index = 0; index < entries.size(); ++index) { if (idle(entries[index])) { others.push_back(index); } }
+            std::sort(others.begin(), others.end(), [&](size_t a, size_t b) { return colder(a, b); });
+            for (size_t k = 0; k < others.size() && left > target; ++k, --left) { give_back(others[k]); }
         }
         const size_t after = enabled_slots();
         if (strict && after != target) {

@@ -447,6 +447,13 @@ llama_context::llama_context(
         // grows with the context (decode) or is sized per request (actual-shape prefill).
         reserve_horizon_min = std::max<uint32_t>(1, std::min(cparams.n_ubatch, cparams.n_ctx));
         sched_reserve_n_ctx = reserve_horizon_bucket(1);
+        // Where each prompt reserves its own graph (actual-shape prefill), the context starts as a request leaves
+        // it (moe_prefill_phase_workspace): the graph for one token, the configured ubatch kept as the prompt graphs'
+        // bound. The expert caches then size themselves at load beside the decode graph, and every graph that runs
+        // takes its room when it is reserved (reserve_compute_graph), the load's passes and each prompt's alike.
+        // Reserved at the configured ubatch (8192 tokens with one pass a prompt), the graph left a Mac's RAM cache
+        // 15.5 GB at load instead of 23 GB.
+        if (cpu_prefill_actual_shape_enabled) { cparams.n_ubatch = 1; }
 
         sched_reserve();
 
