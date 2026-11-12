@@ -2151,16 +2151,26 @@ private:
                     add_checkpoint(slot, std::move(checkpoint));
                 }
             }
-            if (shared && prompt_cache) {
-                server_prompt prefix;
-                prefix.tokens = slot.prompt.tokens.clone();
-                prefix.tokens.keep_first(n);
-                SLT_INF(slot, "keeping the shared prompt prefix of %" PRId64 " tokens\n", n);
-                prompt_cache->save(prefix, false, ctx, slot.id, slot.ctx_seq_rm_type);
-                llama_ssd_host_note_memory_change(ctx);
-                prompt_cache->update();
+            if (shared) {
+                keep_shared_prefix(slot, n, false);
             }
         }
+    }
+
+    // Puts the first `n` prompt tokens of the slot, the prompt part other conversations share, in the prompt cache,
+    // where a conversation started later, or after a restart, finds it: with the sequence's current state (current,
+    // which must be the state after them) or with the earlier state a memory that can save one has after them.
+    void keep_shared_prefix(server_slot & slot, int64_t n, bool current) {
+        if (!prompt_cache) {
+            return;
+        }
+        server_prompt prefix;
+        prefix.tokens = slot.prompt.tokens.clone();
+        prefix.tokens.keep_first(n);
+        SLT_INF(slot, "keeping the shared prompt prefix of %" PRId64 " tokens\n", n);
+        prompt_cache->save(prefix, current, ctx, slot.id, slot.ctx_seq_rm_type);
+        llama_ssd_host_note_memory_change(ctx);
+        prompt_cache->update();
     }
 
     // Room for a new checkpoint of `bytes`, made before it is allocated: the oldest checkpoint goes when the slot
@@ -3157,30 +3167,22 @@ private:
 
                         slot.n_prompt_tokens_processed++;
 
-                        // process the last few tokens of the prompt separately in order to allow for a checkpoint to be created.
-                        // create checkpoints that many tokens before the end of the prompt:
-                        //  - 4 + n_ubatch
-                        //  - 4
-                        // ref: https://github.com/ggml-org/llama.cpp/pull/20288
-                        if (do_checkpoint) {
-                            static const int checkpoint_offsets[] = {4 + n_ubatch, 4};
-
-                            bool should_break = false;
-                            for (int offset : checkpoint_offsets) {
-                                const int n_last = std::min(n_batch, offset);
-                                if (slot.task->n_tokens() == slot.prompt.n_tokens() + n_last) {
-                                    should_break = true;
-                                    break;
-                                }
-                            }
-                            if (should_break) {
-                                break;
-                            }
+                        // A memory that can only be checkpointed between batches stops the batch at the places
+                        // checkpoint_decoded_prompt() keeps. Upstream also stops n_ubatch tokens earlier
+                        // (ggml-org/llama.cpp#20288), for a checkpoint that the end one replaces at once with
+                        // --ctx-checkpoints 1; each extra prompt batch streams the experts again.
+                        if (do_checkpoint && server_prompt_batch_stops(slot.prompt.n_tokens(), slot.task->n_tokens(),
+                                                                       slot.task->n_shared_prefix, n_batch)) {
+                            break;
                         }
                     }
 
                     // the number of tokens added to the batch for the current slot
                     const auto n_tokens_cur = batch.n_tokens - n_tokens_prev;
+
+                    // the batch starts at the end of the shared prefix, where the one before it stopped
+                    const bool at_shared = do_checkpoint && slot.task->n_shared_prefix >= 64 &&
+                        slot.prompt.n_tokens() - n_tokens_cur == slot.task->n_shared_prefix;
 
                     if (checkpoint_after_decode && n_tokens_cur > 0 && !has_mtmd) {
                         slot.prompt_batch.n0      = slot.prompt.n_tokens() - n_tokens_cur;
@@ -3203,8 +3205,8 @@ private:
                         slot.init_sampler();
                         SLT_INF(slot, "prompt processing done, n_tokens = %d, batch.n_tokens = %d\n", slot.prompt.n_tokens(), batch.n_tokens);
                     } else {
-                        if (slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch) {
-                            // near the end of the prompt
+                        if (at_shared || slot.task->n_tokens() < slot.prompt.n_tokens() + n_ubatch) {
+                            // after the shared prefix, or near the end of the prompt
                             do_checkpoint = do_checkpoint && true;
                         } else {
                             // only do non-end checkpoints if the "checkpoint every n tokens" option is set
@@ -3244,6 +3246,11 @@ private:
                     //       yet processed and therefore it is not part of the checkpoint.
                     if (do_checkpoint) {
                         create_checkpoint(slot, n_tokens_cur, pos_min, pos_max);
+                    }
+                    // The state is still the one after the shared prefix, computed by this task rather than reused
+                    // (the prompt cache holds those already); a later checkpoint may push its own out.
+                    if (at_shared && slot.n_prompt_tokens_cache < slot.task->n_shared_prefix && pos_min >= 0 && !has_mtmd) {
+                        keep_shared_prefix(slot, slot.task->n_shared_prefix, true);
                     }
                 }
 
