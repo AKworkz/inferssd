@@ -188,6 +188,13 @@ read as model files, and the next run removes those whose process has ended.
 When no such directory is given, or there is not enough room, the drive's section
 is recorded as failed with the reason.
 
+The test file is also used when every given file is already in the page cache,
+which is how a model looks right after its download on a Mac with memory to
+spare: the probe skips cached pages on macOS, since reading them would measure
+memory, and it finds nothing left to read. The file is written beside the model
+and needs the same 5 GiB free there; without that room the section is recorded
+as failed, and a later run measures the drive once the pages have been evicted.
+
 A drive is identified by its model and a digest of its serial number, or by
 its kernel name when it reports no serial (common for virtual disks). On Linux
 the file's device is followed through partitions and device-mapper or md
